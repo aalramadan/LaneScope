@@ -8,7 +8,7 @@ LaneScope is a bank conflict profiler for CUDA kernels. It records the address t
 
 ![LaneScope cutting a 32-way bank conflict to none as the swizzle widens, one bit at a time](docs/demo.gif)
 
-Nsight Compute tells you that a shared memory load takes 4,096 wavefronts where 128 would do. It does not tell you which threads collide or what to change. LaneScope lays the recorded lanes over the 32 banks and replays the addresses through the paddings and swizzles that fit the buffer. You get the winning layout as C++ code, with the wavefronts it saves.
+## Features
 
 - See each shared and global memory instruction lane by lane, next to its source line.
 - Get the counts that Nsight Compute reports. On an RTX 4060, LaneScope matches it on 210 of 210 calibration counts and on 596 of 600 counts of random access patterns.

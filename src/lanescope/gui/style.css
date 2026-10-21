@@ -681,6 +681,10 @@ figure.grid figcaption {
   font-size: 13px;
 }
 
+figure.grid figcaption strong {
+  flex: none;
+}
+
 figure.grid figcaption .count {
   color: var(--ink-2);
 }

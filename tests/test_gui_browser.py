@@ -351,3 +351,18 @@ def test_a_buffer_past_the_shared_window_is_refused_by_the_page_itself(page, fie
     assert page.locator("#buffer-size").input_value() == "4096"
     page.wait_for_timeout(200)
     assert (checks, messages) == ([], [])
+
+
+def test_grid_titles_stay_on_one_line_beside_a_long_count(browser, url):
+    page = browser.new_page(viewport={"width": 1440, "height": 900})
+    page.goto(f"{url}#trace=0/transpose.npz")
+    expect(page.locator("#suggestion-list li").first).to_be_visible()
+    page.locator('input[name="kind"][value="swizzle"]').check(force=True)
+    page.locator("#swizzle-bits").focus()
+    page.keyboard.press("Home")
+    caption = page.locator("figure.grid figcaption").nth(1)
+    expect(caption).to_contain_text("16 wavefronts, ideal 1, 15 bank conflicts")
+    title = caption.locator("strong").bounding_box()
+    assert title is not None
+    assert title["height"] < 20
+    page.close()

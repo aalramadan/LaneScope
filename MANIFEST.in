@@ -1,4 +1,4 @@
 include LICENSE requirements.txt
-recursive-include docs *.png
+recursive-include docs *.gif
 recursive-include scripts *.sh
 recursive-include tests *.py *.mjs *.json

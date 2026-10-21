@@ -89,7 +89,7 @@ tile[r][c ^ (r & 0x1f)]   // CuTe: Swizzle<5, 0, 5>
 
 ## Record your own kernels
 
-Recording needs an NVIDIA GPU with its driver. WSL2 works. Build with `-lineinfo` to get source lines.
+Recording needs an NVIDIA GPU whose driver supports CUDA 12.4 or later, plus `g++`. It runs on Linux and under WSL2. Build your program with `-lineinfo` to see source lines.
 
 ```bash
 lanescope record --out run1 -- ./my_app --size 4096
@@ -122,11 +122,20 @@ lanescope validate --out check --random 300 --seed 3
 3. The model counts wavefronts and sectors. Shared memory serves one 4-byte word per bank per cycle. Accesses of 8 and 16 bytes run in groups of 16 and 8 lanes. Loads merge these groups in the cases measured on the GPU. Global memory moves aligned 32-byte sectors.
 4. A layout change moves every recorded address inside the chosen buffer. The model then counts again.
 
+The swizzle notation follows CuTe. The wide-access rules for H100 and newer GPUs come from the threads of the NVIDIA developer forum on `LDS.128` wavefronts.
+
 ## Limitations
 
 - LaneScope covers shared and global loads and stores. It does not model `ldmatrix` or atomics. `cp.async` is not calibrated yet.
 - The rules come from an RTX 4060. For H100 and newer GPUs, LaneScope uses the counts that users posted on the NVIDIA forum.
 - Eleven of the 1,055 measured patterns still differ from Nsight Compute. All of them are wide loads with inactive lanes.
+
+## Troubleshooting
+
+- `Nsight Compute has no access to the GPU counters` means the driver keeps the performance counters closed. In the NVIDIA Control Panel of Windows, tick Enable Developer Settings in the Desktop menu. Then open Developer, Manage GPU Performance Counters, and allow access to all users. On Linux, set the `NVreg_RestrictProfilingToAdminUsers=0` option of the `nvidia` kernel module and reboot.
+- `missing CUDA tools` means the `gpu` extra is not installed. Run `pip install -e ".[gpu]"`.
+- `C++ compiler not found` means the recorder cannot be built. Run `sudo apt install g++`.
+- `cannot load the CUDA driver` means no GPU is visible. Recording and `validate` need one, while the GUI and the analysis commands run without it.
 
 ## Development
 

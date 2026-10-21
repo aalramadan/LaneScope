@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LaneScope</title>
+    <link rel="icon" href="/static/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/style.css" />
+    <script type="module" src="/static/app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <img src="/static/icon.svg" alt="" width="22" height="22" />
+        <span>LaneScope</span>
+      </div>
+      <label class="picker">
+        <span class="visually-hidden">Trace file</span>
+        <select id="trace-select" disabled></select>
+      </label>
+      <p id="kernel-info" class="kernel-info"></p>
+      <dl id="totals" class="totals"></dl>
+      <button id="theme-toggle" class="ghost-button" type="button" aria-label="Color theme">
+        <span id="theme-label">Theme: system</span>
+      </button>
+    </header>
+
+    <div id="banner" class="banner" role="alert" hidden></div>
+
+    <div id="empty-state" class="empty-state" hidden>
+      <h1>No trace files found</h1>
+      <p id="empty-roots"></p>
+      <p>
+        Start the page with <code>lanescope gui --demo</code> to explore the demo transpose, or record a
+        kernel with <code>lanescope record --out run1 -- ./my_app</code> and open the folder
+        <code>run1</code>.
+      </p>
+    </div>
+
+    <main id="layout" class="layout" hidden>
+      <div class="sidebar">
+        <section class="panel" aria-labelledby="instructions-title">
+          <header class="panel-head">
+            <h2 id="instructions-title">Memory instructions</h2>
+            <div class="segmented small" role="radiogroup" aria-label="Show instructions">
+              <label><input type="radio" name="filter" value="all" checked /><span>All</span></label>
+              <label><input type="radio" name="filter" value="shared" /><span>Shared</span></label>
+              <label><input type="radio" name="filter" value="global" /><span>Global</span></label>
+              <label><input type="radio" name="filter" value="excess" /><span>Excess</span></label>
+            </div>
+          </header>
+          <div class="panel-body">
+            <table class="instructions">
+              <thead>
+                <tr>
+                  <th scope="col" class="pc-col">PC</th>
+                  <th scope="col">Access</th>
+                  <th scope="col" class="num achieved-col">Achieved</th>
+                  <th scope="col" class="num excess-col">Excess</th>
+                </tr>
+              </thead>
+              <tbody id="instruction-rows"></tbody>
+            </table>
+            <p id="instruction-note" class="note"></p>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="source-title">
+          <header class="panel-head">
+            <h2 id="source-title">Source</h2>
+          </header>
+          <div class="panel-body">
+            <ol id="source" class="source"></ol>
+            <p id="source-note" class="note" hidden>
+              The trace holds no source lines. The import of a recording maps PCs to lines when nvdisasm is
+              installed and the kernel is built with <code>-lineinfo</code>.
+            </p>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel lanes" aria-labelledby="lanes-title">
+        <header class="panel-head">
+          <div>
+            <h2 id="lanes-title">Lanes</h2>
+            <p id="lanes-subtitle" class="subtitle"></p>
+          </div>
+          <dl id="access-stats" class="stats"></dl>
+        </header>
+        <div class="panel-body">
+          <div class="pattern-bar">
+            <div class="pattern-head">
+              <h3 id="patterns-title">Access patterns</h3>
+              <p id="pattern-detail" class="note"></p>
+            </div>
+            <div id="patterns" class="patterns" role="group" aria-labelledby="patterns-title"></div>
+          </div>
+          <div id="grids" class="grids"></div>
+          <div id="legend" class="legend"></div>
+          <details class="text-view">
+            <summary>Text view of this access</summary>
+            <pre id="text-view"></pre>
+          </details>
+        </div>
+      </section>
+
+      <section class="panel fix" aria-labelledby="fix-title">
+        <header class="panel-head">
+          <h2 id="fix-title">Try a fix</h2>
+        </header>
+        <div class="panel-body">
+          <p id="fix-note" class="note">Select a shared memory instruction to try a padding or a swizzle on its buffer.</p>
+          <form id="fix-form" class="fix-form" hidden>
+            <fieldset class="buffer">
+              <legend>Buffer</legend>
+              <label>Start <input id="buffer-start" inputmode="text" autocomplete="off" spellcheck="false" /></label>
+              <label>Bytes <input id="buffer-size" inputmode="numeric" autocomplete="off" spellcheck="false" /></label>
+              <button id="buffer-infer" class="ghost-button" type="button">From instruction</button>
+              <p id="buffer-note" class="note"></p>
+            </fieldset>
+
+            <div class="segmented" role="radiogroup" aria-label="Kind of change">
+              <label><input type="radio" name="kind" value="none" checked /><span>None</span></label>
+              <label><input type="radio" name="kind" value="padding" /><span>Padding</span></label>
+              <label><input type="radio" name="kind" value="swizzle" /><span>Swizzle</span></label>
+            </div>
+
+            <fieldset id="padding-controls" class="controls" hidden>
+              <legend class="visually-hidden">Padding</legend>
+              <label class="control">
+                <span>Row</span>
+                <select id="pad-row"></select>
+              </label>
+              <label class="control">
+                <span>Pad <output id="pad-bytes-value"></output></span>
+                <input id="pad-bytes" type="range" min="0" max="64" step="4" value="4" />
+              </label>
+            </fieldset>
+
+            <fieldset id="swizzle-controls" class="controls" hidden>
+              <legend class="visually-hidden">Swizzle</legend>
+              <label class="control">
+                <span>Bits <output id="swizzle-bits-value"></output></span>
+                <input id="swizzle-bits" type="range" min="1" max="5" step="1" value="3" />
+              </label>
+              <label class="control">
+                <span>Base <output id="swizzle-base-value"></output></span>
+                <input id="swizzle-base" type="range" min="0" max="7" step="1" value="2" />
+              </label>
+              <label class="control">
+                <span>Shift <output id="swizzle-shift-value"></output></span>
+                <input id="swizzle-shift" type="range" min="1" max="12" step="1" value="5" />
+              </label>
+              <div id="swizzle-bits-figure" class="bit-figure"></div>
+              <p class="note bit-key">
+                <span class="key source"></span>bits read <span class="key target"></span>bits flipped
+              </p>
+            </fieldset>
+          </form>
+
+          <section id="result" class="result" aria-live="polite" hidden></section>
+          <section id="code" class="code" hidden>
+            <h3>Code</h3>
+            <div id="code-forms"></div>
+          </section>
+          <section id="suggestions" class="suggestions" hidden>
+            <h3>Ranked fixes</h3>
+            <p id="suggestions-note" class="note"></p>
+            <ol id="suggestion-list" class="suggestion-list"></ol>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+  </body>
+</html>

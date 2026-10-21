@@ -1,0 +1,209 @@
+import dataclasses
+import functools
+import math
+from collections.abc import Sequence
+
+from lanescope.trace import WARP_SIZE, Kind, Trace, check_lanes
+
+BANKS = 32
+WORD_BYTES = 4
+WAVEFRONT_BYTES = BANKS * WORD_BYTES
+
+_ALL_LANES = tuple(range(WARP_SIZE))
+_HALVES = (tuple(range(0, 16)), tuple(range(16, 32)))
+_QUARTERS = tuple(tuple(range(start, start + 8)) for start in range(0, WARP_SIZE, 8))
+
+_FOURS = tuple(tuple(range(start, start + 4)) for start in range(0, WARP_SIZE, 4))
+
+_GROUPS = {1: (_ALL_LANES,), 2: (_ALL_LANES,), 4: (_ALL_LANES,), 8: _HALVES, 16: _QUARTERS}
+# The lanes inside which a load merges its groups into one.
+_MERGE_SPANS = {8: (_ALL_LANES,), 16: _HALVES}
+# The blocks of a merged span and the slots each block may take in its wavefront.
+_SLOT_LIMITS = {8: (_QUARTERS, 4), 16: (_FOURS, 2)}
+# A 16-byte load whose active lanes read one address fits one wavefront for the
+# whole warp up to this many slots.
+_BROADCAST_SLOTS = 8
+
+# Lane i pairs with lane i XOR 1 in the pattern a,a,b,b and with lane i XOR 2 in
+# the pattern a,b,a,b. Two paired lanes take one slot of a merged wavefront.
+_PAIR_DISTANCES = (1, 2)
+
+# The first compute capability measured to merge only full warps (H100 is sm_90).
+_FULL_WARP_MERGE_MAJOR = 9
+
+
+@dataclasses.dataclass(frozen=True)
+class Phase:
+    """One group of active lanes that the banks serve together."""
+
+    lanes: tuple[int, ...]
+    bank_words: tuple[tuple[int, ...], ...]
+
+    @property
+    def wavefronts(self) -> int:
+        """Return the most distinct words that one bank serves in this phase."""
+        return max(len(words) for words in self.bank_words)
+
+    @property
+    def worst_bank(self) -> int:
+        """Return the lowest bank that serves the most distinct words."""
+        counts = [len(words) for words in self.bank_words]
+        return counts.index(max(counts))
+
+
+@dataclasses.dataclass(frozen=True)
+class SharedAccess:
+    """Modeled wavefronts of one warp-level shared memory access."""
+
+    width: int
+    active: int
+    paired: bool
+    ideal: int
+    phases: tuple[Phase, ...]
+
+    @property
+    def wavefronts(self) -> int:
+        """Return the wavefronts of all phases."""
+        return sum(phase.wavefronts for phase in self.phases)
+
+    @property
+    def excessive(self) -> int:
+        """Return the wavefronts above the ideal, never below zero."""
+        return max(0, self.wavefronts - self.ideal)
+
+    @property
+    def conflicts(self) -> int:
+        """Return the bank conflicts, one for each wavefront after the first of a phase."""
+        return sum(phase.wavefronts - 1 for phase in self.phases)
+
+
+def analyze(
+    addresses: Sequence[int | None], width: int, *, store: bool = False, arch: str = ""
+) -> SharedAccess:
+    """Model one access from the byte offset of each lane, with None for inactive lanes.
+
+    The architecture, such as sm_89, decides how loads merge their groups. An
+    unknown one takes the rule measured on the RTX 4060.
+    """
+    check_lanes(addresses, width)
+    return _analyze(tuple(addresses), width, store, _full_warp_merge(arch))
+
+
+def analyze_row(trace: Trace, row: int) -> SharedAccess:
+    """Model one shared row of a trace with the rules of the GPU that recorded it."""
+    return analyze(
+        trace.lane_addresses(row),
+        int(trace.width[row]),
+        store=trace.kind[row] == Kind.STORE,
+        arch=str(trace.metadata.get("arch", "")),
+    )
+
+
+def words(address: int, width: int) -> range:
+    """Return the indices of the 4-byte words that one lane's access covers."""
+    return range(address // WORD_BYTES, (address + width - 1) // WORD_BYTES + 1)
+
+
+@functools.lru_cache(maxsize=1 << 16)
+def _analyze(
+    addresses: tuple[int | None, ...], width: int, store: bool, full_warp: bool
+) -> SharedAccess:
+    groups = _GROUPS[width]
+    paired = False
+    if not store and width in _MERGE_SPANS:
+        groups, paired = _merge(addresses, width, full_warp)
+    phases = []
+    for group in groups:
+        lanes = tuple(lane for lane in group if addresses[lane] is not None)
+        if lanes:
+            phases.append(_phase(addresses, lanes, width))
+    active = sum(address is not None for address in addresses)
+    # Nsight Compute counts the bytes of the active lanes, but never more
+    # wavefronts than the groups that the banks serve.
+    ideal = min(math.ceil(active * width / WAVEFRONT_BYTES), len(phases))
+    return SharedAccess(width, active, paired, ideal, tuple(phases))
+
+
+def _phase(addresses: tuple[int | None, ...], lanes: tuple[int, ...], width: int) -> Phase:
+    bank_words: list[set[int]] = [set() for _ in range(BANKS)]
+    for lane in lanes:
+        address = addresses[lane]
+        assert address is not None
+        for word in words(address, width):
+            bank_words[word % BANKS].add(word)
+    return Phase(lanes, tuple(tuple(sorted(found)) for found in bank_words))
+
+
+def _full_warp_merge(arch: str) -> bool:
+    digits = arch.removeprefix("sm_")[:2]
+    return digits.isdigit() and int(digits) // 10 >= _FULL_WARP_MERGE_MAJOR
+
+
+def _merge(
+    addresses: tuple[int | None, ...], width: int, full_warp: bool
+) -> tuple[tuple[tuple[int, ...], ...], bool]:
+    if full_warp:
+        return _merge_full_warp(addresses, width)
+    active = {address for address in addresses if address is not None}
+    if width == 16 and len(active) == 1 and _slots(addresses, _ALL_LANES) <= _BROADCAST_SLOTS:
+        return (_ALL_LANES,), True
+    spans = [span for span in _MERGE_SPANS[width] if _active(addresses, span)]
+    blocks, limit = _SLOT_LIMITS[width]
+    groups: list[tuple[int, ...]] = []
+    paired = False
+    for span in spans:
+        # A half-warp whose partner half is idle may use the slots of both.
+        alone = width == 16 and len(spans) == 1
+        if _fits(addresses, span, width) and (
+            alone or all(_slots(addresses, block) <= limit for block in blocks if block[0] in span)
+        ):
+            groups.append(span)
+            paired = True
+        else:
+            groups.extend(group for group in _GROUPS[width] if group[0] in span)
+    return tuple(groups), paired
+
+
+def _merge_full_warp(
+    addresses: tuple[int | None, ...], width: int
+) -> tuple[tuple[tuple[int, ...], ...], bool]:
+    if any(address is None for address in addresses) or not _pairs(addresses, _ALL_LANES):
+        return _GROUPS[width], False
+    groups: list[tuple[int, ...]] = []
+    for span in _MERGE_SPANS[width]:
+        if _fits(addresses, span, width):
+            groups.append(span)
+        else:
+            groups.extend(group for group in _GROUPS[width] if group[0] in span)
+    return tuple(groups), len(groups) < len(_GROUPS[width])
+
+
+def _active(addresses: tuple[int | None, ...], lanes: tuple[int, ...]) -> tuple[int, ...]:
+    return tuple(lane for lane in lanes if addresses[lane] is not None)
+
+
+def _fits(addresses: tuple[int | None, ...], lanes: tuple[int, ...], width: int) -> bool:
+    return _phase(addresses, _active(addresses, lanes), width).wavefronts == 1
+
+
+def _slots(addresses: tuple[int | None, ...], lanes: tuple[int, ...]) -> int:
+    slots = 0
+    for start in range(lanes[0], lanes[-1] + 1, 4):
+        a, b, c, d = addresses[start : start + 4]
+        # Within four lanes, the pairs at distance 1 and those at distance 2
+        # exclude each other, and the larger set saves the more slots.
+        pairs = max(_same(a, b) + _same(c, d), _same(a, c) + _same(b, d))
+        slots += sum(address is not None for address in (a, b, c, d)) - pairs
+    return slots
+
+
+def _same(first: int | None, second: int | None) -> int:
+    return int(first is not None and first == second)
+
+
+def _pairs(addresses: tuple[int | None, ...], lanes: tuple[int, ...]) -> bool:
+    active = [lane for lane in lanes if addresses[lane] is not None]
+    return bool(active) and any(
+        all(addresses[lane ^ distance] == addresses[lane] for lane in active)
+        for distance in _PAIR_DISTANCES
+    )

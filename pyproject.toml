@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lanescope"
+version = "0.4.0"
+description = "Lane-level explanations of the shared and global memory counters of CUDA kernels"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ali Al-Ramadan" }]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+gpu = [
+    "nvidia-cuda-nvrtc-cu12>=12.4",
+    "nvidia-cuda-nvcc-cu12>=12.4",
+    "nvidia-cuda-sanitizer-api-cu12>=12.4",
+    "nvidia-cuda-runtime-cu12>=12.4",
+    "nvidia-cuda-nvdisasm>=13.0",
+    "ncu-report>=2025.1",
+]
+mcp = ["mcp>=2.3"]
+
+[project.urls]
+Repository = "https://github.com/aalramadan/lanescope"
+
+[project.scripts]
+lanescope = "lanescope.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"lanescope.recorder" = ["*.h", "*.cu", "*.cpp"]
+"lanescope.gui" = ["*.html", "*.js", "*.css", "*.svg"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "D101", "D102", "D103"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]
+
+[tool.pyright]
+include = ["src", "tests"]
+extraPaths = ["src"]
+pythonVersion = "3.10"

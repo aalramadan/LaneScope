@@ -101,6 +101,21 @@ def test_install_refuses_an_archive_with_another_checksum(tmp_path, monkeypatch)
     assert list(cache.iterdir()) == []
 
 
+def test_install_refuses_a_python_without_the_archive_filter_before_downloading(
+    tmp_path, monkeypatch
+):
+    redist = tmp_path / "redist"
+    redist.mkdir()
+    make_redist(redist)
+    monkeypatch.setattr(installer, "_text", _local_text(redist))
+    monkeypatch.delattr(tarfile, "data_filter")
+    downloads = []
+    monkeypatch.setattr(installer, "_download", lambda *args: downloads.append(args))
+    with pytest.raises(ValueError, match="3.10.12, 3.11.4, 3.12"):
+        installer.install((12, 9), tmp_path / "cache", base_url(redist))
+    assert downloads == []
+
+
 def test_toolchain_finds_the_installed_ncu_in_the_cache_of_home(tmp_path, monkeypatch):
     redist = tmp_path / "redist"
     redist.mkdir()

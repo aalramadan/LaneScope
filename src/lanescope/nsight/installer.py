@@ -65,6 +65,13 @@ def install(
     target = folder / f"{PREFIX}{version}"
     found = None if replace else find_ncu(target)
     if found is None:
+        # The data filter of tarfile refuses absolute paths, links out of the folder, and
+        # device files. Python gained it in 3.10.12, 3.11.4, and 3.12.
+        if not hasattr(tarfile, "data_filter"):
+            raise ValueError(
+                "this Python cannot unpack archives safely; "
+                "use Python 3.10.12, 3.11.4, 3.12, or a later release"
+            )
         folder.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=folder, prefix=".download-") as scratch:
             package = pathlib.Path(scratch) / "archive.tar.xz"
@@ -132,8 +139,5 @@ def _download(url: str, path: pathlib.Path, digest: str) -> None:
 
 
 def _unpack(package: pathlib.Path, folder: pathlib.Path) -> None:
-    # The data filter refuses absolute paths, links out of the folder, and device files.
-    if not hasattr(tarfile, "data_filter"):
-        raise ValueError("this Python cannot unpack archives safely; use Python 3.10.12 or later")
     with tarfile.open(package, "r:xz") as archive_file:
         archive_file.extractall(folder, filter="data")

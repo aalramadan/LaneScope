@@ -256,6 +256,26 @@ def test_pairing_needs_a_full_warp_on_h100():
     assert (len(result.phases), result.wavefronts) == (4, 4)
 
 
+@pytest.mark.parametrize(
+    ("arch", "paired"),
+    [
+        ("sm_90", False),
+        ("sm_90a", False),
+        ("sm_100", False),
+        ("sm_103", False),
+        ("sm_120", False),
+        ("sm_121a", False),
+        ("sm_80", True),
+        ("sm_89", True),
+        ("synthetic", True),
+        ("", True),
+    ],
+)
+def test_every_architecture_from_h100_on_pairs_only_full_warps(arch, paired):
+    addresses = [16 * (lane // 8) if lane % 8 < 2 else None for lane in range(WARP_SIZE)]
+    assert shared_memory.analyze(addresses, 16, arch=arch).paired == paired
+
+
 def test_pairing_on_the_rtx_4060_allows_inactive_lanes():
     addresses = [16 * (lane // 8) if lane % 8 < 2 else None for lane in range(WARP_SIZE)]
     result = shared_memory.analyze(addresses, 16, arch="sm_89")

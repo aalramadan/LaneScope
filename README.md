@@ -131,12 +131,12 @@ $ lanescope explain triton/trace-0.npz
 kernel matmul_kernel (sm_89), 10496 warp-level accesses
 
 pc       line  space  kind  width  requests  unit        achieved  ideal excessive
-0x0b60     15  shared store    16       512  wavefronts      3584   2048      1536
-0x0b80     15  shared store    16       512  wavefronts      3584   2048      1536
+0x0b60     16  shared store    16       512  wavefronts      3584   2048      1536
+0x0b80     16  shared store    16       512  wavefronts      3584   2048      1536
 ...
 ```
 
-Line 15 of the example loads a tile of `a` into shared memory with `cp.async`. Each row of that tile is 64 bytes long. Each wavefront of the copy writes one row. The copy therefore takes 3,584 wavefronts against an ideal of 2,048. With `--block-k 64`, each wavefront fills a full 128-byte line. LaneScope then reports no excess for the kernel.
+Line 16 of the example loads a tile of `a` into shared memory with `cp.async`. Each row of that tile is 64 bytes long. Each wavefront of the copy writes one row. The copy therefore takes 3,584 wavefronts against an ideal of 2,048. With `--block-k 64`, each wavefront fills a full 128-byte line. LaneScope then reports no excess for the kernel.
 
 ### Use with Coding Agents
 
@@ -244,6 +244,7 @@ The model counts one 4-byte word per bank per cycle in shared memory and aligned
 | `missing CUDA tools` | The `gpu` extra is not installed | Run `pip install ".[gpu]"` |
 | `C++ compiler not found` | `g++` is missing | Run `sudo apt install g++` |
 | `cannot load the CUDA driver` | No GPU is visible | Recording and validation need a GPU. Analysis and the GUI do not |
+| `the CUDA tools are version 12.9, newer than the 12.8 that the driver supports` | The `gpu` extra installs the newest CUDA 12 tools, which are newer than the driver | Update the NVIDIA driver, or run `scripts/gpu_validate.sh`, which installs the CUDA tools of the driver's version and runs the check |
 | `Python.h: No such file or directory` | Triton compiles a helper against the Python headers | Run `sudo apt install python3-dev` |
 
 ## Development

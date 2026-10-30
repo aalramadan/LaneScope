@@ -1,6 +1,7 @@
 import dataclasses
 import functools
 import math
+import re
 from collections.abc import Sequence
 
 from lanescope.model import async_copy
@@ -304,8 +305,9 @@ def _phase(addresses: tuple[int | None, ...], lanes: tuple[int, ...], width: int
 
 
 def _full_warp_merge(arch: str) -> bool:
-    digits = arch.removeprefix("sm_")[:2]
-    return digits.isdigit() and int(digits) // 10 >= _FULL_WARP_MERGE_MAJOR
+    # The last digit of a name such as sm_89, sm_90a, or sm_120 is the minor version.
+    digits = re.match(r"sm_(\d+)", arch)
+    return digits is not None and int(digits[1]) // 10 >= _FULL_WARP_MERGE_MAJOR
 
 
 def _merge(

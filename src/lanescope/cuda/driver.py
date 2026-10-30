@@ -10,6 +10,12 @@ def version_text(version: int) -> str:
     return f"{version // 1000}.{version % 1000 // 10}"
 
 
+def _pointers(arguments: Sequence[ctypes._SimpleCData | ctypes.Array]) -> ctypes.Array:
+    return (ctypes.c_void_p * len(arguments))(
+        *[ctypes.cast(ctypes.byref(argument), ctypes.c_void_p) for argument in arguments]
+    )
+
+
 class DriverError(RuntimeError):
     """A driver call failed, or no CUDA driver is present."""
 
@@ -86,11 +92,34 @@ class Driver:
         arguments: Sequence[ctypes._SimpleCData | ctypes.Array],
     ) -> None:
         """Launch a kernel with its arguments and wait for it to finish."""
-        pointers = (ctypes.c_void_p * len(arguments))(
-            *[ctypes.cast(ctypes.byref(argument), ctypes.c_void_p) for argument in arguments]
-        )
-        self._call("cuLaunchKernel", function, *grid, *block, 0, None, pointers, None)
+        self._call("cuLaunchKernel", function, *grid, *block, 0, None, _pointers(arguments), None)
         self._call("cuCtxSynchronize")
+
+    def time_launches(
+        self,
+        function: ctypes.c_void_p,
+        grid: tuple[int, int, int],
+        block: tuple[int, int, int],
+        arguments: Sequence[ctypes._SimpleCData | ctypes.Array],
+        repeats: int,
+    ) -> float:
+        """Launch a kernel `repeats` times back to back and return the milliseconds per launch."""
+        pointers = _pointers(arguments)
+        start, stop = ctypes.c_void_p(), ctypes.c_void_p()
+        self._call("cuEventCreate", ctypes.byref(start), 0)
+        self._call("cuEventCreate", ctypes.byref(stop), 0)
+        try:
+            self._call("cuEventRecord", start, None)
+            for _ in range(repeats):
+                self._call("cuLaunchKernel", function, *grid, *block, 0, None, pointers, None)
+            self._call("cuEventRecord", stop, None)
+            self._call("cuEventSynchronize", stop)
+            elapsed = ctypes.c_float()
+            self._call("cuEventElapsedTime", ctypes.byref(elapsed), start, stop)
+        finally:
+            self._call("cuEventDestroy_v2", start)
+            self._call("cuEventDestroy_v2", stop)
+        return elapsed.value / repeats
 
     def close(self) -> None:
         """Release the primary context."""

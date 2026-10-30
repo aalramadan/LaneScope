@@ -425,3 +425,8 @@ def test_import_reads_lines_with_the_next_nvdisasm_when_one_fails(tmp_path, monk
     monkeypatch.setattr(cli_module, "find", lambda: tools)
     assert main(["import", str(tmp_path)]) == 0
     assert Trace.load(tmp_path / "trace-0.npz").metadata["lines"] == {"0x10": 3}
+
+
+def test_bench_time_rejects_a_matrix_size_that_is_not_a_multiple_of_32(tmp_path, capsys):
+    assert main(["bench", "time", "--cubin", str(tmp_path / "bench.cubin"), "--size", "100"]) == 2
+    assert "multiple of 32" in capsys.readouterr().err

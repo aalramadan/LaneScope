@@ -279,6 +279,44 @@ def compile_kernels(
     return program.cubin
 
 
+@dataclasses.dataclass(frozen=True)
+class TransposeTime:
+    """The time of one transpose kernel on an n by n float matrix."""
+
+    kernel: str
+    milliseconds: float
+    size: int
+
+    @property
+    def gigabytes_per_second(self) -> float:
+        """The bandwidth the kernel reaches, counting one read and one write of each element."""
+        return 2 * 4 * self.size * self.size / (self.milliseconds * 1e-3) / 1e9
+
+
+def time_transposes(cubin_path: pathlib.Path, size: int, repeats: int) -> list[TransposeTime]:
+    """Time the three transposes on the local GPU, after one launch of each to warm up."""
+    if size <= 0 or size % 32:
+        raise ValueError(f"the matrix size {size} must be a positive multiple of 32")
+    driver = Driver()
+    module = driver.load(cubin_path.read_bytes())
+    matrix_bytes = 4 * size * size
+    source, target = driver.alloc(matrix_bytes), driver.alloc(matrix_bytes)
+    grid, block = (size // 32, size // 32, 1), (32, 8, 1)
+    arguments = [ctypes.c_uint64(target), ctypes.c_uint64(source), ctypes.c_int32(size)]
+    times = []
+    try:
+        for name in TRANSPOSE_KERNELS:
+            function = driver.function(module, name)
+            driver.launch(function, grid, block, arguments)
+            milliseconds = driver.time_launches(function, grid, block, arguments, repeats)
+            times.append(TransposeTime(name, milliseconds, size))
+    finally:
+        driver.free(source)
+        driver.free(target)
+        driver.close()
+    return times
+
+
 def run(cubin_path: pathlib.Path, random_count: int = 0, seed: int = 0) -> None:
     """Run every case and then the three transposes, one launch each, in a fixed order."""
     driver = Driver()

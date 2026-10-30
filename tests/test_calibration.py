@@ -5,6 +5,7 @@ import subprocess
 import pytest
 
 from lanescope.cuda import toolchain
+from lanescope.cuda.driver import Driver, DriverError
 from lanescope.model import shared_memory
 from lanescope.nsight import calibration
 from lanescope.trace import Kind, Space
@@ -132,3 +133,33 @@ def test_random_cases_fit_the_calibration_kernels():
 
 def test_launches_put_the_random_cases_after_the_fixed_ones():
     assert calibration.launches(3, 4) == calibration.cases() + calibration.random_cases(3, 4)
+
+
+def _has_gpu() -> bool:
+    try:
+        Driver().close()
+    except DriverError:
+        return False
+    return True
+
+
+def test_transpose_bandwidth_counts_one_read_and_one_write_per_element():
+    time = calibration.TransposeTime("transpose_tile", milliseconds=1.0, size=1024)
+    assert time.gigabytes_per_second == pytest.approx(2 * 4 * 1024 * 1024 / 1e-3 / 1e9)
+
+
+def test_timing_rejects_a_matrix_size_that_is_not_a_multiple_of_32(tmp_path):
+    with pytest.raises(ValueError, match="multiple of 32"):
+        calibration.time_transposes(tmp_path / "bench.cubin", size=100, repeats=1)
+
+
+@pytest.mark.skipif(TOOLS.nvrtc is None or not _has_gpu(), reason="NVRTC and a GPU are needed")
+def test_each_transpose_gets_a_positive_time_on_the_local_gpu(tmp_path):
+    driver = Driver()
+    arch = driver.arch()
+    driver.close()
+    cubin = tmp_path / "bench.cubin"
+    cubin.write_bytes(calibration.compile_kernels(arch, TOOLS))
+    times = calibration.time_transposes(cubin, size=64, repeats=2)
+    assert [time.kernel for time in times] == list(calibration.TRANSPOSE_KERNELS)
+    assert all(time.milliseconds > 0 for time in times)

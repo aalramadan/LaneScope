@@ -1,12 +1,11 @@
 # LaneScope
 
+[![Tests](https://github.com/aalramadan/lanescope/actions/workflows/tests.yml/badge.svg)](https://github.com/aalramadan/lanescope/actions/workflows/tests.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![License MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Checked on an RTX 4060](https://img.shields.io/badge/checked%20on-RTX%204060-76b900)](#accuracy)
 
 LaneScope is a profiler for shared-memory bank conflicts in CUDA kernels. It records the memory address of every thread in each warp, shows which threads collide in the same bank, and predicts the padding or XOR swizzle that removes each conflict before any code changes.
-
-Shared memory is divided into 32 banks that each serve one 4-byte word per cycle. Threads of a warp that access different words in the same bank are served one after another. A conflict among all 32 threads turns one access into 32.
 
 ## Installation
 
@@ -20,7 +19,7 @@ pip install .            # analysis, command line, and GUI
 pip install ".[gpu]"     # recording on an NVIDIA GPU
 ```
 
-Recording needs the setup listed under [Compatibility](#compatibility). On Ubuntu, `sudo apt install python3-venv g++` installs the two system packages.
+Recording needs the setup listed under [Requirements](#requirements). On Ubuntu, `sudo apt install python3-venv g++` installs the two system packages.
 
 ## Quick Start
 
@@ -146,7 +145,23 @@ lanescope get-ncu                                      # installs Nsight Compute
 lanescope validate --out check --random 300 --seed 3
 ```
 
-## Compatibility
+## Performance
+
+`lanescope bench time` times the plain, padded, and swizzled transpose on the local GPU. On the RTX 4060 Laptop GPU, it gives the following.
+
+```console
+$ lanescope bench build --arch sm_89 --out bench.cubin
+$ lanescope bench time --cubin bench.cubin
+8192 x 8192 float matrix, 50 launches per kernel
+kernel                     ms     GB/s  speedup
+transpose_tile          2.618    205.1    1.00x
+transpose_padded        2.403    223.4    1.09x
+transpose_swizzled      2.273    236.2    1.15x
+```
+
+The swizzled kernel runs 1.15 times faster than the plain one in each of three runs. The padded kernel varies from 1.01 to 1.12 times between runs.
+
+## Requirements
 
 | Component | Requirement |
 |---|---|

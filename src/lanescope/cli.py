@@ -137,6 +137,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     _random_options(running)
     running.set_defaults(run=_bench_run)
+    timing = steps.add_parser("time", help="time the plain, padded, and swizzled transpose")
+    timing.add_argument(
+        "--cubin", type=pathlib.Path, required=True, help="kernels for this GPU from bench build"
+    )
+    timing.add_argument(
+        "--size", type=_size, default=8192, help="rows and columns of the matrix, a multiple of 32"
+    )
+    timing.add_argument("--repeats", type=_size, default=50, help="launches timed per kernel")
+    timing.set_defaults(run=_bench_time)
 
     check = commands.add_parser(
         "validate", help="compare LaneScope with Nsight Compute on the local GPU"
@@ -335,6 +344,20 @@ def _bench_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bench_time(args: argparse.Namespace) -> int:
+    times = calibration.time_transposes(args.cubin, args.size, args.repeats)
+    baseline = times[0].milliseconds
+    print(f"{args.size} x {args.size} float matrix, {args.repeats} launches per kernel")
+    print(f"{'kernel':20} {'ms':>8} {'GB/s':>8} {'speedup':>8}")
+    for time in times:
+        speedup = f"{baseline / time.milliseconds:.2f}x"
+        print(
+            f"{time.kernel:20} {time.milliseconds:8.3f} "
+            f"{time.gigabytes_per_second:8.1f} {speedup:>8}"
+        )
+    return 0
+
+
 def _validate(args: argparse.Namespace) -> int:
     summary = validate(args.out, args.arch, random_count=args.random, seed=args.seed)
     print(summary.read_text())
@@ -462,6 +485,10 @@ def _port(text: str) -> int:
 
 def _count(text: str) -> int:
     return _integer(text, 0, math.inf, "expected a count of zero or more")
+
+
+def _size(text: str) -> int:
+    return _integer(text, 1, math.inf, "expected a count of one or more")
 
 
 def _capacity(text: str) -> int:

@@ -36,7 +36,7 @@ The command serves the GUI at http://localhost:8765 with three demo kernels. The
 | Feature | Description |
 |---|---|
 | Lane view | Shows each shared and global memory instruction lane by lane, beside its source line |
-| Hardware counts | Reports the wavefronts and sectors that Nsight Compute reports |
+| Hardware counts | Reports the wavefronts and sectors that Nsight Compute reports, for loads, stores, `ldmatrix`, and `cp.async` |
 | Layout search | Ranks the paddings and XOR swizzles of each buffer by the wavefronts each one removes |
 | Code output | Writes the chosen layout as a byte offset, an element index, a 2D array index, or a CuTe `Swizzle<B, M, S>` |
 | No rebuild | Records any CUDA program through a Compute Sanitizer tool, with no change to its build |
@@ -130,15 +130,18 @@ The command serves the analyses over MCP on standard input and output. An MCP cl
 
 ## Accuracy
 
-LaneScope computes its counts from the recorded addresses with a model of the hardware. The model is validated against Nsight Compute 2026.3 on an NVIDIA GeForce RTX 4060 Laptop GPU (sm_89).
+LaneScope computes its counts from the recorded addresses with a model of the hardware. The model is validated against Nsight Compute 2026.3 on an NVIDIA GeForce RTX 4060 Laptop GPU (sm_89). One run of the commands below gives the following counts.
 
 | Test | Counts equal to Nsight Compute |
 |---|---|
-| 60 calibration launches | 210 of 210 |
-| 300 random access patterns, kept out of the fit | 596 of 600 |
+| 57 calibration launches of loads and stores | 114 of 114 |
+| 52 calibration launches of `ldmatrix` and `cp.async` | 136 of 144 |
+| 300 random loads and stores, kept out of the fit | 596 of 600 |
+| 300 random `ldmatrix` and `cp.async` patterns, kept out of the fit | 790 of 866 |
+| Plain, padded, and swizzled transpose | 96 of 96 |
 | Padded and swizzled transpose, predicted from the plain one | 4 of 4 |
 
-The test suite checks the model against all 1,055 patterns measured on that GPU, stored in `tests/data/rtx4060_counts.json`. The same comparison runs on any supported GPU.
+Every count of `ldmatrix` matches. Each miss of the `ldmatrix` and `cp.async` launches comes from 16-byte `cp.async`, as [Limitations](#limitations) describes. The test suite checks the model against every pattern measured on that GPU, 1,055 loads and stores in `tests/data/rtx4060_counts.json` and 637 `ldmatrix` and `cp.async` patterns in `tests/data/rtx4060_instruction_counts.json`. The same comparison runs on any supported GPU.
 
 ```bash
 lanescope get-ncu                                      # installs Nsight Compute for the local driver
@@ -184,13 +187,15 @@ The swizzled kernel runs 1.15 times faster than the plain one in each of three r
 | 6 | `gui/`, `cli.py`, `mcp_server.py` | Show the results in the browser, in the terminal, and to coding agents |
 | 7 | `nsight/` | Validates the model against Nsight Compute |
 
-The model counts one 4-byte word per bank per cycle in shared memory and aligned 32-byte sectors in global memory. Accesses of 8 and 16 bytes follow rules measured on the GPU. All steps are deterministic and run locally.
+The model counts one 4-byte word per bank per cycle in shared memory and aligned 32-byte sectors in global memory. Accesses of 8 and 16 bytes, `ldmatrix`, and `cp.async` follow rules measured on the GPU. All steps are deterministic and run locally.
 
 ## Limitations
 
-- LaneScope models shared and global loads and stores. It does not model `ldmatrix` or atomic operations. Its model of `cp.async` is not calibrated.
-- The rules are calibrated on one GPU, the RTX 4060.
-- Eleven of the 1,055 measured patterns differ from Nsight Compute. All eleven are wide loads with inactive lanes.
+- LaneScope models shared and global loads and stores, `ldmatrix`, and `cp.async`. It does not model atomic operations.
+- The rules are calibrated on one GPU, the RTX 4060. LaneScope counts `stmatrix` with the rule of `ldmatrix`. That rule is not yet tested on sm_90 or newer, the only GPUs that run `stmatrix`.
+- Eleven of the 1,055 measured loads and stores differ from Nsight Compute. All eleven are wide loads with inactive lanes.
+- The model overcounts the shared-memory wavefronts of some 16-byte `cp.async` copies, such as 32 contiguous rows that start 16 bytes past a 128-byte boundary. LaneScope reports 32 wavefronts for that copy, compared with 12 from Nsight Compute. In the run above, the wavefronts match in 23 of the 42 launches of 16-byte `cp.async`.
+- Nsight Compute reports global sectors for 16-byte `cp.async` that follow the shared-memory addresses, such as one sector when every lane writes the same row. LaneScope counts the sectors of the global addresses.
 
 ## Troubleshooting
 

@@ -158,7 +158,7 @@ def import_recording(
     source lines of its kernel.
     """
     paths = []
-    modules: dict[int, dict[str, line_info.FunctionLines]] = {}
+    modules: dict[int, tuple[dict[str, line_info.FunctionLines], dict[str, dict[int, str]]]] = {}
     for info_path in launch_files(out_dir):
         info, records = load_launch(info_path)
         trace = to_trace(info, records)
@@ -175,7 +175,7 @@ def _kernel_lines(
     out_dir: pathlib.Path,
     info: dict,
     disassemblers: Sequence[pathlib.Path],
-    modules: dict[int, dict[str, line_info.FunctionLines]],
+    modules: dict[int, tuple[dict[str, line_info.FunctionLines], dict[str, dict[int, str]]]],
 ) -> dict:
     module = info.get("module")
     cubin = out_dir / f"module-{module}.cubin"
@@ -184,8 +184,14 @@ def _kernel_lines(
     if module not in modules:
         # A module that nvdisasm cannot read leaves its traces without lines.
         try:
-            modules[module] = line_info.module_lines(disassemblers, cubin)
+            listing = line_info.module_listing(disassemblers, cubin)
+            modules[module] = (line_info.parse(listing), line_info.opcodes(listing))
         except ValueError as error:
             warnings.warn(f"{error}. Its traces carry no source lines.", stacklevel=2)
-            modules[module] = {}
-    return line_info.metadata(modules[module].get(str(info.get("kernel", "")), {}))
+            modules[module] = ({}, {})
+    kernel = str(info.get("kernel", ""))
+    lines, codes = modules[module]
+    data = line_info.metadata(lines.get(kernel, {}))
+    if found := codes.get(kernel):
+        data["opcodes"] = {f"{offset:#x}": opcode for offset, opcode in found.items()}
+    return data

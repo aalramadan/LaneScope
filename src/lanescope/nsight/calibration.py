@@ -14,6 +14,8 @@ GLOBAL_BYTES = 1 << 20
 ALL = 0xFFFFFFFF
 TRANSPOSE_SIZE = 64
 TRANSPOSE_KERNELS = ("transpose_tile", "transpose_padded", "transpose_swizzled")
+LDMATRIX_KERNELS = ("ldmatrix_x1", "ldmatrix_x2", "ldmatrix_x4", "ldmatrix_x4_trans")
+CP_ASYNC_WIDTHS = (4, 8, 16)
 # The global buffer starts at zero, and the store cases write lane numbers below 64.
 # No loaded word, nor the XOR of the words of one load, can therefore equal the sink.
 SINK = 0xFFFFFFFF
@@ -29,10 +31,14 @@ class Case:
     width: int
     offsets: tuple[int, ...]
     mask: int = ALL
+    # The kernel of an ldmatrix or cp.async case, each of which runs an instruction of its own.
+    instruction: str = ""
 
     @property
     def kernel(self) -> str:
         """Return the name of the kernel that runs this case."""
+        if self.instruction:
+            return self.instruction
         return f"{self.space.name.lower()}_{self.kind.name.lower()}_{self.width}"
 
     def addresses(self) -> tuple[int | None, ...]:
@@ -180,9 +186,59 @@ def cases() -> list[Case]:
     return found
 
 
+def instruction_cases() -> list[Case]:
+    """Return every ldmatrix and cp.async case in launch order."""
+    found = []
+    for kernel, kind, width in _instruction_kernels():
+        stem = kernel.replace("_", "-")
+        found += [
+            Case(f"{stem}-{pattern}", Space.SHARED, kind, width, offsets, instruction=kernel)
+            for pattern, offsets in _instruction_patterns(width).items()
+        ]
+    return found
+
+
+def _instruction_kernels() -> list[tuple[str, Kind, int]]:
+    # ldmatrix gives each lane the address of one 16-byte row, and cp.async writes shared memory.
+    found = [(kernel, Kind.LOAD, 16) for kernel in LDMATRIX_KERNELS]
+    return found + [(f"cp_async_{width}", Kind.STORE, width) for width in CP_ASYNC_WIDTHS]
+
+
+def _instruction_patterns(width: int) -> dict[str, tuple[int, ...]]:
+    patterns = {
+        "contiguous": _lanes(lambda lane: width * lane),
+        "stride-128": _lanes(lambda lane: 128 * lane),
+        "stride-64": _lanes(lambda lane: 64 * lane),
+        "stride-32": _lanes(lambda lane: 32 * lane),
+        "swizzled": _lanes(lambda lane: 128 * lane + 16 * (lane % 8)),
+        "same-address": (0,) * WARP_SIZE,
+    }
+    if width == 16:
+        patterns["stride-256"] = _lanes(lambda lane: 256 * lane)
+        patterns["pairs"] = _lanes(lambda lane: 16 * (lane // 2))
+    return patterns
+
+
+def launch_groups(random_count: int = 0, seed: int = 0) -> list[tuple[str, list[Case]]]:
+    """Return the cases of a calibration run in launch order, as groups with a description each."""
+    groups = [
+        ("calibration launches", cases()),
+        ("ldmatrix and cp.async launches", instruction_cases()),
+    ]
+    if random_count:
+        groups += [
+            (f"random lane patterns of seed {seed}", random_cases(random_count, seed)),
+            (
+                f"random ldmatrix and cp.async patterns of seed {seed}",
+                random_instruction_cases(random_count, seed),
+            ),
+        ]
+    return groups
+
+
 def launches(random_count: int = 0, seed: int = 0) -> list[Case]:
     """Return the cases of a calibration run, the fixed ones first and then the random ones."""
-    return cases() + random_cases(random_count, seed)
+    return [case for _, group in launch_groups(random_count, seed) for case in group]
 
 
 def random_cases(count: int, seed: int) -> list[Case]:
@@ -202,6 +258,20 @@ def random_cases(count: int, seed: int) -> list[Case]:
         name = f"random-{index}-{space.name.lower()}-{kind.name.lower()}-{width}"
         offsets = tuple(unit * width for unit in units)
         found.append(Case(name, space, kind, width, offsets, _random_mask(rng)))
+    return found
+
+
+def random_instruction_cases(count: int, seed: int) -> list[Case]:
+    """Return `count` random ldmatrix and cp.async lane patterns, the same for one seed."""
+    # A stream of its own leaves the measured random cases of the other kernels as they are.
+    rng = random.Random(f"instructions-{seed}")
+    kernels = _instruction_kernels()
+    found = []
+    for index in range(count):
+        kernel, kind, width = rng.choice(kernels)
+        offsets = tuple(unit * width for unit in _random_units(rng, SHARED_BYTES // width))
+        name = f"random-{index}-{kernel.replace('_', '-')}"
+        found.append(Case(name, Space.SHARED, kind, width, offsets, instruction=kernel))
     return found
 
 
@@ -251,6 +321,8 @@ def kernel_source() -> str:
     """Return the CUDA source of the kernels that the cases and the transposes run."""
     shapes = sorted({(case.space, case.kind, case.width) for case in cases()})
     kernels = [_access_kernel(space, kind, width) for space, kind, width in shapes]
+    kernels += [_ldmatrix_kernel(name) for name in LDMATRIX_KERNELS]
+    kernels += [_cp_async_kernel(width) for width in CP_ASYNC_WIDTHS]
     return "\n".join([_PRELUDE, *kernels, _TRANSPOSES])
 
 
@@ -402,6 +474,46 @@ extern "C" __global__ void {space.name.lower()}_{kind.name.lower()}_{width}(
         {asm}
         {keep}
     }}
+}}
+"""
+
+
+def _ldmatrix_kernel(name: str) -> str:
+    _, shape, *transpose = name.split("_")
+    count = int(shape[1:])
+    names = ["a", "b", "c", "d"][:count]
+    qualifiers = ".".join(["m8n8", shape, *transpose])
+    registers = ", ".join(f"%{i}" for i in range(count))
+    outputs = ", ".join(f'"=r"({n})' for n in names)
+    # ldmatrix needs every lane of the warp, so the kernel takes no mask.
+    return f"""
+extern "C" __global__ void {name}(
+    const __grid_constant__ LaneOffsets offsets, unsigned mask, unsigned sink,
+    unsigned char* buffer) {{
+    __shared__ __align__(128) unsigned char smem[SHARED_BYTES];
+    const unsigned address =
+        static_cast<unsigned>(__cvta_generic_to_shared(smem + offsets.value[threadIdx.x]));
+    unsigned {", ".join(names)};
+    asm volatile("ldmatrix.sync.aligned.{qualifiers}.shared.b16 {{{registers}}}, [%{count}];"
+                 : {outputs} : "r"(address) : "memory");
+    if (({" ^ ".join(names)}) == sink) asm volatile("trap;");
+}}
+"""
+
+
+def _cp_async_kernel(width: int) -> str:
+    # cp.async.cg, which bypasses L1, copies 16 bytes only.
+    cache = "cg" if width == 16 else "ca"
+    return f"""
+extern "C" __global__ void cp_async_{width}(
+    const __grid_constant__ LaneOffsets offsets, unsigned mask, unsigned sink,
+    unsigned char* buffer) {{
+    __shared__ __align__(128) unsigned char smem[SHARED_BYTES];
+    const unsigned address =
+        static_cast<unsigned>(__cvta_generic_to_shared(smem + offsets.value[threadIdx.x]));
+    asm volatile("cp.async.{cache}.shared.global [%0], [%1], {width};"
+                 :: "r"(address), "l"(buffer + {width} * threadIdx.x) : "memory");
+    asm volatile("cp.async.wait_all;" ::: "memory");
 }}
 """
 

@@ -94,3 +94,12 @@ extern "C" __device__ __noinline__ PatchResult LaneScopeMemcpyAsync(
     }
     return record(userdata, pc, dst, accessSize, kShared, kStore);
 }
+
+// ldmatrix and stmatrix give each lane the offset of one 16-byte row in the shared window.
+// The SASS opcode of the instruction tells how many 8x8 matrices the warp moves.
+extern "C" __device__ __noinline__ PatchResult LaneScopeMatrixAccess(
+    void* userdata, u64 pc, u32 address, u32 accessSize, u32 flags, u32 /*count*/,
+    const void* data) {
+    const u8 kind = kind_of(flags, data != nullptr);
+    return record(userdata, pc, address, accessSize, kShared, kind);
+}

@@ -21,6 +21,16 @@ OPCODE_OF = {
     (Space.GLOBAL, Kind.STORE): "STG",
 }
 WIDTH_MODIFIERS = {1: {"U8"}, 2: {"U16"}, 4: set(), 8: {"64"}, 16: {"128"}}
+# The opcodes whose wavefronts were measured on the RTX 4060 for the rules of the model.
+INSTRUCTION_OPCODES = {
+    "ldmatrix_x1": "LDSM.16.M88",
+    "ldmatrix_x2": "LDSM.16.M88.2",
+    "ldmatrix_x4": "LDSM.16.M88.4",
+    "ldmatrix_x4_trans": "LDSM.16.MT88.4",
+    "cp_async_4": "LDGSTS.E",
+    "cp_async_8": "LDGSTS.E.64",
+    "cp_async_16": "LDGSTS.E.BYPASS.128",
+}
 
 
 def _sass_opcodes(cubin: pathlib.Path) -> dict[str, list[str]]:
@@ -38,14 +48,14 @@ def _sass_opcodes(cubin: pathlib.Path) -> dict[str, list[str]]:
 
 
 def test_case_names_are_unique():
-    names = [case.name for case in calibration.cases()]
+    names = [case.name for case in calibration.launches(300, 5)]
     assert len(names) == len(set(names))
 
 
 def test_kernel_source_defines_exactly_the_kernels_that_run():
     defined = set(re.findall(r"__global__ void (\w+)\(", calibration.kernel_source()))
-    launched = {case.kernel for case in calibration.cases()} | set(calibration.TRANSPOSE_KERNELS)
-    assert defined == launched
+    launched = {case.kernel for case in calibration.launches()}
+    assert defined == launched | set(calibration.TRANSPOSE_KERNELS)
 
 
 def test_forum_cases_keep_the_wavefronts_measured_on_h100():
@@ -66,7 +76,7 @@ def test_masked_lanes_have_no_address():
 
 
 def test_shared_cases_fit_the_shared_buffer():
-    for case in calibration.cases():
+    for case in calibration.launches():
         if case.space == Space.SHARED:
             assert max(case.offsets) + case.width <= calibration.SHARED_BYTES
 
@@ -75,7 +85,7 @@ def test_shared_cases_fit_the_shared_buffer():
 def test_every_kernel_compiles_for_sm_89():
     cubin = calibration.compile_kernels("sm_89", TOOLS)
     names = {name.decode() for name in re.findall(rb"\.text\.([A-Za-z0-9_]+)", cubin)}
-    expected = {case.kernel for case in calibration.cases()} | set(calibration.TRANSPOSE_KERNELS)
+    expected = {case.kernel for case in calibration.launches()} | set(calibration.TRANSPOSE_KERNELS)
     assert expected <= names
 
 
@@ -98,6 +108,19 @@ def test_each_case_kernel_keeps_one_weak_memory_instruction_of_its_shape(tmp_pat
         modifiers = set(memory[0].split(".")[1:])
         assert modifiers & {"U8", "S8", "U16", "S16", "64", "128"} == WIDTH_MODIFIERS[case.width]
         assert "STRONG" not in modifiers, case.name
+
+
+@pytest.mark.skipif(
+    TOOLS.nvrtc is None or TOOLS.nvdisasm is None, reason="NVRTC and nvdisasm are needed"
+)
+def test_each_instruction_kernel_keeps_one_instruction_with_a_measured_opcode(tmp_path):
+    assert {case.kernel for case in calibration.instruction_cases()} == set(INSTRUCTION_OPCODES)
+    cubin = tmp_path / "bench.cubin"
+    cubin.write_bytes(calibration.compile_kernels("sm_89", TOOLS))
+    functions = _sass_opcodes(cubin)
+    for kernel, opcode in INSTRUCTION_OPCODES.items():
+        memory = [op for op in functions[kernel] if op.split(".")[0] in MEMORY_OPCODES]
+        assert memory == [opcode], kernel
 
 
 @pytest.mark.skipif(
@@ -131,8 +154,32 @@ def test_random_cases_fit_the_calibration_kernels():
         assert all(offset % case.width == 0 and offset < limit for offset in case.offsets)
 
 
+def test_random_instruction_cases_repeat_for_one_seed_and_change_with_another():
+    first = calibration.random_instruction_cases(20, 1)
+    assert first == calibration.random_instruction_cases(20, 1)
+    assert first != calibration.random_instruction_cases(20, 2)
+
+
+def test_instruction_cases_run_every_lane_with_aligned_offsets_in_their_own_kernels():
+    shapes = {case.kernel: (case.kind, case.width) for case in calibration.instruction_cases()}
+    for case in calibration.instruction_cases() + calibration.random_instruction_cases(300, 5):
+        assert (case.kind, case.width) == shapes[case.kernel], case.name
+        assert case.space == Space.SHARED and case.mask == calibration.ALL, case.name
+        assert all(offset % case.width == 0 for offset in case.offsets), case.name
+
+
 def test_launches_put_the_random_cases_after_the_fixed_ones():
-    assert calibration.launches(3, 4) == calibration.cases() + calibration.random_cases(3, 4)
+    fixed = calibration.cases() + calibration.instruction_cases()
+    random = calibration.random_cases(3, 4) + calibration.random_instruction_cases(3, 4)
+    assert calibration.launches(3, 4) == fixed + random
+    groups = calibration.launch_groups(3, 4)
+    assert [case for _, group in groups for case in group] == fixed + random
+    assert [len(group) for _, group in groups] == [
+        len(calibration.cases()),
+        len(fixed) - len(calibration.cases()),
+        3,
+        3,
+    ]
 
 
 def _has_gpu() -> bool:

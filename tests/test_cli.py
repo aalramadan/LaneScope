@@ -153,7 +153,7 @@ def test_suggest_json_gives_the_inferred_buffer(trace_path, capsys):
 
 def test_bench_list_prints_every_case(capsys):
     assert main(["bench", "list"]) == 0
-    assert len(capsys.readouterr().out.splitlines()) == len(calibration.cases())
+    assert len(capsys.readouterr().out.splitlines()) == len(calibration.launches())
 
 
 @pytest.mark.skipif(toolchain.find().nvrtc is None, reason="NVRTC is needed")

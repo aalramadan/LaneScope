@@ -324,7 +324,7 @@ def _import(args: argparse.Namespace) -> int:
 
 
 def _bench_list(args: argparse.Namespace) -> int:
-    for launch, case in enumerate(calibration.cases()):
+    for launch, case in enumerate(calibration.launches()):
         print(f"{launch:3d}  {case.name:40} {case.kernel}  mask {case.mask:#010x}")
     return 0
 
@@ -460,7 +460,10 @@ def _print_comparison(buffer: layouts.Buffer, data: dict) -> None:
 # reason, so each parser raises ArgumentTypeError with the reason instead.
 def _random_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--random", type=_count, default=0, help="random lane patterns to add after the fixed cases"
+        "--random",
+        type=_count,
+        default=0,
+        help="random lane patterns to add after the fixed cases, as many for ldmatrix and cp.async",
     )
     parser.add_argument("--seed", type=int, default=0, help="seed of the random lane patterns")
 

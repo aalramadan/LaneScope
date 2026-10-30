@@ -160,6 +160,9 @@ public:
         Check(sanitizerPatchInstructions(SANITIZER_INSTRUCTION_MEMCPY_ASYNC, data.module,
                                          "LaneScopeMemcpyAsync"),
               "patching cp.async copies");
+        Check(sanitizerPatchInstructions(SANITIZER_INSTRUCTION_MATRIX_MEMORY_ACCESS, data.module,
+                                         "LaneScopeMatrixAccess"),
+              "patching ldmatrix and stmatrix");
         Check(sanitizerPatchModule(data.module), "patching the module");
     }
 

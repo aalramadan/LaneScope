@@ -115,8 +115,9 @@ def validate(
     """Run the GPU check and return the path of its summary.
 
     With `random_count`, the run adds that many random lane patterns of `seed`
-    after the fixed calibration cases, which tests the model on patterns that
-    played no part in fitting it.
+    for the plain loads and stores and as many for ldmatrix and cp.async, after
+    the fixed cases. These test the model on patterns that played no part in
+    fitting it.
     """
     tools = tools or find()
     driver = Driver()
@@ -168,7 +169,7 @@ def validate(
         "",
         *_metric_lines(kernels),
         "",
-        *_summary_lines(rows, len(calibration.cases()), random_count, seed),
+        *_summary_lines(rows, calibration.launch_groups(random_count, seed)),
         "",
         *_prediction_lines(predictions),
     ]
@@ -317,16 +318,17 @@ def _metric_lines(kernels: list[compare.KernelCounters]) -> list[str]:
 
 
 def _summary_lines(
-    rows: list[compare.Row], calibration: int, random_count: int, seed: int
+    rows: list[compare.Row], groups: list[tuple[str, list[calibration.Case]]]
 ) -> list[str]:
     matched = sum(row.matches for row in rows)
     lines = [f"LaneScope matches Nsight Compute in {matched} of {len(rows)} instruction counts."]
-    if random_count:
-        held_out = [row for row in rows if calibration <= row.launch < calibration + random_count]
+    start = 0
+    for label, cases in groups:
+        group = [row for row in rows if start <= row.launch < start + len(cases)]
         lines.append(
-            f"The {random_count} random lane patterns of seed {seed} give "
-            f"{sum(row.matches for row in held_out)} of {len(held_out)}."
+            f"The {len(cases)} {label} give {sum(row.matches for row in group)} of {len(group)}."
         )
+        start += len(cases)
     lines.append("")
     lines += ["| Opcode and quantity | Matched | Total |", "|---|---|---|"]
     for key, entry in compare.summarize(rows).items():

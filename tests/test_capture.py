@@ -6,10 +6,12 @@ import sys
 import numpy as np
 import pytest
 
+from lanescope.cuda import toolchain
+from lanescope.cuda.driver import Driver, DriverError
 from lanescope.model import counters
 from lanescope.recorder import capture
-from lanescope.recorder.build import RecorderBuild
-from lanescope.trace import WARP_SIZE, Kind, Space
+from lanescope.recorder.build import RecorderBuild, build_recorder
+from lanescope.trace import WARP_SIZE, Kind, Space, Trace
 
 BASE_PC = 0x7F00_0000_1000
 # A library that writes its name to loaded.txt in LANESCOPE_OUT when the loader maps it.
@@ -219,3 +221,62 @@ def test_pcs_outside_the_kernel_stay_absolute(tmp_path):
     )
     trace = capture.to_trace(*capture.load_launch(info))
     assert int(trace.pc[0]) == BASE_PC + 0x400
+
+
+def _has_gpu() -> bool:
+    try:
+        Driver().close()
+    except DriverError:
+        return False
+    return True
+
+
+TOOLS = toolchain.find()
+LDMATRIX_LAUNCH = r'''
+import ctypes
+import sys
+
+from lanescope.cuda import nvrtc
+from lanescope.cuda.driver import Driver
+from lanescope.cuda.toolchain import find
+
+SOURCE = """
+extern "C" __global__ void ldmatrix_x4(unsigned sink) {
+    __shared__ __align__(128) unsigned char smem[4096];
+    const unsigned address =
+        static_cast<unsigned>(__cvta_generic_to_shared(smem + 16 * threadIdx.x));
+    unsigned a, b, c, d;
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
+                 : "=r"(a), "=r"(b), "=r"(c), "=r"(d) : "r"(address) : "memory");
+    if ((a ^ b ^ c ^ d) == sink) asm volatile("trap;");
+}
+"""
+driver = Driver()
+options = [f"--gpu-architecture={driver.arch()}"]
+program = nvrtc.compile_cuda(SOURCE, "ldmatrix.cu", options, find().nvrtc)
+module = driver.load(program.cubin)
+kernel = driver.function(module, "ldmatrix_x4")
+driver.launch(kernel, (1, 1, 1), (32, 1, 1), [ctypes.c_uint32(0xFFFFFFFF)])
+driver.close()
+'''
+
+
+@pytest.mark.skipif(
+    TOOLS.nvrtc is None or shutil.which("g++") is None or not _has_gpu(),
+    reason="NVRTC, g++, and a GPU are needed",
+)
+def test_recorder_records_the_row_address_of_each_lane_of_an_ldmatrix(tmp_path):
+    driver = Driver()
+    arch = driver.arch()
+    driver.close()
+    build = build_recorder(tmp_path / "build", arch, TOOLS)
+    script = tmp_path / "launch.py"
+    script.write_text(LDMATRIX_LAUNCH)
+    out_dir = tmp_path / "record"
+    assert capture.record([sys.executable, str(script)], build, out_dir, ctas=(0, 1 << 30)) == 0
+    trace = Trace.load(capture.import_recording(out_dir, TOOLS.disassemblers)[0])
+    rows = [row for row in range(len(trace)) if trace.space[row] == Space.SHARED]
+    assert len(rows) == 1
+    assert int(trace.width[rows[0]]) == 16
+    assert trace.lane_addresses(rows[0]) == tuple(16 * lane for lane in range(WARP_SIZE))
+    assert trace.metadata["opcodes"] == {f"{int(trace.pc[rows[0]]):#x}": "LDSM.16.M88.4"}

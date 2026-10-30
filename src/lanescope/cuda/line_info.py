@@ -7,6 +7,11 @@ from collections.abc import Sequence
 SECTION = re.compile(r"^\.text\.(?P<name>\S+):\s*$")
 LOCATION = re.compile(r'^\s*//## File "(?P<file>[^"]+)", line (?P<line>\d+)')
 INSTRUCTION = re.compile(r"^\s*/\*(?P<offset>[0-9a-f]{4,})\*/")
+OPCODE = re.compile(
+    r"^\s*/\*(?P<offset>[0-9a-f]{4,})\*/\s+(?:@!?U?P\w+\s+)?(?P<opcode>[A-Z][\w.]*)"
+)
+# Instructions whose wavefronts follow rules of their own, beyond those of their width.
+RULE_OPCODES = ("LDSM", "STSM", "LDGSTS")
 # Sources larger than this are no kernel files worth carrying in a trace.
 MAX_SOURCE_BYTES = 1 << 20
 # Line tables name any file the compiler read. Only absolute paths of source files
@@ -32,10 +37,21 @@ def parse(listing: str) -> dict[str, FunctionLines]:
     return functions
 
 
-def module_lines(
-    disassemblers: Sequence[pathlib.Path], cubin: pathlib.Path
-) -> dict[str, FunctionLines]:
-    """Return the line table of every function of a cubin from the first nvdisasm that reads it.
+def opcodes(listing: str) -> dict[str, dict[int, str]]:
+    """Return the opcode of each instruction with a counting rule of its own, for each function."""
+    functions: dict[str, dict[int, str]] = {}
+    current: dict[int, str] | None = None
+    for text in listing.splitlines():
+        if section := SECTION.match(text):
+            current = functions.setdefault(section["name"], {})
+        elif current is not None and (code := OPCODE.match(text)):
+            if code["opcode"].split(".")[0] in RULE_OPCODES:
+                current[int(code["offset"], 16)] = code["opcode"]
+    return functions
+
+
+def module_listing(disassemblers: Sequence[pathlib.Path], cubin: pathlib.Path) -> str:
+    """Return the listing of a cubin, with line information, from the first nvdisasm that reads it.
 
     A newer nvdisasm drops older GPUs, so the next copy gets its turn when one fails.
     Raises ValueError when none reads the cubin.
@@ -53,7 +69,7 @@ def module_lines(
             errors.append(f"{nvdisasm} cannot start ({error.strerror})")
             continue
         if result.returncode == 0:
-            return parse(result.stdout)
+            return result.stdout
         errors.append(result.stderr.strip() or f"{nvdisasm} failed")
     raise ValueError(f"nvdisasm cannot read {cubin}: {'; '.join(errors) or 'no nvdisasm'}")
 

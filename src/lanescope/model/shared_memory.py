@@ -31,6 +31,11 @@ _PAIR_DISTANCES = (1, 2)
 # The first compute capability measured to merge only full warps (H100 is sm_90).
 _FULL_WARP_MERGE_MAJOR = 9
 
+# An ldmatrix or stmatrix moves one 8x8 matrix for each group of eight lanes. Its
+# SASS opcode ends in .2 or .4 for two or four matrices.
+_MATRIX_OPCODES = ("LDSM", "STSM")
+_ASYNC_COPY_OPCODE = "LDGSTS"
+
 
 @dataclasses.dataclass(frozen=True)
 class Phase:
@@ -41,7 +46,7 @@ class Phase:
 
     @property
     def wavefronts(self) -> int:
-        """Return the most distinct words that one bank serves in this phase."""
+        """Return the most words that one bank serves in this phase."""
         return max(len(words) for words in self.bank_words)
 
     @property
@@ -78,14 +83,26 @@ class SharedAccess:
 
 
 def analyze(
-    addresses: Sequence[int | None], width: int, *, store: bool = False, arch: str = ""
+    addresses: Sequence[int | None],
+    width: int,
+    *,
+    store: bool = False,
+    arch: str = "",
+    opcode: str = "",
 ) -> SharedAccess:
     """Model one access from the byte offset of each lane, with None for inactive lanes.
 
     The architecture, such as sm_89, decides how loads merge their groups. An
-    unknown one takes the rule measured on the RTX 4060.
+    unknown one takes the rule measured on the RTX 4060. The SASS opcode, such as
+    LDSM.16.M88.4, selects the rule of an ldmatrix, stmatrix, or cp.async access.
     """
     check_lanes(addresses, width)
+    base = opcode.split(".")[0]
+    if base in _MATRIX_OPCODES:
+        matrices = 4 if opcode.endswith(".4") else 2 if opcode.endswith(".2") else 1
+        return _matrix(tuple(addresses), width, matrices)
+    if base == _ASYNC_COPY_OPCODE and store:
+        return _async_copy(tuple(addresses), width)
     return _analyze(tuple(addresses), width, store, _full_warp_merge(arch))
 
 
@@ -96,6 +113,7 @@ def analyze_row(trace: Trace, row: int) -> SharedAccess:
         int(trace.width[row]),
         store=trace.kind[row] == Kind.STORE,
         arch=str(trace.metadata.get("arch", "")),
+        opcode=trace.opcode(int(trace.pc[row])),
     )
 
 
@@ -122,6 +140,73 @@ def _analyze(
     # wavefronts than the groups that the banks serve.
     ideal = min(math.ceil(active * width / WAVEFRONT_BYTES), len(phases))
     return SharedAccess(width, active, paired, ideal, tuple(phases))
+
+
+@functools.lru_cache(maxsize=1 << 16)
+def _matrix(addresses: tuple[int | None, ...], width: int, matrices: int) -> SharedAccess:
+    # Each group of eight lanes gives the rows of one matrix, and the banks serve one
+    # matrix at a time. Lanes past the last matrix give addresses that the GPU ignores.
+    phases = []
+    for group in _QUARTERS[:matrices]:
+        if lanes := _active(addresses, group):
+            phases.append(_phase(addresses, lanes, width))
+    return _with_ideal(addresses, width, tuple(phases))
+
+
+@functools.lru_cache(maxsize=1 << 16)
+def _async_copy(addresses: tuple[int | None, ...], width: int) -> SharedAccess:
+    if width == 16:
+        return _async_copy_rows(addresses)
+    # A cp.async of 4 or 8 bytes writes each lane on its own, also when lanes share an
+    # address, so a bank takes one wavefront per lane that it serves.
+    phases = []
+    for group in _GROUPS[width]:
+        if lanes := _active(addresses, group):
+            phases.append(_lane_phase(addresses, lanes, width))
+    return _with_ideal(addresses, width, tuple(phases))
+
+
+def _async_copy_rows(addresses: tuple[int | None, ...]) -> SharedAccess:
+    # Eight lanes that fill one aligned 128-byte line in order write it in one wavefront.
+    # Every other row takes a wavefront of its own, once for all the lanes that write it.
+    phases = []
+    rows: dict[int, list[int]] = {}
+    for group in _QUARTERS:
+        first = addresses[group[0]]
+        if (
+            first is not None
+            and first % WAVEFRONT_BYTES == 0
+            and all(addresses[lane] == first + 16 * (lane - group[0]) for lane in group)
+        ):
+            phases.append(_phase(addresses, group, 16))
+            continue
+        for lane in _active(addresses, group):
+            address = addresses[lane]
+            assert address is not None
+            rows.setdefault(address, []).append(lane)
+    phases += [_phase(addresses, tuple(lanes), 16) for lanes in rows.values()]
+    distinct = {address for address in addresses if address is not None}
+    ideal = math.ceil(len(distinct) * 16 / WAVEFRONT_BYTES)
+    active = sum(address is not None for address in addresses)
+    return SharedAccess(16, active, False, ideal, tuple(phases))
+
+
+def _with_ideal(
+    addresses: tuple[int | None, ...], width: int, phases: tuple[Phase, ...]
+) -> SharedAccess:
+    active = sum(address is not None for address in addresses)
+    ideal = min(math.ceil(active * width / WAVEFRONT_BYTES), len(phases))
+    return SharedAccess(width, active, False, ideal, phases)
+
+
+def _lane_phase(addresses: tuple[int | None, ...], lanes: tuple[int, ...], width: int) -> Phase:
+    bank_words: list[list[int]] = [[] for _ in range(BANKS)]
+    for lane in lanes:
+        address = addresses[lane]
+        assert address is not None
+        for word in words(address, width):
+            bank_words[word % BANKS].append(word)
+    return Phase(lanes, tuple(tuple(sorted(found)) for found in bank_words))
 
 
 def _phase(addresses: tuple[int | None, ...], lanes: tuple[int, ...], width: int) -> Phase:

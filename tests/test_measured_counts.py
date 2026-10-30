@@ -62,3 +62,54 @@ def test_measurements_cover_every_calibration_case():
 @pytest.mark.parametrize(("space", "kind", "width", "units", "measured"), list(cases()))
 def test_model_matches_nsight_compute_on_an_rtx_4060(space, kind, width, units, measured):
     assert model_counts(space, kind, width, units) == measured
+
+
+# Nsight Compute 2026.3.1 counts of ldmatrix and cp.async on the same GPU: the calibration
+# cases, the random patterns of seed 3, the random patterns of an earlier probe, and
+# 16-byte copies aimed at the rule that merges two distinct rows.
+INSTRUCTIONS = json.loads(
+    (pathlib.Path(__file__).parent / "data" / "rtx4060_instruction_counts.json").read_text()
+)
+# 16-byte cp.async copies whose lanes merge in ways the model does not yet reproduce.
+INSTRUCTION_MISSES = {
+    "targeted/cp_async_16-alternate-next-0",
+    "targeted/cp_async_16-lane0-next-0",
+    *(
+        f"random-probe/cp_async_16-random{index}"
+        for index in (0, 2, 4, 6, 10, 16, 17, 18, 19, 21, 22, 23, 28, 29)
+    ),
+    *(
+        f"random-seed-3/random-{index}-cp-async-16"
+        for index in (
+            *(12, 20, 31, 34, 36, 37, 41, 44, 62, 91),
+            *(140, 149, 159, 168, 169, 170, 226, 277, 294),
+        )
+    ),
+}
+
+
+def instruction_cases():
+    for group, name, opcode, width, offsets, wavefronts, ideal in INSTRUCTIONS["cases"]:
+        case_id = f"{group}/{name}"
+        marks = [pytest.mark.xfail(strict=True)] if case_id in INSTRUCTION_MISSES else []
+        yield pytest.param(opcode, width, offsets, (wavefronts, ideal), id=case_id, marks=marks)
+
+
+def test_measurements_cover_every_ldmatrix_and_cp_async_case():
+    measured = {name for group, name, *_ in INSTRUCTIONS["cases"] if group == "calibration"}
+    assert measured == {case.name for case in calibration.instruction_cases()}
+
+
+def test_measured_random_ldmatrix_and_cp_async_patterns_come_from_the_calibration_run():
+    measured = [case for case in INSTRUCTIONS["cases"] if case[0] == "random-seed-3"]
+    generated = calibration.random_instruction_cases(len(measured), 3)
+    for (_, name, _, width, offsets, *_), case in zip(measured, generated, strict=True):
+        assert (name, width, offsets) == (case.name, case.width, list(case.offsets))
+
+
+@pytest.mark.parametrize(("opcode", "width", "offsets", "measured"), list(instruction_cases()))
+def test_model_matches_nsight_compute_on_ldmatrix_and_cp_async(opcode, width, offsets, measured):
+    store = opcode.startswith("LDGSTS")
+    arch = INSTRUCTIONS["arch"]
+    result = shared_memory.analyze(offsets, width, store=store, arch=arch, opcode=opcode)
+    assert (result.wavefronts, result.ideal) == measured

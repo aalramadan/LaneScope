@@ -1,7 +1,7 @@
 from lanescope import demos, text_view
 from lanescope.model import global_memory, shared_memory
 from lanescope.model.counters import count
-from lanescope.trace import WARP_SIZE
+from lanescope.trace import WARP_SIZE, Access, Kind, Space, Trace
 
 
 def grid_lines(addresses, width=4):
@@ -67,3 +67,13 @@ def test_describe_row_uses_the_view_of_the_space():
 def test_lane_ranges_join_consecutive_lanes():
     assert text_view.lane_ranges((0, 1, 2, 5, 7, 8)) == "0-2,5,7-8"
     assert text_view.lane_ranges(tuple(range(WARP_SIZE))) == "0-31"
+
+
+def test_describe_row_names_the_sass_opcode_that_the_trace_keeps():
+    rows = tuple(16 * lane for lane in range(WARP_SIZE))
+    access = Access(0x40, Space.SHARED, Kind.LOAD, 16, rows)
+    trace = Trace.from_accesses([access], {"opcodes": {"0x40": "LDSM.16.M88.4"}})
+    header = text_view.describe_row(trace, 0).splitlines()[0]
+    assert header == "pc 0x0040, shared load of 16 bytes (LDSM.16.M88.4), CTA 0, warp 0"
+    plain = text_view.describe_row(Trace.from_accesses([access]), 0).splitlines()[0]
+    assert plain == "pc 0x0040, shared load of 16 bytes, CTA 0, warp 0"

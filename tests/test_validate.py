@@ -30,7 +30,7 @@ def kernel(name, store_wavefronts, load_wavefronts):
 
 def test_launch_names_cover_every_case_and_the_three_transposes():
     names = validate.launch_names()
-    assert len(names) == len(calibration.cases()) + 3
+    assert len(names) == len(calibration.launches()) + 3
     assert names[-3:] == list(calibration.TRANSPOSE_KERNELS)
 
 
@@ -73,7 +73,7 @@ def test_missing_launches_are_reported():
     traces, counters = traces_and_kernels()
     launches, problems = validate.pair_launches(traces[:-1], counters)
     assert launches[-1].trace is None
-    assert problems[0].startswith("The recorder wrote 59 launches")
+    assert problems[0].startswith(f"The recorder wrote {len(traces) - 1} launches")
 
 
 def test_predictions_need_the_tiled_transpose():
@@ -148,8 +148,24 @@ def test_random_patterns_reach_the_recorded_run_and_the_launch_names(
     validate.validate(tmp_path / "check", tools=tools, random_count=5, seed=7)
     assert commands[0][-4:] == ["--random", "5", "--seed", "7"]
     names = validate.launch_names(5, 7)
-    assert names[len(calibration.cases()) : -3] == [
-        case.name for case in calibration.random_cases(5, 7)
+    assert names[:-3] == [case.name for case in calibration.launches(5, 7)]
+
+
+def summary_row(launch, nsight):
+    return compare.Row(launch, "k", 0x10, "LDS R0, [R0]", "shared_wavefronts", 1, nsight)
+
+
+def test_summary_gives_the_matched_counts_of_each_group_of_launches():
+    groups = calibration.launch_groups(2, 3)
+    starts = [sum(len(cases) for _, cases in groups[:index]) for index in range(len(groups) + 1)]
+    rows = [summary_row(start, 1.0) for start in starts] + [summary_row(starts[1], 2.0)]
+    lines = validate._summary_lines(rows, groups)
+    assert lines[0] == "LaneScope matches Nsight Compute in 5 of 6 instruction counts."
+    assert lines[1:5] == [
+        f"The {len(groups[0][1])} calibration launches give 1 of 1.",
+        f"The {len(groups[1][1])} ldmatrix and cp.async launches give 1 of 2.",
+        "The 2 random lane patterns of seed 3 give 1 of 1.",
+        "The 2 random ldmatrix and cp.async patterns of seed 3 give 1 of 1.",
     ]
 
 

@@ -1,7 +1,7 @@
 import pytest
 
 from lanescope.model import shared_memory
-from lanescope.trace import WARP_SIZE
+from lanescope.trace import WARP_SIZE, Access, Kind, Space, Trace
 
 # LDS.128 lane patterns with the wavefronts that Nsight Compute reported on H100 and
 # RTX 5090, from NVIDIA forum topic 374947. Each entry is an int4 index per lane.
@@ -278,3 +278,45 @@ def test_lone_lanes_in_one_bank_keep_their_quarters():
 def test_bytes_with_a_stride_of_128_take_32_wavefronts_in_one_phase():
     result = shared_memory.analyze(lanes(lambda lane: 128 * lane), 1)
     assert (len(result.phases), result.wavefronts, result.ideal) == (1, 32, 1)
+
+
+def _rows(stride: int) -> list[int]:
+    return [stride * lane for lane in range(WARP_SIZE)]
+
+
+@pytest.mark.parametrize(
+    ("opcode", "stride", "wavefronts", "ideal"),
+    [
+        ("LDSM.16.M88.4", 16, 4, 4),
+        ("LDSM.16.M88.4", 128, 32, 4),
+        ("LDSM.16.M88.2", 64, 8, 2),
+        ("LDSM.16.M88", 128, 8, 1),
+    ],
+)
+def test_ldmatrix_counts_the_distinct_rows_on_one_bank_in_each_matrix(
+    opcode, stride, wavefronts, ideal
+):
+    result = shared_memory.analyze(_rows(stride), 16, opcode=opcode)
+    assert (result.wavefronts, result.ideal) == (wavefronts, ideal)
+
+
+def test_ldmatrix_of_one_matrix_reads_only_the_rows_of_the_first_eight_lanes():
+    rows = [16 * lane if lane < 8 else 128 * lane for lane in range(WARP_SIZE)]
+    assert shared_memory.analyze(rows, 16, opcode="LDSM.16.M88").wavefronts == 1
+
+
+def test_cp_async_writes_to_one_address_take_one_wavefront_each():
+    result = shared_memory.analyze([0] * WARP_SIZE, 4, store=True, opcode="LDGSTS.E")
+    assert (result.wavefronts, result.ideal) == (32, 1)
+
+
+@pytest.mark.parametrize(("stride", "wavefronts"), [(16, 4), (32, 32), (0, 1)])
+def test_16_byte_cp_async_counts_each_row_unless_eight_lanes_fill_one_line(stride, wavefronts):
+    result = shared_memory.analyze(_rows(stride), 16, store=True, opcode="LDGSTS.E.BYPASS.128")
+    assert result.wavefronts == wavefronts
+
+
+def test_analyze_row_takes_the_rule_from_the_opcode_in_the_trace():
+    access = Access(0x10, Space.SHARED, Kind.LOAD, 16, tuple(_rows(128)))
+    trace = Trace.from_accesses([access], metadata={"opcodes": {"0x10": "LDSM.16.M88"}})
+    assert shared_memory.analyze_row(trace, 0).wavefronts == 8

@@ -51,6 +51,22 @@ extern "C" __global__ void inlined(const float* in, float* out) {
 """
 
 
+MATRIX_LISTING = """
+.text.tile:
+        /*0000*/                   S2R R0, SR_TID.X ;
+        /*0010*/                   LDSM.16.M88.4 R4, [R0] ;
+        /*0020*/              @!P0 LDGSTS.E.BYPASS.128 [R5], desc[UR4][R2.64] ;
+        /*0030*/                   STSM.16.M88.2 [R0], R4 ;
+        /*0040*/                   LDS R1, [R0] ;
+"""
+
+
+def test_opcodes_keep_the_instructions_that_need_their_own_counting_rule():
+    assert line_info.opcodes(MATRIX_LISTING) == {
+        "tile": {0x10: "LDSM.16.M88.4", 0x20: "LDGSTS.E.BYPASS.128", 0x30: "STSM.16.M88.2"}
+    }
+
+
 def test_parse_maps_each_offset_to_the_last_location_before_it():
     functions = line_info.parse(LISTING)
     assert functions["first"] == {
@@ -95,7 +111,8 @@ def test_import_maps_a_recorded_shared_load_to_its_source_line(tmp_path):
     folder = tmp_path / "run"
     folder.mkdir()
     (folder / "module-0.cubin").write_bytes(program.cubin)
-    table = line_info.module_lines(TOOLS.disassemblers, folder / "module-0.cubin")["probe"]
+    listing = line_info.module_listing(TOOLS.disassemblers, folder / "module-0.cubin")
+    table = line_info.parse(listing)["probe"]
     offset = max(offset for offset, (_, line) in table.items() if line == 5)
     base = 0x7F00_0000_0000
     records = np.zeros(1, dtype=capture.RECORD_DTYPE)
@@ -177,11 +194,11 @@ def test_a_store_inlined_from_a_header_takes_the_line_of_its_call(tmp_path):
     ).stdout
     found = re.search(r"/\*([0-9a-f]{4})\*/\s+STS\b", code)
     assert found is not None
-    table = line_info.module_lines(TOOLS.disassemblers, cubin)["inlined"]
+    table = line_info.parse(line_info.module_listing(TOOLS.disassemblers, cubin))["inlined"]
     assert table[int(found.group(1), 16)] == (str(source), 4)
 
 
-def test_module_lines_turn_to_the_next_nvdisasm_when_one_fails(tmp_path):
+def test_module_listing_turns_to_the_next_nvdisasm_when_one_fails(tmp_path):
     failing = tmp_path / "old-nvdisasm"
     failing.write_text("#!/bin/sh\necho 'CUDA architecture is deprecated' >&2\nexit 1\n")
     failing.chmod(0o755)
@@ -191,15 +208,16 @@ def test_module_lines_turn_to_the_next_nvdisasm_when_one_fails(tmp_path):
     working.chmod(0o755)
     cubin = tmp_path / "module.cubin"
     cubin.write_bytes(b"")
-    assert line_info.module_lines([failing, working], cubin) == {"k": {0: ("/src/k.cu", 3)}}
+    listing = line_info.module_listing([failing, working], cubin)
+    assert line_info.parse(listing) == {"k": {0: ("/src/k.cu", 3)}}
     with pytest.raises(ValueError, match="CUDA architecture is deprecated"):
-        line_info.module_lines([failing], cubin)
+        line_info.module_listing([failing], cubin)
 
 
-def test_module_lines_pass_over_an_nvdisasm_that_cannot_start(tmp_path):
+def test_module_listing_passes_over_an_nvdisasm_that_cannot_start(tmp_path):
     broken = tmp_path / "nvdisasm"
     broken.write_text("not a program")
     cubin = tmp_path / "module.cubin"
     cubin.write_bytes(b"")
     with pytest.raises(ValueError, match="cannot start"):
-        line_info.module_lines([broken], cubin)
+        line_info.module_listing([broken], cubin)

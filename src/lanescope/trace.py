@@ -149,6 +149,10 @@ class Trace:
         source = self.metadata.get("source", [])
         return line, source[line - 1].strip() if 0 < line <= len(source) else ""
 
+    def opcode(self, pc: int) -> str:
+        """Return the SASS opcode that the metadata keeps for a PC, or an empty string."""
+        return str(self.metadata.get("opcodes", {}).get(f"{pc:#x}", ""))
+
     def save(self, path: str | pathlib.Path) -> None:
         """Write the trace to an .npz file."""
         metadata = dict(self.metadata, format=FORMAT_VERSION)
@@ -271,6 +275,11 @@ def _check_metadata(metadata: Any) -> None:
         for pc, line in lines.items()
     ):
         raise ValueError("metadata field lines must map PC text such as 0x120 to line numbers")
+    opcodes = metadata.get("opcodes", {})
+    if not isinstance(opcodes, dict) or not all(
+        isinstance(pc, str) and isinstance(opcode, str) for pc, opcode in opcodes.items()
+    ):
+        raise ValueError("metadata field opcodes must map PC text such as 0x120 to SASS opcodes")
 
 
 def _validate(trace: Trace) -> None:

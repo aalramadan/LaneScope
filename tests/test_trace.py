@@ -121,6 +121,7 @@ def test_load_names_a_missing_column(tmp_path):
         ('{"format": 1, "lines": {"0x10": "5"}}', "lines must map"),
         ('{"format": 1, "source": "one line"}', "list of lines"),
         ('{"format": 1, "kernel": 7}', "kernel must be text"),
+        ('{"format": 1, "opcodes": {"0x10": 7}}', "opcodes must map"),
     ],
 )
 def test_load_rejects_malformed_metadata(tmp_path, metadata, message):
@@ -292,3 +293,11 @@ def test_columns_of_time_deltas_are_rejected():
     columns["cta"] = np.array([5], dtype="timedelta64[s]")
     with pytest.raises(ValueError, match="needs integers"):
         Trace(**columns)
+
+
+def test_opcode_gives_the_sass_opcode_kept_for_a_pc_and_nothing_for_others():
+    rows = tuple(16 * lane for lane in range(WARP_SIZE))
+    access = Access(0x40, Space.SHARED, Kind.LOAD, 16, rows)
+    trace = Trace.from_accesses([access], {"opcodes": {"0x40": "LDSM.16.M88.4"}})
+    assert trace.opcode(0x40) == "LDSM.16.M88.4"
+    assert trace.opcode(0x50) == ""

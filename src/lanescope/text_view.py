@@ -10,9 +10,11 @@ EMPTY = "."
 def describe_row(trace: Trace, row: int) -> str:
     """Return the lane-by-lane view of one row of the trace."""
     access = trace.access(row)
+    opcode = trace.opcode(access.pc)
     header = (
         f"pc {access.pc:#06x}, {access.space.name.lower()} {access.kind.name.lower()} "
-        f"of {access.width} bytes, CTA {access.cta}, warp {access.warp}"
+        f"of {access.width} bytes{f' ({opcode})' if opcode else ''}, "
+        f"CTA {access.cta}, warp {access.warp}"
     )
     if access.space == Space.SHARED:
         return header + "\n" + bank_grid(shared_memory.analyze_row(trace, row), access.addresses)

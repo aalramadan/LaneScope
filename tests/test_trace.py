@@ -301,3 +301,17 @@ def test_opcode_gives_the_sass_opcode_kept_for_a_pc_and_nothing_for_others():
     trace = Trace.from_accesses([access], {"opcodes": {"0x40": "LDSM.16.M88.4"}})
     assert trace.opcode(0x40) == "LDSM.16.M88.4"
     assert trace.opcode(0x50) == ""
+
+
+def test_copy_partners_pair_the_two_sides_of_each_cp_async_by_cta_and_warp():
+    pc, lanes = 0x40, tuple(16 * lane for lane in range(WARP_SIZE))
+    accesses = [
+        Access(pc, Space.GLOBAL, Kind.LOAD, 16, lanes, warp=0),
+        Access(pc, Space.GLOBAL, Kind.LOAD, 16, lanes, warp=1),
+        Access(pc, Space.SHARED, Kind.STORE, 16, lanes, warp=1),
+        Access(pc, Space.SHARED, Kind.STORE, 16, lanes, warp=0),
+        Access(0x80, Space.SHARED, Kind.LOAD, 16, lanes, warp=0),
+    ]
+    trace = Trace.from_accesses(accesses, {"opcodes": {"0x40": "LDGSTS.E.BYPASS.128"}})
+    assert trace.copy_partners == {0: 3, 3: 0, 1: 2, 2: 1}
+    assert Trace.from_accesses(accesses).copy_partners == {}

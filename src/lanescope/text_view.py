@@ -18,7 +18,7 @@ def describe_row(trace: Trace, row: int) -> str:
     )
     if access.space == Space.SHARED:
         return header + "\n" + bank_grid(shared_memory.analyze_row(trace, row), access.addresses)
-    return header + "\n" + sector_table(global_memory.analyze(access.addresses, access.width))
+    return header + "\n" + sector_table(global_memory.analyze_row(trace, row))
 
 
 def bank_grid(result: shared_memory.SharedAccess, addresses: tuple[int | None, ...]) -> str:

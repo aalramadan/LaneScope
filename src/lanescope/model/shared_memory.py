@@ -3,6 +3,7 @@ import functools
 import math
 from collections.abc import Sequence
 
+from lanescope.model import async_copy
 from lanescope.trace import WARP_SIZE, Kind, Trace, check_lanes
 
 BANKS = 32
@@ -89,12 +90,14 @@ def analyze(
     store: bool = False,
     arch: str = "",
     opcode: str = "",
+    sources: Sequence[int | None] | None = None,
 ) -> SharedAccess:
     """Model one access from the byte offset of each lane, with None for inactive lanes.
 
     The architecture, such as sm_89, decides how loads merge their groups. An
     unknown one takes the rule measured on the RTX 4060. The SASS opcode, such as
     LDSM.16.M88.4, selects the rule of an ldmatrix, stmatrix, or cp.async access.
+    The global address of each lane of a cp.async, when known, shapes its writes.
     """
     check_lanes(addresses, width)
     base = opcode.split(".")[0]
@@ -102,18 +105,21 @@ def analyze(
         matrices = 4 if opcode.endswith(".4") else 2 if opcode.endswith(".2") else 1
         return _matrix(tuple(addresses), width, matrices)
     if base == _ASYNC_COPY_OPCODE and store:
-        return _async_copy(tuple(addresses), width)
+        lanes = tuple(sources) if sources is not None else (None,) * len(addresses)
+        return _async_copy(tuple(addresses), width, lanes)
     return _analyze(tuple(addresses), width, store, _full_warp_merge(arch))
 
 
 def analyze_row(trace: Trace, row: int) -> SharedAccess:
     """Model one shared row of a trace with the rules of the GPU that recorded it."""
+    partner = trace.copy_partners.get(row)
     return analyze(
         trace.lane_addresses(row),
         int(trace.width[row]),
         store=trace.kind[row] == Kind.STORE,
         arch=str(trace.metadata.get("arch", "")),
         opcode=trace.opcode(int(trace.pc[row])),
+        sources=None if partner is None else trace.lane_addresses(partner),
     )
 
 
@@ -154,9 +160,11 @@ def _matrix(addresses: tuple[int | None, ...], width: int, matrices: int) -> Sha
 
 
 @functools.lru_cache(maxsize=1 << 16)
-def _async_copy(addresses: tuple[int | None, ...], width: int) -> SharedAccess:
+def _async_copy(
+    addresses: tuple[int | None, ...], width: int, sources: tuple[int | None, ...]
+) -> SharedAccess:
     if width == 16:
-        return _async_copy_rows(addresses)
+        return _async_copy_rows(addresses, sources)
     # A cp.async of 4 or 8 bytes writes each lane on its own, also when lanes share an
     # address, so a bank takes one wavefront per lane that it serves.
     phases = []
@@ -166,29 +174,25 @@ def _async_copy(addresses: tuple[int | None, ...], width: int) -> SharedAccess:
     return _with_ideal(addresses, width, tuple(phases))
 
 
-def _async_copy_rows(addresses: tuple[int | None, ...]) -> SharedAccess:
-    # Eight lanes that fill one aligned 128-byte line in order write it in one wavefront.
-    # Every other row takes a wavefront of its own, once for all the lanes that write it.
-    phases = []
-    rows: dict[int, list[int]] = {}
-    for group in _QUARTERS:
-        first = addresses[group[0]]
-        if (
-            first is not None
-            and first % WAVEFRONT_BYTES == 0
-            and all(addresses[lane] == first + 16 * (lane - group[0]) for lane in group)
-        ):
-            phases.append(_phase(addresses, group, 16))
-            continue
-        for lane in _active(addresses, group):
-            address = addresses[lane]
-            assert address is not None
-            rows.setdefault(address, []).append(lane)
-    phases += [_phase(addresses, tuple(lanes), 16) for lanes in rows.values()]
+def _async_copy_rows(
+    addresses: tuple[int | None, ...], sources: tuple[int | None, ...]
+) -> SharedAccess:
+    # Each wavefront shows the lanes of its writes and the lanes whose rows those fill.
+    writer: dict[int, int] = {}
+    waves = async_copy.wavefronts(async_copy.copies(sources, addresses))
+    for index, members in enumerate(waves):
+        for write in members:
+            writer.update((row, index) for row in write.rows)
+    lanes: list[list[int]] = [[] for _ in waves]
+    for lane in _active(addresses, _ALL_LANES):
+        address = addresses[lane]
+        assert address is not None
+        lanes[writer[address // async_copy.ROW_BYTES]].append(lane)
+    phases = tuple(_phase(addresses, tuple(found), 16) for found in lanes)
     distinct = {address for address in addresses if address is not None}
     ideal = math.ceil(len(distinct) * 16 / WAVEFRONT_BYTES)
     active = sum(address is not None for address in addresses)
-    return SharedAccess(16, active, False, ideal, tuple(phases))
+    return SharedAccess(16, active, False, ideal, phases)
 
 
 def _with_ideal(

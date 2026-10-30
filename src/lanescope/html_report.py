@@ -149,7 +149,7 @@ def _section(trace: Trace, counter: InstructionCounters) -> str:
         parts.append(_suggestions(trace, counter.pc))
         text = text_view.bank_grid(result, access.addresses)
     else:
-        sectors = global_memory.analyze(access.addresses, access.width)
+        sectors = global_memory.analyze_row(trace, counter.worst_row)
         parts.append(
             f"<p>Warp {access.warp} of CTA {access.cta} touches {sectors.sectors} sectors in "
             f"{sectors.lines} lines against an ideal of {sectors.ideal}.</p>"

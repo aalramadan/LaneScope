@@ -7,7 +7,7 @@ from lanescope.model import global_memory, shared_memory
 from lanescope.nsight import calibration
 
 # Achieved and ideal counts that Nsight Compute 2026.3.1 measured on an RTX 4060
-# Laptop GPU (sm_89): the calibration cases, three runs of 300 random lane
+# Laptop GPU (sm_89): the calibration cases, four runs of 300 random lane
 # patterns, and patterns aimed at the rules that merge the groups of wide loads.
 MEASURED = json.loads((pathlib.Path(__file__).parent / "data" / "rtx4060_counts.json").read_text())
 
@@ -24,6 +24,7 @@ KNOWN_MISSES = {
     "random-seed-3/random-36-shared-load-16",
     "random-seed-3/random-202-shared-load-16",
     "random-seed-3/random-271-shared-load-16",
+    "random-seed-4/random-47-shared-load-16",
 }
 
 
@@ -45,7 +46,7 @@ def model_counts(space: str, kind: str, width: int, units: list[int | None]) -> 
 
 
 def test_measured_random_patterns_come_from_the_calibration_run():
-    for seed in (1, 2, 3):
+    for seed in (1, 2, 3, 4):
         measured = [case for case in MEASURED["cases"] if case[0] == f"random-seed-{seed}"]
         generated = calibration.random_cases(len(measured), seed)
         for (_, name, _, _, width, units, *_), case in zip(measured, generated, strict=True):
@@ -65,34 +66,34 @@ def test_model_matches_nsight_compute_on_an_rtx_4060(space, kind, width, units, 
 
 
 # Nsight Compute 2026.3.1 counts of ldmatrix and cp.async on the same GPU: the calibration
-# cases, the random patterns of seed 3, the random patterns of an earlier probe, and
-# 16-byte copies aimed at the rule that merges two distinct rows.
+# cases, the random patterns of seeds 3 and 4, the random patterns of an earlier probe, 16-byte
+# copies that write two distinct rows, and a probe of 16-byte copies with chosen rows,
+# global addresses, and active lanes. A copy without global addresses reads consecutive
+# rows of its width, lane by lane.
 INSTRUCTIONS = json.loads(
     (pathlib.Path(__file__).parent / "data" / "rtx4060_instruction_counts.json").read_text()
 )
-# 16-byte cp.async copies whose lanes merge in ways the model does not yet reproduce.
-INSTRUCTION_MISSES = {
-    "targeted/cp_async_16-alternate-next-0",
-    "targeted/cp_async_16-lane0-next-0",
-    *(
-        f"random-probe/cp_async_16-random{index}"
-        for index in (0, 2, 4, 6, 10, 16, 17, 18, 19, 21, 22, 23, 28, 29)
-    ),
-    *(
-        f"random-seed-3/random-{index}-cp-async-16"
-        for index in (
-            *(12, 20, 31, 34, 36, 37, 41, 44, 62, 91),
-            *(140, 149, 159, 168, 169, 170, 226, 277, 294),
-        )
-    ),
-}
+
+
+def sources_of(width, sources):
+    return sources if sources is not None else [width * lane for lane in range(32)]
 
 
 def instruction_cases():
-    for group, name, opcode, width, offsets, wavefronts, ideal in INSTRUCTIONS["cases"]:
-        case_id = f"{group}/{name}"
-        marks = [pytest.mark.xfail(strict=True)] if case_id in INSTRUCTION_MISSES else []
-        yield pytest.param(opcode, width, offsets, (wavefronts, ideal), id=case_id, marks=marks)
+    for group, name, opcode, width, offsets, wavefronts, ideal, sources, *_ in INSTRUCTIONS[
+        "cases"
+    ]:
+        yield pytest.param(
+            opcode, width, offsets, sources, (wavefronts, ideal), id=f"{group}/{name}"
+        )
+
+
+def copy_sector_cases():
+    for group, name, opcode, width, offsets, _, _, sources, *measured in INSTRUCTIONS["cases"]:
+        if measured[0] is not None:
+            yield pytest.param(
+                opcode, width, offsets, sources, tuple(measured), id=f"{group}/{name}"
+            )
 
 
 def test_measurements_cover_every_ldmatrix_and_cp_async_case():
@@ -101,15 +102,39 @@ def test_measurements_cover_every_ldmatrix_and_cp_async_case():
 
 
 def test_measured_random_ldmatrix_and_cp_async_patterns_come_from_the_calibration_run():
-    measured = [case for case in INSTRUCTIONS["cases"] if case[0] == "random-seed-3"]
-    generated = calibration.random_instruction_cases(len(measured), 3)
-    for (_, name, _, width, offsets, *_), case in zip(measured, generated, strict=True):
-        assert (name, width, offsets) == (case.name, case.width, list(case.offsets))
+    for seed in (3, 4):
+        measured = [case for case in INSTRUCTIONS["cases"] if case[0] == f"random-seed-{seed}"]
+        generated = calibration.random_instruction_cases(len(measured), seed)
+        for (_, name, _, width, offsets, *_), case in zip(measured, generated, strict=True):
+            assert (name, width, offsets) == (case.name, case.width, list(case.offsets))
 
 
-@pytest.mark.parametrize(("opcode", "width", "offsets", "measured"), list(instruction_cases()))
-def test_model_matches_nsight_compute_on_ldmatrix_and_cp_async(opcode, width, offsets, measured):
+@pytest.mark.parametrize(
+    ("opcode", "width", "offsets", "sources", "measured"), list(instruction_cases())
+)
+def test_model_matches_nsight_compute_on_ldmatrix_and_cp_async(
+    opcode, width, offsets, sources, measured
+):
     store = opcode.startswith("LDGSTS")
     arch = INSTRUCTIONS["arch"]
-    result = shared_memory.analyze(offsets, width, store=store, arch=arch, opcode=opcode)
+    result = shared_memory.analyze(
+        offsets, width, store=store, arch=arch, opcode=opcode, sources=sources
+    )
     assert (result.wavefronts, result.ideal) == measured
+
+
+@pytest.mark.parametrize(
+    ("opcode", "width", "offsets", "sources", "measured"), list(copy_sector_cases())
+)
+def test_model_matches_nsight_compute_on_the_global_sectors_of_cp_async(
+    opcode, width, offsets, sources, measured
+):
+    reads = [
+        None if offset is None else address
+        for offset, address in zip(offsets, sources_of(width, sources), strict=True)
+    ]
+    if "BYPASS" in opcode:
+        result = global_memory.copy_sectors(reads, offsets)
+    else:
+        result = global_memory.analyze(reads, width)
+    assert (result.sectors, result.ideal) == measured

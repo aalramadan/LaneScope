@@ -109,7 +109,7 @@ def access(trace: Trace, row: int) -> dict:
     }
     if item.space == Space.SHARED:
         return data | _shared_lanes(trace, row)
-    return data | _global_lanes(item.addresses, item.width)
+    return data | _global_lanes(trace, row)
 
 
 def whatif(trace: Trace, buffer: Buffer, change: Change) -> dict:
@@ -223,8 +223,9 @@ def _shared_lanes(trace: Trace, row: int) -> dict:
     }
 
 
-def _global_lanes(addresses: tuple[int | None, ...], width: int) -> dict:
-    result = global_memory.analyze(addresses, width)
+def _global_lanes(trace: Trace, row: int) -> dict:
+    addresses = trace.lane_addresses(row)
+    result = global_memory.analyze_row(trace, row)
     # Global addresses can pass 2**53, the largest integer that JSON readers keep
     # exact, so addresses travel as text and offsets from the first line as numbers.
     return {

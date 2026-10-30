@@ -3,7 +3,8 @@ import functools
 import math
 from collections.abc import Sequence
 
-from lanescope.trace import check_lanes
+from lanescope.model import async_copy
+from lanescope.trace import Trace, check_lanes
 
 SECTOR_BYTES = 32
 LINE_BYTES = 128
@@ -18,6 +19,9 @@ class GlobalAccess:
     active: int
     base: int
     sector_lanes: tuple[tuple[int, tuple[int, ...]], ...]
+    # A 16-byte cp.async that bypasses L1 has an ideal that Nsight Compute takes from its
+    # shared rows, two to a sector, in place of its active bytes.
+    ideal_sectors: int | None = None
 
     @property
     def sectors(self) -> int:
@@ -32,6 +36,8 @@ class GlobalAccess:
     @property
     def ideal(self) -> int:
         """Return the sectors that the active bytes need, at most the sectors they touch."""
+        if self.ideal_sectors is not None:
+            return self.ideal_sectors
         return min(math.ceil(self.active * self.width / SECTOR_BYTES), self.sectors)
 
     @property
@@ -53,6 +59,34 @@ def analyze(addresses: Sequence[int | None], width: int) -> GlobalAccess:
     base = min(active) // LINE_BYTES * LINE_BYTES
     relative = tuple(None if address is None else address - base for address in addresses)
     return dataclasses.replace(_analyze(relative, width), base=base)
+
+
+def analyze_row(trace: Trace, row: int) -> GlobalAccess:
+    """Model one global row of a trace.
+
+    A 16-byte cp.async that bypasses L1 reads one sector for each of its writes into shared
+    memory, as Nsight Compute counts it, and so takes its count from both of its rows.
+    """
+    addresses, width = trace.lane_addresses(row), int(trace.width[row])
+    partner = trace.copy_partners.get(row)
+    if (
+        partner is None
+        or width != async_copy.ROW_BYTES
+        or "BYPASS" not in trace.opcode(int(trace.pc[row]))
+    ):
+        return analyze(addresses, width)
+    return copy_sectors(addresses, trace.lane_addresses(partner))
+
+
+def copy_sectors(sources: Sequence[int | None], destinations: Sequence[int | None]) -> GlobalAccess:
+    """Model the sectors of a 16-byte cp.async that bypasses L1, one for each write."""
+    writes = async_copy.copies(sources, destinations)
+    base = min(write.source for write in writes) // LINE_BYTES * LINE_BYTES
+    sector_lanes = tuple(((write.source - base) // SECTOR_BYTES, write.lanes) for write in writes)
+    rows = {address // async_copy.ROW_BYTES for address in destinations if address is not None}
+    active = sum(address is not None for address in destinations)
+    ideal = math.ceil(len(rows) * async_copy.ROW_BYTES / SECTOR_BYTES)
+    return GlobalAccess(async_copy.ROW_BYTES, active, base, sector_lanes, ideal)
 
 
 @functools.lru_cache(maxsize=1 << 16)

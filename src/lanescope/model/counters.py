@@ -85,7 +85,15 @@ def row_keys(trace: Trace) -> np.ndarray:
         base = first // np.uint64(LINE_BYTES) * np.uint64(LINE_BYTES)
         addresses[is_global] = np.where(lanes, addresses[is_global] - base[:, None], np.uint64(0))
     columns = [trace.pc, trace.space, trace.kind, trace.width, trace.mask]
-    return np.column_stack([*(c.astype(np.uint64) for c in columns), addresses])
+    keys = np.column_stack([*(c.astype(np.uint64) for c in columns), addresses])
+    partners = trace.copy_partners
+    if not partners:
+        return keys
+    # The two rows of a cp.async count from both sides of the copy, so each row keys on the
+    # addresses of its partner as well.
+    other = np.zeros_like(addresses)
+    other[list(partners)] = addresses[list(partners.values())]
+    return np.column_stack([keys, other])
 
 
 def distinct_rows(trace: Trace) -> tuple[np.ndarray, np.ndarray]:
@@ -100,7 +108,7 @@ def measure(trace: Trace, row: int) -> tuple[int, int, int, int]:
     if trace.space[row] == Space.SHARED:
         shared = shared_memory.analyze_row(trace, row)
         return shared.wavefronts, shared.ideal, shared.excessive, shared.conflicts
-    sectors = global_memory.analyze(trace.lane_addresses(row), int(trace.width[row]))
+    sectors = global_memory.analyze_row(trace, row)
     return sectors.sectors, sectors.ideal, sectors.excessive, 0
 
 

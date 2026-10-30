@@ -310,10 +310,37 @@ def test_cp_async_writes_to_one_address_take_one_wavefront_each():
     assert (result.wavefronts, result.ideal) == (32, 1)
 
 
-@pytest.mark.parametrize(("stride", "wavefronts"), [(16, 4), (32, 32), (0, 1)])
-def test_16_byte_cp_async_counts_each_row_unless_eight_lanes_fill_one_line(stride, wavefronts):
-    result = shared_memory.analyze(_rows(stride), 16, store=True, opcode="LDGSTS.E.BYPASS.128")
-    assert result.wavefronts == wavefronts
+@pytest.mark.parametrize(
+    ("rows", "wavefronts"),
+    [
+        (list(range(WARP_SIZE)), 4),
+        ([lane // 8 * 8 + (lane % 8 ^ lane // 8) for lane in range(WARP_SIZE)], 4),
+        ([lane + 1 for lane in range(WARP_SIZE)], 12),
+        ([2 * lane for lane in range(WARP_SIZE)], 32),
+        ([0] * WARP_SIZE, 1),
+    ],
+)
+def test_16_byte_cp_async_gives_the_wavefronts_measured_on_the_rtx_4060(rows, wavefronts):
+    destinations = [16 * row for row in rows]
+    result = shared_memory.analyze(destinations, 16, store=True, opcode="LDGSTS.E.BYPASS.128")
+    assert (result.wavefronts, result.ideal) == (wavefronts, -(-len(set(rows)) // 8))
+
+
+def test_16_byte_cp_async_counts_from_the_global_addresses_of_its_lanes():
+    destinations = _rows(16)
+    apart = [32 * lane for lane in range(WARP_SIZE)]
+    result = shared_memory.analyze(
+        destinations, 16, store=True, opcode="LDGSTS.E.BYPASS.128", sources=apart
+    )
+    assert result.wavefronts == 32
+
+
+def test_analyze_row_reads_the_global_addresses_of_the_same_cp_async():
+    pc, opcode = 0x40, "LDGSTS.E.BYPASS.128"
+    apart = Access(pc, Space.GLOBAL, Kind.LOAD, 16, tuple(32 * lane for lane in range(WARP_SIZE)))
+    write = Access(pc, Space.SHARED, Kind.STORE, 16, tuple(_rows(16)))
+    trace = Trace.from_accesses([apart, write], metadata={"opcodes": {f"{pc:#x}": opcode}})
+    assert shared_memory.analyze_row(trace, 1).wavefronts == 32
 
 
 def test_analyze_row_takes_the_rule_from_the_opcode_in_the_trace():

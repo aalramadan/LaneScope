@@ -1,7 +1,7 @@
 import pytest
 
 from lanescope.model import global_memory
-from lanescope.trace import WARP_SIZE
+from lanescope.trace import WARP_SIZE, Access, Kind, Space, Trace
 
 BASE = 0x7F00_0000_0000
 
@@ -79,3 +79,31 @@ def test_coalesced_floats_from_the_last_sector_of_a_line_touch_two_lines():
 def test_coalesced_accesses_of_two_and_eight_bytes(width, sectors, lines):
     result = global_memory.analyze(lanes(lambda lane: BASE + width * lane), width)
     assert (result.sectors, result.lines, result.ideal) == (sectors, lines, sectors)
+
+
+def copy_trace(sources, rows, opcode="LDGSTS.E.BYPASS.128"):
+    """Return a trace of one 16-byte cp.async with its global and its shared row."""
+    read = Access(0x40, Space.GLOBAL, Kind.LOAD, 16, tuple(sources))
+    write = Access(0x40, Space.SHARED, Kind.STORE, 16, tuple(16 * row for row in rows))
+    return Trace.from_accesses([read, write], metadata={"opcodes": {"0x40": opcode}})
+
+
+@pytest.mark.parametrize(
+    ("rows", "sectors", "ideal"),
+    [
+        ([0] * WARP_SIZE, 1, 1),
+        (list(range(WARP_SIZE)), 16, 16),
+        ([8 * lane for lane in range(WARP_SIZE)], 32, 16),
+    ],
+)
+def test_a_16_byte_cp_async_that_bypasses_l1_reads_one_sector_per_write(rows, sectors, ideal):
+    access = global_memory.analyze_row(
+        copy_trace([16 * lane for lane in range(WARP_SIZE)], rows), 0
+    )
+    assert (access.sectors, access.ideal) == (sectors, ideal)
+
+
+def test_a_cp_async_through_l1_counts_the_sectors_of_its_global_addresses():
+    trace = copy_trace([16 * lane for lane in range(WARP_SIZE)], [0] * WARP_SIZE, "LDGSTS.E.128")
+    access = global_memory.analyze_row(trace, 0)
+    assert (access.sectors, access.ideal) == (16, 16)

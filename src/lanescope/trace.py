@@ -1,5 +1,6 @@
 import dataclasses
 import enum
+import functools
 import json
 import pathlib
 import tokenize
@@ -152,6 +153,29 @@ class Trace:
     def opcode(self, pc: int) -> str:
         """Return the SASS opcode that the metadata keeps for a PC, or an empty string."""
         return str(self.metadata.get("opcodes", {}).get(f"{pc:#x}", ""))
+
+    @functools.cached_property
+    def copy_partners(self) -> dict[int, int]:
+        """Return, for each row of a cp.async, the row of the other side of the same copy.
+
+        A cp.async records its global row before its shared row at one PC, and the two
+        sides pair up within one warp of one CTA.
+        """
+        pcs = [
+            int(pc, 16)
+            for pc, code in self.metadata.get("opcodes", {}).items()
+            if code.startswith("LDGSTS")
+        ]
+        partners: dict[int, int] = {}
+        reads: dict[tuple[int, int, int], int] = {}
+        for row in np.flatnonzero(np.isin(self.pc, pcs)).tolist() if pcs else []:
+            key = (int(self.pc[row]), int(self.cta[row]), int(self.warp[row]))
+            if self.space[row] == Space.GLOBAL:
+                reads[key] = row
+            elif key in reads:
+                read = reads.pop(key)
+                partners[row], partners[read] = read, row
+        return partners
 
     def save(self, path: str | pathlib.Path) -> None:
         """Write the trace to an .npz file."""

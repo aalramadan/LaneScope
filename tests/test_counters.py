@@ -141,3 +141,19 @@ def test_counting_distinct_rows_once_gives_the_counts_of_a_row_by_row_sum():
             for c in count(trace)
         }
         assert found == reference_count(trace)
+
+
+def test_count_keeps_two_copies_apart_when_only_their_global_addresses_differ():
+    pc, rows = 0x40, tuple(16 * lane for lane in range(WARP_SIZE))
+    together = tuple(16 * lane for lane in range(WARP_SIZE))
+    apart = tuple(32 * lane for lane in range(WARP_SIZE))
+    accesses = [
+        Access(pc, Space.GLOBAL, Kind.LOAD, 16, together, warp=0),
+        Access(pc, Space.SHARED, Kind.STORE, 16, rows, warp=0),
+        Access(pc, Space.GLOBAL, Kind.LOAD, 16, apart, warp=1),
+        Access(pc, Space.SHARED, Kind.STORE, 16, rows, warp=1),
+    ]
+    trace = Trace.from_accesses(accesses, {"opcodes": {"0x40": "LDGSTS.E.BYPASS.128"}})
+    found = {counter.space: (counter.achieved, counter.ideal) for counter in count(trace)}
+    assert found[Space.SHARED] == (4 + 32, 8)
+    assert found[Space.GLOBAL] == (16 + 32, 32)

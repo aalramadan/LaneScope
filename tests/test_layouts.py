@@ -180,6 +180,20 @@ def test_infer_buffer_stops_at_the_array_and_not_at_a_line():
     assert layouts.infer_buffer(trace, 0x20) == layouts.Buffer(0, 1600)
 
 
+def test_infer_buffer_takes_in_the_stores_that_fill_what_one_load_reads_in_part():
+    # A load reads the first 32 bytes of 16 rows of 128 bytes. One store fills the whole
+    # 2,048 bytes of that tile, and another store fills the tile after it.
+    rows = tuple(128 * (lane % 16) + 16 * (lane // 16) for lane in range(WARP_SIZE))
+    load = Access(0x80, Space.SHARED, Kind.LOAD, 16, rows)
+    fill = [
+        Access(pc, Space.SHARED, Kind.STORE, 16, tuple(base + 16 * lane for lane in range(32)))
+        for pc, start in ((0x40, 0), (0x50, 2048))
+        for base in range(start, start + 2048, 512)
+    ]
+    trace = Trace.from_accesses([*fill, load])
+    assert layouts.infer_buffer(trace, 0x80) == layouts.Buffer(0, 2048)
+
+
 def test_padding_that_would_move_addresses_past_the_window_is_refused():
     with pytest.raises(ValueError, match="padded buffer must end below"):
         layouts.Padding(16, (1 << 47) - 16).check(layouts.Buffer(0, 1 << 47))

@@ -28,16 +28,32 @@ def kernel(name, store_wavefronts, load_wavefronts):
     )
 
 
-def test_launch_names_cover_every_case_and_the_three_transposes():
+def test_launch_names_cover_every_case_the_transposes_and_the_matmuls():
     names = validate.launch_names()
-    assert len(names) == len(calibration.launches()) + 3
-    assert names[-3:] == list(calibration.TRANSPOSE_KERNELS)
+    fixed = list(calibration.TRANSPOSE_KERNELS) + list(calibration.MATMUL_KERNELS)
+    assert len(names) == len(calibration.launches()) + len(fixed)
+    assert names[-len(fixed) :] == fixed
+
+
+def matmul_trace(kernel_name):
+    """Return a plain matmul: a cp.async that fills a 512-byte tile and an ldmatrix on one bank."""
+    rows = tuple(16 * lane for lane in range(WARP_SIZE))
+    accesses = [
+        Access(0x40, Space.GLOBAL, Kind.LOAD, 16, rows),
+        Access(0x40, Space.SHARED, Kind.STORE, 16, rows),
+        Access(0x80, Space.SHARED, Kind.LOAD, 16, tuple(128 * (lane % 4) for lane in range(32))),
+    ]
+    opcodes = {"0x40": "LDGSTS.E.BYPASS.128", "0x80": "LDSM.16.M88.4"}
+    return Trace.from_accesses(accesses, {"kernel": kernel_name, "opcodes": opcodes})
 
 
 def traces_and_kernels():
     names, kernels = validate.launch_names(), validate.launch_kernels()
     traces = []
     for kernel_name in kernels:
+        if kernel_name == "matmul_plain":
+            traces.append(matmul_trace(kernel_name))
+            continue
         trace = demos.transpose_trace() if kernel_name == "transpose_tile" else filler_trace()
         traces.append(
             Trace(**{n: getattr(trace, n) for n in COLUMNS}, metadata={"kernel": kernel_name})
@@ -45,6 +61,11 @@ def traces_and_kernels():
     counters = [kernel(name, 0.0, 0.0) for name in kernels]
     counters[names.index("transpose_padded")] = kernel("transpose_padded", 128.0, 128.0)
     counters[names.index("transpose_swizzled")] = kernel("transpose_swizzled", 128.0, 4096.0)
+    counters[names.index("matmul_swizzled")] = compare.KernelCounters(
+        kernel="matmul_swizzled",
+        metrics={"memory_l1_wavefronts_shared": {0x40: 4.0, 0x80: 4.0}},
+        sass={0x40: "LDGSTS.E.BYPASS.128 [R1][R2.64]", 0x80: "LDSM.16.M88.4 R4, [R5]"},
+    )
     return traces, counters
 
 
@@ -52,8 +73,10 @@ def test_predictions_set_the_what_if_counts_against_the_measured_ones():
     launches, problems = validate.pair_launches(*traces_and_kernels())
     assert problems == []
     found = {
-        (p.kernel, p.kind): (p.predicted, p.measured) for p in validate.predict_transposes(launches)
+        (p.kernel, p.kind): (p.predicted, p.measured) for p in validate.predict_layouts(launches)
     }
+    assert found[("matmul_swizzled", Kind.STORE)] == (4, 4.0)
+    assert found[("matmul_swizzled", Kind.LOAD)] == (4, 4.0)
     assert found[("transpose_padded", Kind.LOAD)] == (128, 128.0)
     assert found[("transpose_swizzled", Kind.LOAD)] == (128, 4096.0)
     assert found[("transpose_swizzled", Kind.STORE)] == (128, 128.0)
@@ -78,7 +101,7 @@ def test_missing_launches_are_reported():
 
 def test_predictions_need_the_tiled_transpose():
     launches, _ = validate.pair_launches([filler_trace()], None)
-    assert validate.predict_transposes(launches) == []
+    assert validate.predict_layouts(launches) == []
 
 
 def test_validation_stops_with_a_clear_error_without_a_gpu(tmp_path):
@@ -148,7 +171,9 @@ def test_random_patterns_reach_the_recorded_run_and_the_launch_names(
     validate.validate(tmp_path / "check", tools=tools, random_count=5, seed=7)
     assert commands[0][-4:] == ["--random", "5", "--seed", "7"]
     names = validate.launch_names(5, 7)
-    assert names[:-3] == [case.name for case in calibration.launches(5, 7)]
+    assert names[: -len(calibration.TRANSPOSE_KERNELS) - len(calibration.MATMUL_KERNELS)] == [
+        case.name for case in calibration.launches(5, 7)
+    ]
 
 
 def summary_row(launch, nsight):
@@ -177,6 +202,55 @@ def test_validation_without_nsight_compute_says_how_to_get_it(tmp_path, offline_
     summary = validate.validate(tmp_path / "check", tools=tools).read_text()
     assert "`lanescope get-ncu`" in summary
     assert "install Nsight Compute" in summary
+
+
+def program_check(monkeypatch, tmp_path, counters):
+    """Stand in for the recording and the profile of a program with one launch of kernel k."""
+    trace = tmp_path / "trace-0.npz"
+    access = Access(0x80, Space.SHARED, Kind.LOAD, 4, tuple(128 * lane for lane in range(32)))
+    Trace.from_accesses([access], {"kernel": "k"}).save(trace)
+    calls = []
+    monkeypatch.setattr(validate.capture, "import_recording", lambda out, tools: [trace])
+    monkeypatch.setattr(
+        validate, "_profile", lambda tools, command, report, kernel="": calls.append(kernel)
+    )
+    monkeypatch.setattr(validate.compare, "read_report", lambda report: counters)
+    return calls
+
+
+def test_validating_a_program_compares_each_of_its_launches_with_its_counters(
+    tmp_path, offline_check, monkeypatch
+):
+    counters = compare.KernelCounters(
+        kernel="k(float *)",
+        metrics={
+            "memory_l1_wavefronts_shared": {0x80: 32.0},
+            "memory_l1_wavefronts_shared_ideal": {0x80: 1.0},
+        },
+        sass={0x80: "LDS R0, [R1]"},
+    )
+    calls = program_check(monkeypatch, tmp_path, [counters])
+    tools = dataclasses.replace(find(), ncu=pathlib.Path("ncu"))
+    summary = validate.validate_program(tmp_path / "check", ["./app"], "k", tools=tools)
+    text = summary.read_text()
+    assert "LaneScope matches Nsight Compute in 2 of 2 instruction counts." in text
+    assert calls == ["k"]
+
+
+def test_validating_a_program_names_a_launch_without_counters_of_its_kernel(
+    tmp_path, offline_check, monkeypatch
+):
+    other = compare.KernelCounters(kernel="other(float *)", metrics={}, sass={})
+    program_check(monkeypatch, tmp_path, [other])
+    tools = dataclasses.replace(find(), ncu=pathlib.Path("ncu"))
+    text = validate.validate_program(tmp_path / "check", ["./app"], tools=tools).read_text()
+    assert "Launch 0 (k) has Nsight Compute counters of other(float *)." in text
+
+
+def test_validating_a_program_needs_nsight_compute(tmp_path, offline_check):
+    tools = dataclasses.replace(find(), ncu=None)
+    with pytest.raises(validate.ValidationError, match="lanescope get-ncu"):
+        validate.validate_program(tmp_path / "check", ["./app"], tools=tools)
 
 
 def test_cuda_tools_newer_than_the_driver_name_the_switch_to_the_wheels(monkeypatch):

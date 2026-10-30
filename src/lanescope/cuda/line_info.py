@@ -22,18 +22,28 @@ FunctionLines = dict[int, tuple[str, int]]
 
 
 def parse(listing: str) -> dict[str, FunctionLines]:
-    """Return the file and line of each instruction offset, for each function of a listing."""
+    """Return the file and line of each instruction offset, for each function of a listing.
+
+    An inlined instruction comes with its own line, then the lines of the calls that
+    inlined it, ending with the call in the kernel. It keeps the innermost line that lies
+    in the file of that last call.
+    """
     functions: dict[str, FunctionLines] = {}
     current: FunctionLines | None = None
     location: tuple[str, int] | None = None
+    calls: list[tuple[str, int]] = []
     for text in listing.splitlines():
         if section := SECTION.match(text):
             current = functions.setdefault(section["name"], {})
-            location = None
+            location, calls = None, []
         elif found := LOCATION.match(text):
-            location = (found["file"], int(found["line"]))
-        elif current is not None and location is not None and (code := INSTRUCTION.match(text)):
-            current[int(code["offset"], 16)] = location
+            calls.append((found["file"], int(found["line"])))
+        elif current is not None and (code := INSTRUCTION.match(text)):
+            if calls:
+                location = next(call for call in calls if call[0] == calls[-1][0])
+                calls = []
+            if location is not None:
+                current[int(code["offset"], 16)] = location
     return functions
 
 
@@ -77,9 +87,9 @@ def module_listing(disassemblers: Sequence[pathlib.Path], cubin: pathlib.Path) -
 def metadata(lines: FunctionLines) -> dict:
     """Return the trace metadata of one function: its main source file, its text, and its lines.
 
-    The main file is the one with the most instructions. Inlined instructions carry
-    the line of their call, so only an instruction that the line table places in
-    another file keeps no line.
+    The main file is the one with the most instructions. An instruction inlined from
+    another file carries the line of its call, so only an instruction that the line
+    table places in another file keeps no line.
     """
     if not lines:
         return {}

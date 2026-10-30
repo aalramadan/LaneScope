@@ -1,7 +1,9 @@
+import collections
 import pathlib
 import re
 import subprocess
 
+import numpy as np
 import pytest
 
 from lanescope.cuda import toolchain
@@ -53,9 +55,11 @@ def test_case_names_are_unique():
 
 
 def test_kernel_source_defines_exactly_the_kernels_that_run():
-    defined = set(re.findall(r"__global__ void (\w+)\(", calibration.kernel_source()))
+    kernel = r"__global__ void (?:__launch_bounds__\(\d+\)\s+)?(\w+)\("
+    defined = set(re.findall(kernel, calibration.kernel_source()))
     launched = {case.kernel for case in calibration.launches()}
-    assert defined == launched | set(calibration.TRANSPOSE_KERNELS)
+    fixed = set(calibration.TRANSPOSE_KERNELS) | set(calibration.MATMUL_KERNELS)
+    assert defined == launched | fixed
 
 
 def test_forum_cases_keep_the_wavefronts_measured_on_h100():
@@ -86,7 +90,7 @@ def test_every_kernel_compiles_for_sm_89():
     cubin = calibration.compile_kernels("sm_89", TOOLS)
     names = {name.decode() for name in re.findall(rb"\.text\.([A-Za-z0-9_]+)", cubin)}
     expected = {case.kernel for case in calibration.launches()} | set(calibration.TRANSPOSE_KERNELS)
-    assert expected <= names
+    assert expected | set(calibration.MATMUL_KERNELS) <= names
 
 
 def test_kernel_source_uses_one_vector_load_for_16_bytes():
@@ -209,4 +213,55 @@ def test_each_transpose_gets_a_positive_time_on_the_local_gpu(tmp_path):
     cubin.write_bytes(calibration.compile_kernels(arch, TOOLS))
     times = calibration.time_transposes(cubin, size=64, repeats=2)
     assert [time.kernel for time in times] == list(calibration.TRANSPOSE_KERNELS)
+    assert all(time.milliseconds > 0 for time in times)
+
+
+@pytest.mark.skipif(
+    TOOLS.nvrtc is None or TOOLS.nvdisasm is None, reason="NVRTC and nvdisasm are needed"
+)
+def test_matmul_kernels_feed_tensor_cores_from_cp_async_and_ldmatrix(tmp_path):
+    cubin = tmp_path / "bench.cubin"
+    cubin.write_bytes(calibration.compile_kernels("sm_89", TOOLS))
+    functions = _sass_opcodes(cubin)
+    for kernel in calibration.MATMUL_KERNELS:
+        found = collections.Counter(functions[kernel])
+        assert found["LDGSTS.E.BYPASS.128"] == 8, kernel
+        assert found["LDSM.16.M88.4"] == 16, kernel
+        assert found["HMMA.16816.F32"] == 32, kernel
+        assert not [op for op in found if op.split(".")[0] in ("LDL", "STL")], kernel
+
+
+def test_matmul_throughput_counts_two_operations_per_multiply_and_add():
+    time = calibration.MatmulTime("matmul_plain", milliseconds=1.0, size=1024)
+    assert time.teraflops == pytest.approx(2 * 1024**3 / 1e-3 / 1e12)
+
+
+def test_matmul_timing_rejects_a_size_that_is_not_a_multiple_of_64(tmp_path):
+    with pytest.raises(ValueError, match="multiple of 64"):
+        calibration.time_matmuls(tmp_path / "bench.cubin", size=96, repeats=1)
+
+
+@pytest.mark.skipif(TOOLS.nvrtc is None or not _has_gpu(), reason="NVRTC and a GPU are needed")
+def test_each_matmul_computes_the_product_of_its_inputs_on_the_local_gpu(tmp_path):
+    driver = Driver()
+    arch = driver.arch()
+    driver.close()
+    cubin = tmp_path / "bench.cubin"
+    cubin.write_bytes(calibration.compile_kernels(arch, TOOLS))
+    rng = np.random.default_rng(0)
+    a, b = (rng.uniform(-1, 1, (128, 128)).astype(np.float16) for _ in range(2))
+    expected = a.astype(np.float32) @ b.astype(np.float32).T
+    for kernel in calibration.MATMUL_KERNELS:
+        assert np.allclose(calibration.multiply(cubin, kernel, a, b), expected, atol=1e-3)
+
+
+@pytest.mark.skipif(TOOLS.nvrtc is None or not _has_gpu(), reason="NVRTC and a GPU are needed")
+def test_each_matmul_gets_a_positive_time_on_the_local_gpu(tmp_path):
+    driver = Driver()
+    arch = driver.arch()
+    driver.close()
+    cubin = tmp_path / "bench.cubin"
+    cubin.write_bytes(calibration.compile_kernels(arch, TOOLS))
+    times = calibration.time_matmuls(cubin, size=128, repeats=2)
+    assert [time.kernel for time in times] == list(calibration.MATMUL_KERNELS)
     assert all(time.milliseconds > 0 for time in times)

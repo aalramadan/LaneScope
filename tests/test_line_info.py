@@ -221,3 +221,20 @@ def test_module_listing_passes_over_an_nvdisasm_that_cannot_start(tmp_path):
     cubin.write_bytes(b"")
     with pytest.raises(ValueError, match="cannot start"):
         line_info.module_listing([broken], cubin)
+
+
+INLINED_LISTING = """.text.k:
+	//## File "/src/k.cu", line 9 inlined at "/src/k.cu", line 20
+	//## File "/src/k.cu", line 20
+        /*0000*/                   LDS R0, [R1] ;
+	//## File "/src/h.cuh", line 2 inlined at "/src/k.cu", line 21
+	//## File "/src/k.cu", line 21
+        /*0010*/                   STS [R1], R0 ;
+        /*0020*/                   EXIT ;
+"""
+
+
+def test_an_inlined_instruction_keeps_its_own_line_inside_the_file_of_its_call():
+    assert line_info.parse(INLINED_LISTING) == {
+        "k": {0x0: ("/src/k.cu", 9), 0x10: ("/src/k.cu", 21), 0x20: ("/src/k.cu", 21)}
+    }

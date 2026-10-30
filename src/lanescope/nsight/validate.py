@@ -18,6 +18,13 @@ from lanescope.trace import Kind, Space, Trace
 
 TRACE_NAME = re.compile(r"trace-(\d+)")
 SUMMARY = "validation.json"
+# Each layout kernel of the bench with the plain kernel it is predicted from, its change,
+# and the opcodes of its shared stores and loads.
+PREDICTIONS = (
+    ("transpose_padded", "transpose_tile", Padding(128, 4), ("STS", "LDS")),
+    ("transpose_swizzled", "transpose_tile", XorSwizzle(5, 2, 5), ("STS", "LDS")),
+    ("matmul_swizzled", "matmul_plain", XorSwizzle(3, 4, 3), ("LDGSTS", "LDSM")),
+)
 
 
 class ValidationError(RuntimeError):
@@ -63,13 +70,17 @@ class Launch:
 def launch_names(random_count: int = 0, seed: int = 0) -> list[str]:
     """Return the case or kernel name of each launch of the calibration run, in order."""
     cases = calibration.launches(random_count, seed)
-    return [case.name for case in cases] + list(calibration.TRANSPOSE_KERNELS)
+    return [case.name for case in cases] + _fixed_kernels()
 
 
 def launch_kernels(random_count: int = 0, seed: int = 0) -> list[str]:
     """Return the kernel of each launch of the calibration run, in order."""
     cases = calibration.launches(random_count, seed)
-    return [case.kernel for case in cases] + list(calibration.TRANSPOSE_KERNELS)
+    return [case.kernel for case in cases] + _fixed_kernels()
+
+
+def _fixed_kernels() -> list[str]:
+    return [*calibration.TRANSPOSE_KERNELS, *calibration.MATMUL_KERNELS]
 
 
 def pair_launches(
@@ -80,6 +91,15 @@ def pair_launches(
 ) -> tuple[list[Launch], list[str]]:
     """Pair each launch with the trace and the counters of its own kernel, and list each gap."""
     names, expected = launch_names(random_count, seed), launch_kernels(random_count, seed)
+    return _pair(traces, kernels, names, expected)
+
+
+def _pair(
+    traces: list[Trace],
+    kernels: list[compare.KernelCounters] | None,
+    names: list[str],
+    expected: list[str],
+) -> tuple[list[Launch], list[str]]:
     problems = []
     if len(traces) != len(names):
         problems.append(
@@ -163,7 +183,7 @@ def validate(
         if launch.trace is not None and launch.counters is not None
         for row in compare.compare(launch.index, launch.trace, launch.counters)
     ]
-    predictions = predict_transposes(launches)
+    predictions = predict_layouts(launches)
     lines += ["", *problems]
     lines += [
         "",
@@ -175,6 +195,58 @@ def validate(
     ]
     lines += ["", *_mismatch_lines(rows, names)]
     return _write(out_dir, lines, rows, predictions)
+
+
+def validate_program(
+    out_dir: pathlib.Path,
+    command: list[str],
+    kernel: str = "",
+    arch: str | None = None,
+    tools: Toolchain | None = None,
+) -> pathlib.Path:
+    """Record a program, profile it with Nsight Compute, and compare the two launch by launch.
+
+    Both tools see every CTA of each launch of the kernels whose names hold `kernel`,
+    so a small run of the program keeps the check fast. Returns the path of the summary.
+    """
+    tools = tools or find()
+    if tools.ncu is None:
+        raise ValidationError(
+            "Nsight Compute was not found. Run `lanescope get-ncu` or install Nsight Compute."
+        )
+    driver = Driver()
+    arch = arch or driver.arch()
+    supported = driver.version()
+    gpu = f"{driver.name()} ({arch}), driver CUDA version {version_text(supported)}"
+    driver.close()
+    check_versions(tools, supported)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    build = build_recorder(out_dir / "build", arch, tools)
+    record_dir = out_dir / "record"
+    if capture.record(command, build, record_dir, ctas=(0, 1 << 30), kernel=kernel) != 0:
+        raise ValidationError(f"the recorded run failed. Its launch files are in {record_dir}.")
+    paths = capture.import_recording(record_dir, tools.disassemblers)
+    if not paths:
+        raise ValidationError(
+            f"the recorder saw no launch of a kernel whose name holds {kernel!r}."
+        )
+    traces = [Trace.load(path) for path in paths]
+    names = [str(trace.metadata.get("kernel", "")) for trace in traces]
+    report = out_dir / "ncu" / "program.ncu-rep"
+    _profile(tools, command, report, kernel)
+    kernels = compare.read_report(report)
+    compare.dump(kernels, out_dir / "ncu-metrics.json")
+    launches, problems = _pair(traces, kernels, names, names)
+    rows = [
+        row
+        for launch in launches
+        if launch.trace is not None and launch.counters is not None
+        for row in compare.compare(launch.index, launch.trace, launch.counters)
+    ]
+    lines = [f"# LaneScope validation of {' '.join(command)} on {gpu}", ""]
+    lines += [*_trace_lines(traces, names), "", *problems, "", *_metric_lines(kernels), ""]
+    lines += [*_summary_lines(rows, []), "", *_mismatch_lines(rows, names)]
+    return _write(out_dir, lines, rows, [])
 
 
 def summary_path(trace_path: pathlib.Path) -> pathlib.Path | None:
@@ -237,21 +309,17 @@ def measured_counts(
     return found
 
 
-def predict_transposes(launches: list[Launch]) -> list[Prediction]:
-    """Predict the padded and swizzled transposes from the tiled one, next to their counters."""
+def predict_layouts(launches: list[Launch]) -> list[Prediction]:
+    """Predict each layout kernel from its plain kernel, next to the counters of the first."""
     by_name = {launch.name: launch for launch in launches}
-    tile = by_name["transpose_tile"].trace if "transpose_tile" in by_name else None
-    if tile is None:
-        return []
-    buffer = infer_buffer(tile)
     predictions = []
-    for kernel, change in (
-        ("transpose_padded", Padding(128, 4)),
-        ("transpose_swizzled", XorSwizzle(5, 2, 5)),
-    ):
-        changed = apply(tile, buffer, change)
+    for kernel, plain, change, opcodes in PREDICTIONS:
+        trace = by_name[plain].trace if plain in by_name else None
+        if trace is None:
+            continue
+        changed = apply(trace, infer_buffer(trace), change)
         counters = by_name[kernel].counters if kernel in by_name else None
-        for kind, opcode in ((Kind.STORE, "STS"), (Kind.LOAD, "LDS")):
+        for kind, opcode in zip((Kind.STORE, Kind.LOAD), opcodes, strict=True):
             predicted = sum(
                 c.achieved for c in count(changed) if c.space == Space.SHARED and c.kind == kind
             )
@@ -261,19 +329,21 @@ def predict_transposes(launches: list[Launch]) -> list[Prediction]:
                 hits = [
                     value
                     for offset, value in values.items()
-                    if compare.opcode(counters.sass.get(offset, "")).startswith(opcode)
+                    if compare.opcode(counters.sass.get(offset, "")).split(".")[0] == opcode
                 ]
                 measured = sum(hits) if hits else None
             predictions.append(Prediction(kernel, change.describe(), kind, predicted, measured))
     return predictions
 
 
-def _profile(tools: Toolchain, command: list[str], report: pathlib.Path) -> None:
+def _profile(tools: Toolchain, command: list[str], report: pathlib.Path, kernel: str = "") -> None:
     report.parent.mkdir(parents=True, exist_ok=True)
     assert tools.ncu is not None
+    # Nsight Compute matches the whole name, the recorder any part of it.
+    names = ["--kernel-name", f"regex:.*{re.escape(kernel)}.*"] if kernel else []
     result = subprocess.run(
         [str(tools.ncu), "--set", "full", "--import-source", "no", "--force-overwrite",
-         "--export", str(report), *command],
+         *names, "--export", str(report), *command],
         capture_output=True, text=True, check=False,
     )  # fmt: skip
     (report.parent / "ncu.log").write_text(result.stdout + result.stderr)

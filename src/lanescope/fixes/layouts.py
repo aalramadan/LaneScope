@@ -131,19 +131,43 @@ class Comparison:
 def infer_buffer(trace: Trace, pc: int | None = None) -> Buffer:
     """Return the 16-byte-aligned range of the shared accesses of one PC, or of all PCs.
 
-    A wider rounding, such as to 128-byte lines, would pull in the first bytes of a
-    neighboring array whenever an array size is no multiple of the rounding.
+    The range of one PC takes in the range of every other shared instruction that
+    overlaps it, until none does. A load that reads part of a tile thus gets the whole
+    tile that its stores fill. A wider rounding, such as to 128-byte lines, would pull in
+    the first bytes of a neighboring array whenever an array size is no multiple of the
+    rounding.
     """
-    shared = (trace.space == Space.SHARED)[:, None] & trace.active()
-    if pc is not None:
-        shared &= (trace.pc == pc)[:, None]
-    if not shared.any():
-        raise ValueError("no shared access to infer a buffer from")
-    addresses = trace.addr[shared]
-    ends = addresses + np.broadcast_to(trace.width[:, None], trace.addr.shape)[shared]
-    start = int(addresses.min()) // ALIGNMENT * ALIGNMENT
-    end = -(-int(ends.max()) // ALIGNMENT) * ALIGNMENT
+    ranges = _shared_ranges(trace)
+    if pc is None:
+        if not ranges:
+            raise ValueError("no shared access to infer a buffer from")
+        start, end = (
+            min(low for low, _ in ranges.values()),
+            max(high for _, high in ranges.values()),
+        )
+    else:
+        if pc not in ranges:
+            raise ValueError("no shared access to infer a buffer from")
+        start, end = ranges[pc]
+        grown = True
+        while grown:
+            grown = False
+            for low, high in ranges.values():
+                if low < end and start < high and (low < start or high > end):
+                    start, end, grown = min(start, low), max(end, high), True
+    start = start // ALIGNMENT * ALIGNMENT
+    end = -(-end // ALIGNMENT) * ALIGNMENT
     return Buffer(start, end - start)
+
+
+def _shared_ranges(trace: Trace) -> dict[int, tuple[int, int]]:
+    shared = (trace.space == Space.SHARED)[:, None] & trace.active()
+    ends = trace.addr + trace.width[:, None].astype(np.uint64)
+    ranges: dict[int, tuple[int, int]] = {}
+    for pc in np.unique(trace.pc[shared.any(axis=1)]).tolist():
+        lanes = shared & (trace.pc == pc)[:, None]
+        ranges[int(pc)] = (int(trace.addr[lanes].min()), int(ends[lanes].max()))
+    return ranges
 
 
 def later_shift(buffer: Buffer, change: Change) -> int:

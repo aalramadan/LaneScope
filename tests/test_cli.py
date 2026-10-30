@@ -427,6 +427,20 @@ def test_import_reads_lines_with_the_next_nvdisasm_when_one_fails(tmp_path, monk
     assert Trace.load(tmp_path / "trace-0.npz").metadata["lines"] == {"0x10": 3}
 
 
+def test_validate_takes_random_patterns_only_for_the_bench(tmp_path, capsys):
+    command = ["validate", "--out", str(tmp_path), "--random", "5", "--", "./app"]
+    assert main(command) == 2
+    assert "only to the bench" in capsys.readouterr().err
+
+
+def test_bench_time_rejects_a_matmul_size_that_is_not_a_multiple_of_64(tmp_path, capsys):
+    command = ["bench", "time", "--cubin", str(tmp_path / "bench.cubin"), "--matmul-size", "96"]
+    with pytest.raises(SystemExit) as stop:
+        main(command)
+    assert stop.value.code == 2
+    assert "multiple of 64" in capsys.readouterr().err
+
+
 def test_bench_time_rejects_a_matrix_size_that_is_not_a_multiple_of_32(tmp_path, capsys):
     assert main(["bench", "time", "--cubin", str(tmp_path / "bench.cubin"), "--size", "100"]) == 2
     assert "multiple of 32" in capsys.readouterr().err

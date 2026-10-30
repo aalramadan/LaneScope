@@ -84,6 +84,12 @@ class Driver:
         """Copy bytes to device memory."""
         self._call("cuMemcpyHtoD_v2", ctypes.c_uint64(pointer), data, ctypes.c_size_t(len(data)))
 
+    def download(self, pointer: int, size: int) -> bytes:
+        """Copy bytes from device memory."""
+        data = ctypes.create_string_buffer(size)
+        self._call("cuMemcpyDtoH_v2", data, ctypes.c_uint64(pointer), ctypes.c_size_t(size))
+        return data.raw
+
     def launch(
         self,
         function: ctypes.c_void_p,

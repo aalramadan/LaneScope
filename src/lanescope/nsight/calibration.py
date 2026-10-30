@@ -3,6 +3,8 @@ import dataclasses
 import pathlib
 import random
 
+import numpy as np
+
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver
 from lanescope.cuda.toolchain import Toolchain, find
@@ -15,6 +17,12 @@ ALL = 0xFFFFFFFF
 TRANSPOSE_SIZE = 64
 TRANSPOSE_KERNELS = ("transpose_tile", "transpose_padded", "transpose_swizzled")
 LDMATRIX_KERNELS = ("ldmatrix_x1", "ldmatrix_x2", "ldmatrix_x4", "ldmatrix_x4_trans")
+MATMUL_KERNELS = ("matmul_plain", "matmul_swizzled")
+# Each block of 128 threads computes a 64 x 64 tile of the product. The calibration run
+# multiplies 128 x 128 matrices, which takes four blocks.
+MATMUL_TILE = 64
+MATMUL_THREADS = 128
+MATMUL_SIZE = 128
 CP_ASYNC_WIDTHS = (4, 8, 16)
 # The global buffer starts at zero, and the store cases write lane numbers below 64.
 # No loaded word, nor the XOR of the words of one load, can therefore equal the sink.
@@ -323,7 +331,7 @@ def kernel_source() -> str:
     kernels = [_access_kernel(space, kind, width) for space, kind, width in shapes]
     kernels += [_ldmatrix_kernel(name) for name in LDMATRIX_KERNELS]
     kernels += [_cp_async_kernel(width) for width in CP_ASYNC_WIDTHS]
-    return "\n".join([_PRELUDE, *kernels, _TRANSPOSES])
+    return "\n".join([_PRELUDE, *kernels, _TRANSPOSES, _MATMULS])
 
 
 def compile_kernels(
@@ -389,8 +397,95 @@ def time_transposes(cubin_path: pathlib.Path, size: int, repeats: int) -> list[T
     return times
 
 
+@dataclasses.dataclass(frozen=True)
+class MatmulTime:
+    """The time of one matmul kernel on n by n matrices of halves."""
+
+    kernel: str
+    milliseconds: float
+    size: int
+
+    @property
+    def teraflops(self) -> float:
+        """The throughput the kernel reaches, counting a multiply and an add per term."""
+        return 2 * self.size**3 / (self.milliseconds * 1e-3) / 1e12
+
+
+def multiply(cubin_path: pathlib.Path, kernel: str, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Return a times the transpose of b in floats from one matmul kernel on the local GPU."""
+    size = _matmul_size(a.shape[0])
+    if a.shape != (size, size) or b.shape != (size, size):
+        raise ValueError("the matmuls take two square matrices of one size")
+    driver = Driver()
+    try:
+        module = driver.load(cubin_path.read_bytes())
+        function, arguments, pointers = _matmul_launch(driver, module, kernel, a, b)
+        try:
+            driver.launch(function, *_matmul_grid(size), arguments)
+            product = driver.download(pointers[0], 4 * size * size)
+        finally:
+            for pointer in pointers:
+                driver.free(pointer)
+    finally:
+        driver.close()
+    return np.frombuffer(product, dtype=np.float32).reshape(size, size)
+
+
+def time_matmuls(cubin_path: pathlib.Path, size: int, repeats: int) -> list[MatmulTime]:
+    """Time the two matmuls on random halves, after one launch of each to warm up.
+
+    Raises RuntimeError when the two kernels give different products.
+    """
+    size = _matmul_size(size)
+    rng = np.random.default_rng(0)
+    a, b = (rng.uniform(-1, 1, (size, size)).astype(np.float16) for _ in range(2))
+    driver = Driver()
+    times, products = [], []
+    try:
+        module = driver.load(cubin_path.read_bytes())
+        for name in MATMUL_KERNELS:
+            function, arguments, pointers = _matmul_launch(driver, module, name, a, b)
+            try:
+                driver.launch(function, *_matmul_grid(size), arguments)
+                products.append(driver.download(pointers[0], 4 * size * size))
+                milliseconds = driver.time_launches(
+                    function, *_matmul_grid(size), arguments, repeats
+                )
+            finally:
+                for pointer in pointers:
+                    driver.free(pointer)
+            times.append(MatmulTime(name, milliseconds, size))
+    finally:
+        driver.close()
+    if products[1] != products[0]:
+        raise RuntimeError(f"{MATMUL_KERNELS[1]} gives another product than {MATMUL_KERNELS[0]}")
+    return times
+
+
+def _matmul_size(size: int) -> int:
+    if size <= 0 or size % MATMUL_TILE:
+        raise ValueError(f"the matrix size {size} must be a positive multiple of {MATMUL_TILE}")
+    return size
+
+
+def _matmul_grid(size: int) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    blocks = size // MATMUL_TILE
+    return (blocks, blocks, 1), (MATMUL_THREADS, 1, 1)
+
+
+def _matmul_launch(driver: Driver, module, kernel: str, a: np.ndarray, b: np.ndarray):
+    size = a.shape[0]
+    product = driver.alloc(4 * size * size)
+    inputs = [driver.alloc(matrix.nbytes) for matrix in (a, b)]
+    for pointer, matrix in zip(inputs, (a, b), strict=True):
+        driver.upload(pointer, np.ascontiguousarray(matrix, dtype=np.float16).tobytes())
+    pointers = [product, *inputs]
+    arguments = [*(ctypes.c_uint64(pointer) for pointer in pointers), ctypes.c_int32(size)]
+    return driver.function(module, kernel), arguments, pointers
+
+
 def run(cubin_path: pathlib.Path, random_count: int = 0, seed: int = 0) -> None:
-    """Run every case and then the three transposes, one launch each, in a fixed order."""
+    """Run every case, the three transposes, and the two matmuls, one launch each, in order."""
     driver = Driver()
     module = driver.load(cubin_path.read_bytes())
     buffer = driver.alloc(GLOBAL_BYTES)
@@ -415,6 +510,12 @@ def run(cubin_path: pathlib.Path, random_count: int = 0, seed: int = 0) -> None:
             ctypes.c_int32(TRANSPOSE_SIZE),
         ]
         driver.launch(driver.function(module, name), (tiles, tiles, 1), (32, 8, 1), arguments)
+    zeros = np.zeros((MATMUL_SIZE, MATMUL_SIZE), dtype=np.float16)
+    for name in MATMUL_KERNELS:
+        function, arguments, pointers = _matmul_launch(driver, module, name, zeros, zeros)
+        driver.launch(function, *_matmul_grid(MATMUL_SIZE), arguments)
+        for pointer in pointers:
+            driver.free(pointer)
     for pointer in (buffer, source, target):
         driver.free(pointer)
     driver.close()
@@ -561,5 +662,103 @@ extern "C" __global__ void transpose_swizzled(float* out, const float* in, int n
         const int column = threadIdx.y + j;
         out[(y + j) * n + x] = tile[threadIdx.x][column ^ threadIdx.x];
     }
+}
+"""
+
+
+_MATMULS = """
+// The kernels compute c = a * b^T for n x n matrices: a and b hold halves row by row, and
+// c holds floats. Each block of 128 threads computes a 64 x 64 tile of c with mma.sync.
+#define MM_TILE 64
+#define MM_ROW_BYTES 128
+
+// The byte offset of 16-byte chunk `chunk` of row `row` in a 64 x 64 tile of halves. The
+// swizzled layout XORs the chunk with the low three bits of the row, Swizzle<3,4,3> in CuTe.
+template <bool kSwizzled>
+__device__ __forceinline__ unsigned chunk_offset(unsigned row, unsigned chunk) {
+    return row * MM_ROW_BYTES + (kSwizzled ? chunk ^ (row & 7) : chunk) * 16;
+}
+
+template <bool kSwizzled>
+__device__ __forceinline__ void matmul(float* c, const unsigned short* a, const unsigned short* b,
+                                       int n) {
+    __shared__ __align__(128) unsigned char tiles[2 * MM_TILE * MM_ROW_BYTES];
+    const unsigned a_tile = static_cast<unsigned>(__cvta_generic_to_shared(tiles));
+    const unsigned b_tile = a_tile + MM_TILE * MM_ROW_BYTES;
+    const unsigned thread = threadIdx.x, lane = thread % 32, warp = thread / 32;
+    const unsigned warp_row = warp / 2 * 32, warp_col = warp % 2 * 32;
+    const size_t block_row = blockIdx.y * MM_TILE, block_col = blockIdx.x * MM_TILE;
+    float acc[2][4][4] = {};
+    for (int k0 = 0; k0 < n; k0 += MM_TILE) {
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            const unsigned index = thread + 128 * i, row = index / 8, chunk = index % 8;
+            const unsigned short* a_row = a + (block_row + row) * n + k0 + chunk * 8;
+            const unsigned short* b_row = b + (block_col + row) * n + k0 + chunk * 8;
+            const unsigned offset = chunk_offset<kSwizzled>(row, chunk);
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16;"
+                         :: "r"(a_tile + offset), "l"(a_row) : "memory");
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16;"
+                         :: "r"(b_tile + offset), "l"(b_row) : "memory");
+        }
+        asm volatile("cp.async.wait_all;" ::: "memory");
+        __syncthreads();
+#pragma unroll
+        for (int kk = 0; kk < 4; ++kk) {
+            unsigned fa[2][4], fb[2][4];
+#pragma unroll
+            for (int mi = 0; mi < 2; ++mi) {
+                const unsigned row = warp_row + mi * 16 + lane % 16, chunk = kk * 2 + lane / 16;
+                asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
+                             : "=r"(fa[mi][0]), "=r"(fa[mi][1]), "=r"(fa[mi][2]), "=r"(fa[mi][3])
+                             : "r"(a_tile + chunk_offset<kSwizzled>(row, chunk)) : "memory");
+            }
+#pragma unroll
+            for (int nj = 0; nj < 2; ++nj) {
+                const unsigned row = warp_col + nj * 16 + lane % 8 + lane / 16 * 8;
+                const unsigned chunk = kk * 2 + lane / 8 % 2;
+                asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
+                             : "=r"(fb[nj][0]), "=r"(fb[nj][1]), "=r"(fb[nj][2]), "=r"(fb[nj][3])
+                             : "r"(b_tile + chunk_offset<kSwizzled>(row, chunk)) : "memory");
+            }
+#pragma unroll
+            for (int mi = 0; mi < 2; ++mi) {
+#pragma unroll
+                for (int ni = 0; ni < 4; ++ni) {
+                    float* d = acc[mi][ni];
+                    asm("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
+                        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+                        : "r"(fa[mi][0]), "r"(fa[mi][1]), "r"(fa[mi][2]), "r"(fa[mi][3]),
+                          "r"(fb[ni / 2][ni % 2 * 2]), "r"(fb[ni / 2][ni % 2 * 2 + 1]));
+                }
+            }
+        }
+        __syncthreads();
+    }
+    const unsigned group = lane / 4, pair = lane % 4 * 2;
+#pragma unroll
+    for (int mi = 0; mi < 2; ++mi) {
+#pragma unroll
+        for (int ni = 0; ni < 4; ++ni) {
+#pragma unroll
+            for (int half = 0; half < 2; ++half) {
+                const size_t row = block_row + warp_row + mi * 16 + group + half * 8;
+                const size_t col = block_col + warp_col + ni * 8 + pair;
+                *reinterpret_cast<float2*>(c + row * n + col) =
+                    make_float2(acc[mi][ni][half * 2], acc[mi][ni][half * 2 + 1]);
+            }
+        }
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(128)
+matmul_plain(float* c, const unsigned short* a, const unsigned short* b, int n) {
+    matmul<false>(c, a, b, n);
+}
+
+extern "C" __global__ void __launch_bounds__(128)
+matmul_swizzled(float* c, const unsigned short* a, const unsigned short* b, int n) {
+    matmul<true>(c, a, b, n);
 }
 """

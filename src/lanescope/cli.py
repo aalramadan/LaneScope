@@ -15,7 +15,7 @@ from lanescope.fixes import layouts
 from lanescope.gui import server
 from lanescope.model.counters import count, worst_first
 from lanescope.nsight import calibration, installer
-from lanescope.nsight.validate import ValidationError, validate
+from lanescope.nsight.validate import ValidationError, validate, validate_program
 from lanescope.recorder import capture
 from lanescope.recorder.build import BuildError, build_recorder
 from lanescope.trace import Trace
@@ -137,12 +137,20 @@ def _parser() -> argparse.ArgumentParser:
     )
     _random_options(running)
     running.set_defaults(run=_bench_run)
-    timing = steps.add_parser("time", help="time the plain, padded, and swizzled transpose")
+    timing = steps.add_parser(
+        "time", help="time the transposes and the matmuls with their plain and changed layouts"
+    )
     timing.add_argument(
         "--cubin", type=pathlib.Path, required=True, help="kernels for this GPU from bench build"
     )
     timing.add_argument(
         "--size", type=_size, default=8192, help="rows and columns of the matrix, a multiple of 32"
+    )
+    timing.add_argument(
+        "--matmul-size",
+        type=_matmul_size,
+        default=4096,
+        help="rows and columns of the matrices to multiply, a multiple of 64",
     )
     timing.add_argument("--repeats", type=_size, default=50, help="launches timed per kernel")
     timing.set_defaults(run=_bench_time)
@@ -153,6 +161,16 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument("--out", type=pathlib.Path, required=True, help="folder for every result")
     check.add_argument("--arch", help="such as sm_89, the local GPU by default")
     _random_options(check)
+    check.add_argument(
+        "--kernel",
+        default="",
+        help="with a program, compare only kernels whose name holds this text",
+    )
+    check.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="-- program and its arguments, the bench by default",
+    )
     check.set_defaults(run=_validate)
 
     info = commands.add_parser(
@@ -346,20 +364,35 @@ def _bench_run(args: argparse.Namespace) -> int:
 
 def _bench_time(args: argparse.Namespace) -> int:
     times = calibration.time_transposes(args.cubin, args.size, args.repeats)
-    baseline = times[0].milliseconds
     print(f"{args.size} x {args.size} float matrix, {args.repeats} launches per kernel")
     print(f"{'kernel':20} {'ms':>8} {'GB/s':>8} {'speedup':>8}")
     for time in times:
-        speedup = f"{baseline / time.milliseconds:.2f}x"
-        print(
-            f"{time.kernel:20} {time.milliseconds:8.3f} "
-            f"{time.gigabytes_per_second:8.1f} {speedup:>8}"
-        )
+        rate = time.gigabytes_per_second
+        print(_timing_line(time.kernel, time.milliseconds, rate, times[0].milliseconds))
+    matmuls = calibration.time_matmuls(args.cubin, args.matmul_size, args.repeats)
+    size = args.matmul_size
+    print()
+    shape = f"{size} x {size} x {size}"
+    print(f"{shape} half-precision matrix multiply, {args.repeats} launches per kernel")
+    print(f"{'kernel':20} {'ms':>8} {'TFLOP/s':>8} {'speedup':>8}")
+    for time in matmuls:
+        print(_timing_line(time.kernel, time.milliseconds, time.teraflops, matmuls[0].milliseconds))
     return 0
 
 
+def _timing_line(kernel: str, milliseconds: float, rate: float, baseline: float) -> str:
+    speedup = f"{baseline / milliseconds:.2f}x"
+    return f"{kernel:20} {milliseconds:8.3f} {rate:8.1f} {speedup:>8}"
+
+
 def _validate(args: argparse.Namespace) -> int:
-    summary = validate(args.out, args.arch, random_count=args.random, seed=args.seed)
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if command and args.random:
+        raise ValueError("random lane patterns apply only to the bench, not to a program")
+    if command:
+        summary = validate_program(args.out, command, args.kernel, args.arch)
+    else:
+        summary = validate(args.out, args.arch, random_count=args.random, seed=args.seed)
     print(summary.read_text())
     print(f"wrote {summary}")
     return 0
@@ -492,6 +525,13 @@ def _count(text: str) -> int:
 
 def _size(text: str) -> int:
     return _integer(text, 1, math.inf, "expected a count of one or more")
+
+
+def _matmul_size(text: str) -> int:
+    size = _integer(text, 1, math.inf, "expected a positive multiple of 64")
+    if size % calibration.MATMUL_TILE:
+        raise argparse.ArgumentTypeError("expected a positive multiple of 64")
+    return size
 
 
 def _capacity(text: str) -> int:

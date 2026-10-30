@@ -265,9 +265,11 @@ def _suggest(args: argparse.Namespace) -> int:
     if data["found"] == 0:
         print("no padding or swizzle lowers the excess wavefronts of this buffer")
     for item in data["changes"]:
+        before, after = item["excessive_sectors_before"], item["excessive_sectors_after"]
+        sectors = f", excessive global sectors {before} -> {after}" if before != after else ""
         print(
             f"{item['change']}: excessive wavefronts {item['excessive_before']} -> "
-            f"{item['excessive_after']}, {item['extra_bytes']} extra bytes"
+            f"{item['excessive_after']}{sectors}, {item['extra_bytes']} extra bytes"
         )
     return 0
 

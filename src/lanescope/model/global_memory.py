@@ -69,13 +69,25 @@ def analyze_row(trace: Trace, row: int) -> GlobalAccess:
     """
     addresses, width = trace.lane_addresses(row), int(trace.width[row])
     destinations = trace.copy_destinations.get(row)
-    if (
-        destinations is None
-        or width != async_copy.ROW_BYTES
-        or "BYPASS" not in trace.opcode(int(trace.pc[row]))
-    ):
+    if destinations is None or not _counts_writes(trace, row):
         return analyze(addresses, width)
     return copy_sectors(addresses, destinations)
+
+
+def copy_reads(trace: Trace, row: int) -> GlobalAccess | None:
+    """Model the global reads of the cp.async that writes one shared row, or None for others.
+
+    A warp whose lanes all fill zeros reads no sector.
+    """
+    sources = trace.copy_sources.get(row)
+    if sources is None:
+        return None
+    width = int(trace.width[row])
+    if _counts_writes(trace, row):
+        return copy_sectors(sources, trace.lane_addresses(row))
+    if all(source is None for source in sources):
+        return GlobalAccess(width, 0, 0, (), 0)
+    return analyze(sources, width)
 
 
 def copy_sectors(sources: Sequence[int | None], destinations: Sequence[int | None]) -> GlobalAccess:
@@ -96,6 +108,12 @@ def copy_sectors(sources: Sequence[int | None], destinations: Sequence[int | Non
     active = sum(address is not None for address in reads)
     ideal = math.ceil(len(rows) * async_copy.ROW_BYTES / SECTOR_BYTES)
     return GlobalAccess(async_copy.ROW_BYTES, active, base, sector_lanes, ideal)
+
+
+def _counts_writes(trace: Trace, row: int) -> bool:
+    # Only a 16-byte cp.async that bypasses L1 reads by the writes of its shared side.
+    width = int(trace.width[row])
+    return width == async_copy.ROW_BYTES and "BYPASS" in trace.opcode(int(trace.pc[row]))
 
 
 @functools.lru_cache(maxsize=1 << 16)

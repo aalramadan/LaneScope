@@ -150,6 +150,8 @@ def suggest(
                 "excessive_after": item.excessive_after,
                 "wavefronts_before": item.wavefronts_before,
                 "wavefronts_after": item.wavefronts_after,
+                "excessive_sectors_before": item.excessive_sectors_before,
+                "excessive_sectors_after": item.excessive_sectors_after,
                 "extra_bytes": item.extra_bytes,
             }
             for item in found[:limit]

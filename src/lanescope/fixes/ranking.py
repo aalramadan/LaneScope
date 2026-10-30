@@ -12,6 +12,7 @@ from lanescope.fixes.layouts import (
     apply,
     lanes_inside,
 )
+from lanescope.model import global_memory
 from lanescope.model.counters import distinct_rows, measure
 from lanescope.trace import Trace
 
@@ -23,13 +24,19 @@ MIN_ROW = 16
 
 @dataclasses.dataclass(frozen=True)
 class Suggestion:
-    """One layout change with the shared-memory counts it predicts for the buffer."""
+    """One layout change with the counts it predicts for the buffer.
+
+    The excess sectors are those of the global reads of every cp.async that fills the
+    buffer, which a change can raise by splitting the pairs of lanes of a 16-byte copy.
+    """
 
     change: Change
     wavefronts_before: int
     wavefronts_after: int
     excessive_before: int
     excessive_after: int
+    excessive_sectors_before: int
+    excessive_sectors_after: int
     extra_bytes: int
 
 
@@ -68,7 +75,7 @@ def suggest(trace: Trace, buffer: Buffer) -> list[Suggestion]:
     # weighted by its repeats. Recordings repeat each access in many CTAs.
     rows, repeats = distinct_rows(accesses)
     accesses = accesses.select(rows)
-    wavefronts_before, excessive_before = _totals(accesses, repeats)
+    wavefronts_before, excessive_before, sectors_before = _totals(accesses, repeats)
     widest = int(accesses.width.max())
     found = []
     for change in candidates(buffer, widest):
@@ -76,7 +83,7 @@ def suggest(trace: Trace, buffer: Buffer) -> list[Suggestion]:
             changed = apply(accesses, buffer, change)
         except ValueError:
             continue
-        wavefronts_after, excessive_after = _totals(changed, repeats)
+        wavefronts_after, excessive_after, sectors_after = _totals(changed, repeats)
         found.append(
             Suggestion(
                 change=change,
@@ -84,6 +91,8 @@ def suggest(trace: Trace, buffer: Buffer) -> list[Suggestion]:
                 wavefronts_after=wavefronts_after,
                 excessive_before=excessive_before,
                 excessive_after=excessive_after,
+                excessive_sectors_before=sectors_before,
+                excessive_sectors_after=sectors_after,
                 extra_bytes=change.extra_bytes(buffer),
             )
         )
@@ -91,18 +100,27 @@ def suggest(trace: Trace, buffer: Buffer) -> list[Suggestion]:
     return sorted(better, key=_rank)
 
 
-def _totals(accesses: Trace, repeats: np.ndarray) -> tuple[int, int]:
-    # Every row of the accesses is a shared access, as only those fall inside a buffer.
-    wavefronts = excessive = 0
+def _totals(accesses: Trace, repeats: np.ndarray) -> tuple[int, int, int]:
+    # Every row of the accesses is a shared access, as only those fall inside a buffer. The
+    # shared row of a copy also gives the reads of its global side.
+    wavefronts = excessive = sectors = 0
     for row, weight in enumerate(repeats.tolist()):
         achieved, _, excess, _ = measure(accesses, row)
         wavefronts += weight * achieved
         excessive += weight * excess
-    return wavefronts, excessive
+        if (reads := global_memory.copy_reads(accesses, row)) is not None:
+            sectors += weight * reads.excessive
+    return wavefronts, excessive, sectors
 
 
-def _rank(suggestion: Suggestion) -> tuple[int, int, int, int]:
+def _rank(suggestion: Suggestion) -> tuple[int, int, int, int, int]:
     change = suggestion.change
     bits = change.bits if isinstance(change, XorSwizzle) else 0
     shift = change.shift if isinstance(change, XorSwizzle) else 0
-    return (suggestion.excessive_after, suggestion.extra_bytes, bits, shift)
+    return (
+        suggestion.excessive_after,
+        suggestion.excessive_sectors_after,
+        suggestion.extra_bytes,
+        bits,
+        shift,
+    )

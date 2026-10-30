@@ -165,19 +165,32 @@ def _suggestions(trace: Trace, pc: int, limit: int = 3) -> str:
     data = analysis.suggest(trace, pc=pc, limit=limit)
     if not data["changes"]:
         return "<p>No padding or swizzle lowers the excess wavefronts of this buffer.</p>"
+    # The global sectors of the copies into the buffer get a column only when a change
+    # moves them.
+    sectors = any(
+        item["excessive_sectors_before"] != item["excessive_sectors_after"]
+        for item in data["changes"]
+    )
     rows = "".join(
         f"<tr><td>{html.escape(item['change'])}</td>"
         f'<td class="num">{item["excessive_before"]}</td>'
         f'<td class="num">{item["excessive_after"]}</td>'
-        f'<td class="num">{item["extra_bytes"]}</td></tr>'
+        + (
+            f'<td class="num">{item["excessive_sectors_before"]} → '
+            f"{item['excessive_sectors_after']}</td>"
+            if sectors
+            else ""
+        )
+        + f'<td class="num">{item["extra_bytes"]}</td></tr>'
         for item in data["changes"]
     )
     buffer = data["buffer"]
+    sector_header = '<th class="num">Excess sectors</th>' if sectors else ""
     return (
         f"<p>Predicted changes for the buffer at {buffer['start']:#x} of {buffer['size']} bytes, "
         "from the recorded addresses of its accesses.</p>"
         '<div class="scroll"><table><tr><th>Change</th><th class="num">Excess before</th>'
-        '<th class="num">Excess after</th><th class="num">Extra bytes</th></tr>'
+        f'<th class="num">Excess after</th>{sector_header}<th class="num">Extra bytes</th></tr>'
         f"{rows}</table></div>"
     )
 

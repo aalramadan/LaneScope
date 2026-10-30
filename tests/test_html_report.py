@@ -112,3 +112,20 @@ def test_shared_sections_list_the_predicted_changes():
     page = html_report.render(demos.transpose_trace())
     assert "XOR swizzle Swizzle&lt;5,2,5&gt; on byte offsets" in page
     assert "pad each 128-byte row by 4 bytes" in page
+
+
+def test_suggestions_name_the_global_sectors_of_a_change_that_alters_them(monkeypatch):
+    padding = {
+        "change": "pad each 128-byte row by 16 bytes",
+        "excessive_before": 896,
+        "excessive_after": 208,
+        "excessive_sectors_before": 0,
+        "excessive_sectors_after": 256,
+        "extra_bytes": 1024,
+    }
+    found = {"buffer": {"start": 0, "size": 8192}, "found": 1, "changes": [padding]}
+    assert "Excess sectors" not in html_report.render(demos.matmul_tile_trace())
+    monkeypatch.setattr(html_report.analysis, "suggest", lambda *args, **kwargs: found)
+    page = html_report.render(demos.matmul_tile_trace())
+    assert "Excess sectors" in page
+    assert "0 → 256" in page

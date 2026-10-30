@@ -1114,7 +1114,14 @@ function renderSuggestions() {
     after.textContent = `${format.count(item.excessive_before)} → ${format.count(item.excessive_after)} excess`;
     const extra = document.createElement("span");
     extra.className = "extra";
-    extra.textContent = item.extra_bytes ? `adds ${format.bytes(item.extra_bytes)}` : "adds no bytes";
+    const notes = [item.extra_bytes ? `adds ${format.bytes(item.extra_bytes)}` : "adds no bytes"];
+    // The global reads of a 16-byte copy into the buffer grow when a change splits its lanes.
+    const sectors = item.excessive_sectors_after - item.excessive_sectors_before;
+    if (sectors !== 0) {
+      const more = sectors > 0 ? "more" : "fewer";
+      notes.push(`${format.count(Math.abs(sectors))} ${more} excess sectors`);
+    }
+    extra.textContent = notes.join(", ");
     button.append(what, after, extra);
     button.addEventListener("click", () => {
       if (!fixCurrent()) {

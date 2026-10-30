@@ -152,3 +152,9 @@ def test_suggest_and_whatif_give_the_parameters_of_each_change():
     assert changes[0]["params"] == {"kind": "swizzle", "bits": 5, "base": 2, "shift": 5}
     data = analysis.whatif(TRANSPOSE, layouts.Buffer(0, 4096), layouts.Padding(128, 4))
     assert data["params"] == {"kind": "padding", "row_bytes": 128, "pad_bytes": 4}
+
+
+def test_suggest_gives_the_excess_global_sectors_of_each_change():
+    data = analysis.suggest(demos.matmul_tile_trace(), limit=50)
+    padding = next(c for c in data["changes"] if c["change"] == "pad each 128-byte row by 16 bytes")
+    assert (padding["excessive_sectors_before"], padding["excessive_sectors_after"]) == (0, 256)

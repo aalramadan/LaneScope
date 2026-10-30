@@ -59,7 +59,9 @@ def suggest(
 ) -> dict:
     """Rank paddings and swizzles of a shared buffer.
 
-    Give buffer_start and buffer_size for a known buffer. Otherwise the buffer is the
+    Each change gives the excess wavefronts of the buffer and the excess global sectors of
+    the cp.async copies that fill it, before and after the change. Give buffer_start and
+    buffer_size for a known buffer. Otherwise the buffer is the
     range that the instruction at pc touches, the worst shared instruction by default.
     """
     if buffer_start and not buffer_size:

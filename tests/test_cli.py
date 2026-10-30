@@ -97,6 +97,16 @@ def test_whatif_keeps_the_kind_of_an_atomic_apart_from_its_unit(tmp_path, capsys
     assert "shared atomic wavefronts" in " ".join(capsys.readouterr().out.split())
 
 
+def test_suggest_names_the_global_sectors_only_of_a_change_that_alters_them(tmp_path, capsys):
+    path = tmp_path / "matmul_tile.npz"
+    demos.matmul_tile_trace().save(path)
+    assert main(["suggest", str(path), "--limit", "50"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    (padding,) = [line for line in lines if line.startswith("pad each 128-byte row by 16 bytes")]
+    assert "excessive global sectors 0 -> 256" in padding
+    assert "sectors" not in lines[1]
+
+
 def test_report_command_writes_the_html_file(trace_path, tmp_path):
     out = tmp_path / "report.html"
     assert main(["report", str(trace_path), "-o", str(out)]) == 0

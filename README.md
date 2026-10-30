@@ -37,7 +37,7 @@ The command serves the GUI at http://localhost:8765 with four demo kernels. The 
 |---|---|
 | Lane view | Shows each shared and global memory instruction lane by lane, beside its source line |
 | Hardware counts | Reports the wavefronts and sectors that Nsight Compute reports, for loads, stores, atomic operations, `ldmatrix`, and `cp.async` |
-| Layout search | Ranks the paddings and XOR swizzles of each buffer by the wavefronts each one removes |
+| Layout search | Ranks the paddings and XOR swizzles of each buffer by the wavefronts each one removes and names the global sectors that a change adds to a `cp.async` |
 | Code output | Writes the chosen layout as a byte offset, an element index, a 2D array index, or a CuTe `Swizzle<B, M, S>` |
 | No rebuild | Records any CUDA program through a Compute Sanitizer tool, with no change to its build, including Triton kernels that PyTorch compiles at run time |
 | Validation | Compares every count with Nsight Compute, on its own bench or on any program |
@@ -86,7 +86,7 @@ The 32 lanes read words that lie 128 bytes apart. Every word falls in bank 0. Th
 
 ### Find a Fix
 
-`lanescope suggest` ranks the layouts of each buffer by the excess wavefronts that remain.
+`lanescope suggest` ranks the layouts of each buffer by the excess wavefronts that remain. For a buffer that `cp.async` fills, it also names the global sectors that a change adds.
 
 ```console
 $ lanescope suggest transpose.npz

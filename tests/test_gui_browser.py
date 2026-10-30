@@ -366,3 +366,17 @@ def test_grid_titles_stay_on_one_line_beside_a_long_count(browser, url):
     assert title is not None
     assert title["height"] < 20
     page.close()
+
+
+def test_a_ranked_padding_names_the_global_sectors_it_adds_to_a_copy(browser, tmp_path, serve):
+    demos.matmul_tile_trace().save(tmp_path / "matmul_tile.npz")
+    with serve([tmp_path]) as server:
+        context = browser.new_context(viewport={"width": 1600, "height": 1000})
+        page = context.new_page()
+        page.goto(f"http://localhost:{server.server_address[1]}/")
+        fixes = page.locator("#suggestion-list button")
+        expect(fixes.first).to_be_visible()
+        expect(fixes.first).not_to_contain_text("sectors")
+        padding = fixes.filter(has_text="pad each 128-byte row by 16 bytes")
+        expect(padding).to_contain_text("adds 1,024 B, 256 more excess sectors")
+        context.close()

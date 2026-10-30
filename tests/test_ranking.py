@@ -11,14 +11,28 @@ LANES = np.arange(WARP_SIZE)
 
 
 def ranked_by_counting_every_row(trace, buffer):
-    """Rank the candidates by moving and counting every access of the buffer for each one."""
-    accesses = trace.select(layouts.lanes_inside(trace, buffer).any(axis=1))
+    """Rank the candidates by moving and counting every access of the buffer for each one.
+
+    The global side of each copy into the buffer counts too, as its sectors follow the
+    shared rows that the copy writes.
+    """
+    inside = layouts.lanes_inside(trace, buffer).any(axis=1)
+    partners = trace.copy_partners
+    picked = inside.copy()
+    picked[[partners[row] for row in np.flatnonzero(inside).tolist() if row in partners]] = True
+    accesses = trace.select(picked)
 
     def totals(rows):
-        shared = [c for c in counters.count(rows) if c.space == Space.SHARED]
-        return sum(c.achieved for c in shared), sum(c.excessive for c in shared)
+        found = counters.count(rows)
+        shared = [c for c in found if c.space == Space.SHARED]
+        reads = [c for c in found if c.space == Space.GLOBAL]
+        return (
+            sum(c.achieved for c in shared),
+            sum(c.excessive for c in shared),
+            sum(c.excessive for c in reads),
+        )
 
-    wavefronts, excessive = totals(accesses)
+    wavefronts, excessive, sectors = totals(accesses)
     found = []
     for change in ranking.candidates(buffer, int(accesses.width.max())):
         try:
@@ -26,7 +40,11 @@ def ranked_by_counting_every_row(trace, buffer):
         except ValueError:
             continue
         extra = change.extra_bytes(buffer)
-        found.append(ranking.Suggestion(change, wavefronts, after[0], excessive, after[1], extra))
+        found.append(
+            ranking.Suggestion(
+                change, wavefronts, after[0], excessive, after[1], sectors, after[2], extra
+            )
+        )
     better = [s for s in found if s.excessive_after < s.excessive_before]
     return sorted(better, key=ranking._rank)
 
@@ -81,6 +99,7 @@ def random_trace(seed, widths, arch, rows=4000):
         ("1_transpose.npz", layouts.Buffer(0, 2048)),
         ("2_row_sums.npz", layouts.Buffer(0, 8192)),
         ("2_row_sums.npz", layouts.Buffer(4096, 4096)),
+        ("4_matmul_tile.npz", layouts.Buffer(0, 8192)),
     ],
 )
 def test_search_ranks_the_demo_traces_as_counting_every_row_does(name, buffer):
@@ -173,3 +192,19 @@ def test_candidates_of_a_huge_buffer_come_from_its_divisors_alone():
     found = ranking.candidates(layouts.Buffer(0, 1 << 40), 4)
     rows = {change.row_bytes for change in found if isinstance(change, layouts.Padding)}
     assert rows == {1 << power for power in range(4, 41)}
+
+
+def test_search_reports_the_global_sectors_that_a_padding_adds_to_a_copy():
+    # Rows of 144 bytes split the lane pairs of the 16-byte copy that fills the tile.
+    found = ranking.suggest(demos.matmul_tile_trace(), layouts.Buffer(0, 8192))
+    by_change = {item.change: item for item in found}
+    best, padding = found[0], by_change[layouts.Padding(128, 16)]
+    assert best.change == layouts.XorSwizzle(3, 4, 3)
+    assert (best.excessive_sectors_before, best.excessive_sectors_after) == (0, 0)
+    assert (padding.excessive_sectors_before, padding.excessive_sectors_after) == (0, 256)
+
+
+def test_search_ranks_equal_wavefronts_by_the_global_sectors_they_add():
+    found = ranking.suggest(demos.matmul_tile_trace(), layouts.Buffer(0, 8192))
+    keys = [(item.excessive_after, item.excessive_sectors_after) for item in found]
+    assert keys == sorted(keys)

@@ -36,10 +36,11 @@ class Space(enum.IntEnum):
 
 
 class Kind(enum.IntEnum):
-    """Direction of an access."""
+    """Direction of an access, or an atomic operation that reads and writes."""
 
     LOAD = 0
     STORE = 1
+    ATOMIC = 2
 
 
 @dataclasses.dataclass(frozen=True)
@@ -133,14 +134,33 @@ class Trace:
         )
 
     def with_addresses(self, addr: np.ndarray) -> "Trace":
-        """Return a copy of the trace with new lane addresses."""
-        return dataclasses.replace(self, addr=addr)
+        """Return a copy of the trace with new lane addresses.
+
+        The copy keeps the global addresses of each cp.async, which a move of shared
+        addresses leaves as they are, and takes the shared side of each copy from the new
+        addresses.
+        """
+        changed = dataclasses.replace(self, addr=addr)
+        changed.__dict__["copy_sources"] = self.copy_sources
+        return changed
 
     def select(self, rows: np.ndarray) -> "Trace":
-        """Return the rows picked by a boolean mask or an index array."""
-        return dataclasses.replace(
+        """Return the rows picked by a boolean mask or an index array.
+
+        The rows of a cp.async keep the addresses of the other side of the copy even when
+        the subset leaves that side out.
+        """
+        picked = dataclasses.replace(
             self, **{name: getattr(self, name)[rows] for name in _COLUMN_DTYPES}
         )
+        new_index = {int(old): new for new, old in enumerate(np.arange(len(self))[rows])}
+        for name in ("copy_sources", "copy_destinations"):
+            picked.__dict__[name] = {
+                new_index[row]: lanes
+                for row, lanes in getattr(self, name).items()
+                if row in new_index
+            }
+        return picked
 
     def source_line(self, pc: int) -> tuple[int, str] | None:
         """Return the source line number and text of a PC, when the metadata maps it."""
@@ -161,11 +181,7 @@ class Trace:
         A cp.async records its global row before its shared row at one PC, and the two
         sides pair up within one warp of one CTA.
         """
-        pcs = [
-            int(pc, 16)
-            for pc, code in self.metadata.get("opcodes", {}).items()
-            if code.startswith("LDGSTS")
-        ]
+        pcs = self._copy_pcs()
         partners: dict[int, int] = {}
         reads: dict[tuple[int, int, int], int] = {}
         for row in np.flatnonzero(np.isin(self.pc, pcs)).tolist() if pcs else []:
@@ -176,6 +192,34 @@ class Trace:
                 read = reads.pop(key)
                 partners[row], partners[read] = read, row
         return partners
+
+    @functools.cached_property
+    def copy_sources(self) -> dict[int, tuple[int | None, ...]]:
+        """Return the global address of each lane of the shared row of every cp.async.
+
+        A lane that fills zeros reads nothing and has None, and so does every lane of a
+        shared row without a global row.
+        """
+        rows = np.flatnonzero(np.isin(self.pc, self._copy_pcs()) & (self.space == Space.SHARED))
+        partners = self.copy_partners
+        empty = (None,) * WARP_SIZE
+        return {
+            row: self.lane_addresses(partners[row]) if row in partners else empty
+            for row in rows.tolist()
+        }
+
+    @functools.cached_property
+    def copy_destinations(self) -> dict[int, tuple[int | None, ...]]:
+        """Return the shared address of each lane of the global row of every cp.async."""
+        return {
+            row: self.lane_addresses(partner)
+            for row, partner in self.copy_partners.items()
+            if self.space[row] == Space.GLOBAL
+        }
+
+    def _copy_pcs(self) -> list[int]:
+        opcodes = self.metadata.get("opcodes", {})
+        return [int(pc, 16) for pc, code in opcodes.items() if code.startswith("LDGSTS")]
 
     def save(self, path: str | pathlib.Path) -> None:
         """Write the trace to an .npz file."""

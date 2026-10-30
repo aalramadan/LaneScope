@@ -107,3 +107,11 @@ def test_a_cp_async_through_l1_counts_the_sectors_of_its_global_addresses():
     trace = copy_trace([16 * lane for lane in range(WARP_SIZE)], [0] * WARP_SIZE, "LDGSTS.E.128")
     access = global_memory.analyze_row(trace, 0)
     assert (access.sectors, access.ideal) == (16, 16)
+
+
+def test_the_sectors_of_a_copy_count_only_the_lanes_that_read_global_memory():
+    rows = list(range(8)) + [None] * 24
+    destinations = [None if row is None else 16 * row for row in rows]
+    reads = [None if lane in (0, 2, 4, 6) or lane >= 8 else 16 * lane for lane in range(WARP_SIZE)]
+    access = global_memory.copy_sectors(reads, destinations)
+    assert (access.sectors, access.ideal) == (4, 2)

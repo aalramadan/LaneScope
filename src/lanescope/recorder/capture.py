@@ -25,7 +25,6 @@ RECORD_DTYPE = np.dtype(
         ("kind", "u1"),
     ]
 )
-ATOMIC = 2
 LAUNCH_FORMAT = 1
 LAUNCH_NAME = re.compile(r"launch-(\d+)\.json")
 # The files that a recording and its import write, which the next recording replaces.
@@ -117,8 +116,8 @@ def load_launch(info_path: pathlib.Path) -> tuple[dict, np.ndarray]:
 
 
 def to_trace(info: dict, records: np.ndarray) -> Trace:
-    """Return the trace of one launch, without atomics, with PCs relative to the kernel."""
-    keep = (records["kind"] != ATOMIC) & (records["mask"] != 0) & np.isin(records["width"], WIDTHS)
+    """Return the trace of one launch, with PCs relative to the kernel."""
+    keep = (records["mask"] != 0) & np.isin(records["width"], WIDTHS)
     kept = records[keep]
     base = int(info.get("function_pc", 0))
     end = base + int(info.get("function_size", 0)) if info.get("function_size") else 2**64

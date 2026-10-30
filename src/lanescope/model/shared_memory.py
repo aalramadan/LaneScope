@@ -36,6 +36,9 @@ _FULL_WARP_MERGE_MAJOR = 9
 # SASS opcode ends in .2 or .4 for two or four matrices.
 _MATRIX_OPCODES = ("LDSM", "STSM")
 _ASYNC_COPY_OPCODE = "LDGSTS"
+# A shared atomic writes each lane on its own, and a compare-and-swap moves two words.
+_ATOMIC_OPCODE = "ATOMS"
+_SWAP_SUFFIX = ".CAS"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -88,6 +91,7 @@ def analyze(
     width: int,
     *,
     store: bool = False,
+    atomic: bool = False,
     arch: str = "",
     opcode: str = "",
     sources: Sequence[int | None] | None = None,
@@ -96,30 +100,33 @@ def analyze(
 
     The architecture, such as sm_89, decides how loads merge their groups. An
     unknown one takes the rule measured on the RTX 4060. The SASS opcode, such as
-    LDSM.16.M88.4, selects the rule of an ldmatrix, stmatrix, or cp.async access.
-    The global address of each lane of a cp.async, when known, shapes its writes.
+    LDSM.16.M88.4, selects the rule of an ldmatrix, stmatrix, cp.async, or atomic access.
+    The global address of each lane of a cp.async shapes its writes. Without them, the
+    lanes read consecutive rows, and a lane with None among them fills zeros.
     """
     check_lanes(addresses, width)
     base = opcode.split(".")[0]
     if base in _MATRIX_OPCODES:
         matrices = 4 if opcode.endswith(".4") else 2 if opcode.endswith(".2") else 1
         return _matrix(tuple(addresses), width, matrices)
+    if atomic or base == _ATOMIC_OPCODE:
+        return _atomic(tuple(addresses), width, _SWAP_SUFFIX in opcode)
     if base == _ASYNC_COPY_OPCODE and store:
-        lanes = tuple(sources) if sources is not None else (None,) * len(addresses)
-        return _async_copy(tuple(addresses), width, lanes)
+        lanes = sources if sources is not None else [width * lane for lane in range(len(addresses))]
+        return _async_copy(tuple(addresses), width, tuple(lanes), "BYPASS" in opcode)
     return _analyze(tuple(addresses), width, store, _full_warp_merge(arch))
 
 
 def analyze_row(trace: Trace, row: int) -> SharedAccess:
     """Model one shared row of a trace with the rules of the GPU that recorded it."""
-    partner = trace.copy_partners.get(row)
     return analyze(
         trace.lane_addresses(row),
         int(trace.width[row]),
         store=trace.kind[row] == Kind.STORE,
+        atomic=trace.kind[row] == Kind.ATOMIC,
         arch=str(trace.metadata.get("arch", "")),
         opcode=trace.opcode(int(trace.pc[row])),
-        sources=None if partner is None else trace.lane_addresses(partner),
+        sources=trace.copy_sources.get(row),
     )
 
 
@@ -161,23 +168,85 @@ def _matrix(addresses: tuple[int | None, ...], width: int, matrices: int) -> Sha
 
 @functools.lru_cache(maxsize=1 << 16)
 def _async_copy(
-    addresses: tuple[int | None, ...], width: int, sources: tuple[int | None, ...]
+    addresses: tuple[int | None, ...], width: int, sources: tuple[int | None, ...], bypass: bool
 ) -> SharedAccess:
-    if width == 16:
+    if width == 16 and bypass:
         return _async_copy_rows(addresses, sources)
-    # A cp.async of 4 or 8 bytes writes each lane on its own, also when lanes share an
-    # address, so a bank takes one wavefront per lane that it serves.
-    phases = []
-    for group in _GROUPS[width]:
-        if lanes := _active(addresses, group):
-            phases.append(_lane_phase(addresses, lanes, width))
+    # Through L1, a copy writes the lanes that read one global line together, each lane on
+    # its own. A bank serves one lane per wavefront, also when lanes share an address, and
+    # lanes that read the same bytes take turns.
+    lines: dict[int, list[dict[int, int]]] = {}
+    for lane in _active(addresses, _ALL_LANES):
+        source = sources[lane]
+        address = width * lane if source is None else source
+        turns = lines.setdefault(address // WAVEFRONT_BYTES, [])
+        free = next((turn for turn in turns if address not in turn), None)
+        if free is None:
+            free = {}
+            turns.append(free)
+        free[address] = lane
+    phases = [
+        _lane_phase(addresses, tuple(sorted(turn.values())), width)
+        for turns in lines.values()
+        for turn in turns
+    ]
     return _with_ideal(addresses, width, tuple(phases))
 
 
 def _async_copy_rows(
     addresses: tuple[int | None, ...], sources: tuple[int | None, ...]
 ) -> SharedAccess:
+    active = _active(addresses, _ALL_LANES)
+    zeros = {lane for lane in active if sources[lane] is None}
+    first: dict[int | None, int] = {}
+    for lane in active:
+        first.setdefault(addresses[lane], lane)
+    # A lane that fills zeros sends the whole copy through a pass that writes every active
+    # lane before the lanes with data. Data for a row that an earlier lane fills with zeros
+    # does not reach shared memory.
+    data = tuple(
+        address if lane in active and lane not in zeros and first[address] not in zeros else None
+        for lane, address in enumerate(addresses)
+    )
+    phases = [_lane_phase(addresses, lanes, 16) for lanes in _zero_groups(active, zeros, sources)]
+    phases += _copy_phases(data, sources)
+    ideal = _rows(data) + (_rows(addresses) if zeros else 0)
+    return SharedAccess(16, len(active), False, ideal, tuple(phases))
+
+
+def _zero_groups(
+    active: tuple[int, ...], zeros: set[int], sources: tuple[int | None, ...]
+) -> list[tuple[int, ...]]:
+    # The pass writes the lanes of one global line together. A lane that fills zeros has no
+    # address of its own and joins the line of the nearest lane with data among its eight,
+    # or the group of its eight lanes when none of them reads.
+    if not zeros:
+        return []
+    groups: dict[tuple[str, int], list[int]] = {}
+    for lane in active:
+        reader = lane if lane not in zeros else _nearest_reader(lane, active, zeros, sources)
+        source = sources[reader] if reader is not None else None
+        key = ("quarter", lane // 8) if source is None else ("line", source // WAVEFRONT_BYTES)
+        groups.setdefault(key, []).append(lane)
+    return [tuple(lanes) for lanes in groups.values()]
+
+
+def _nearest_reader(
+    lane: int, active: tuple[int, ...], zeros: set[int], sources: tuple[int | None, ...]
+) -> int | None:
+    start = lane // 8 * 8
+    readers = [
+        other
+        for other in range(start, start + 8)
+        if other in active and other not in zeros and sources[other] is not None
+    ]
+    return min(readers, key=lambda other: (abs(other - lane), other < lane), default=None)
+
+
+def _copy_phases(addresses: tuple[int | None, ...], sources: tuple[int | None, ...]) -> list[Phase]:
     # Each wavefront shows the lanes of its writes and the lanes whose rows those fill.
+    if not _active(addresses, _ALL_LANES):
+        return []
     writer: dict[int, int] = {}
     waves = async_copy.wavefronts(async_copy.copies(sources, addresses))
     for index, members in enumerate(waves):
@@ -188,11 +257,22 @@ def _async_copy_rows(
         address = addresses[lane]
         assert address is not None
         lanes[writer[address // async_copy.ROW_BYTES]].append(lane)
-    phases = tuple(_phase(addresses, tuple(found), 16) for found in lanes)
+    return [_phase(addresses, tuple(found), 16) for found in lanes]
+
+
+def _rows(addresses: tuple[int | None, ...]) -> int:
     distinct = {address for address in addresses if address is not None}
-    ideal = math.ceil(len(distinct) * 16 / WAVEFRONT_BYTES)
-    active = sum(address is not None for address in addresses)
-    return SharedAccess(16, active, False, ideal, phases)
+    return math.ceil(len(distinct) * async_copy.ROW_BYTES / WAVEFRONT_BYTES)
+
+
+@functools.lru_cache(maxsize=1 << 16)
+def _atomic(addresses: tuple[int | None, ...], width: int, swap: bool) -> SharedAccess:
+    # Lanes that hit one word still take a turn each. A compare-and-swap takes two passes.
+    lanes = _active(addresses, _ALL_LANES)
+    phase = _lane_phase(addresses, lanes, width)
+    passes = 2 if swap else 1
+    ideal = passes * math.ceil(len(lanes) * width / WAVEFRONT_BYTES)
+    return SharedAccess(width, len(lanes), False, ideal, (phase,) * passes)
 
 
 def _with_ideal(

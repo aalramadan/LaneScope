@@ -46,6 +46,14 @@ def test_comparison_covers_only_instructions_on_the_buffer():
     assert set(result) == {demos.PC_STORE_TILE, demos.PC_LOAD_TILE}
 
 
+def test_comparison_includes_the_global_side_of_a_copy_into_the_buffer():
+    # A 16-byte padding splits the lane pairs of the copy, and each lane then reads a sector.
+    trace = demos.matmul_tile_trace()
+    result = layouts.compare(trace, layouts.Buffer(0, 8192), layouts.Padding(128, 16))
+    reads = [item for item in result if item.before.space == Space.GLOBAL]
+    assert [(item.before.achieved, item.after.achieved) for item in reads] == [(512, 768)]
+
+
 def test_worst_rows_of_a_comparison_point_into_the_full_trace():
     trace = demos.transpose_trace()
     for item in layouts.compare(trace, TILE_BUFFER, layouts.XorSwizzle(5, 2, 5)):

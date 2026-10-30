@@ -116,7 +116,10 @@ def _pair(
             problems.append(f"Launch {index} ({name}) recorded {trace.metadata.get('kernel')}.")
             trace = None
         counters = kernels[index] if kernels is not None and index < len(kernels) else None
-        if counters is not None and counters.kernel.split("(")[0].strip() != kernel:
+        if counters is not None and kernel not in (
+            counters.kernel.split("(")[0].strip(),
+            counters.mangled,
+        ):
             problems.append(
                 f"Launch {index} ({name}) has Nsight Compute counters of {counters.kernel}."
             )
@@ -243,9 +246,15 @@ def validate_program(
         if launch.trace is not None and launch.counters is not None
         for row in compare.compare(launch.index, launch.trace, launch.counters)
     ]
+    # Nsight Compute gives the short name of a C++ kernel, which reads better than the
+    # mangled one.
+    labels = [
+        launch.counters.kernel.split("(")[0].strip() if launch.counters else name
+        for launch, name in zip(launches, names, strict=True)
+    ]
     lines = [f"# LaneScope validation of {' '.join(command)} on {gpu}", ""]
-    lines += [*_trace_lines(traces, names), "", *problems, "", *_metric_lines(kernels), ""]
-    lines += [*_summary_lines(rows, []), "", *_mismatch_lines(rows, names)]
+    lines += [*_trace_lines(traces, labels), "", *problems, "", *_metric_lines(kernels), ""]
+    lines += [*_summary_lines(rows, []), "", *_mismatch_lines(rows, labels)]
     return _write(out_dir, lines, rows, [])
 
 
@@ -339,11 +348,18 @@ def predict_layouts(launches: list[Launch]) -> list[Prediction]:
 def _profile(tools: Toolchain, command: list[str], report: pathlib.Path, kernel: str = "") -> None:
     report.parent.mkdir(parents=True, exist_ok=True)
     assert tools.ncu is not None
-    # Nsight Compute matches the whole name, the recorder any part of it.
-    names = ["--kernel-name", f"regex:.*{re.escape(kernel)}.*"] if kernel else []
+    # The recorder keeps a launch when any part of its mangled name holds the text, and
+    # Nsight Compute matches the whole name, by default without namespaces or parameters.
+    names = (
+        ["--kernel-name-base", "mangled", "--kernel-name", f"regex:.*{re.escape(kernel)}.*"]
+        if kernel
+        else []
+    )
+    # The source counters hold every count the comparison reads. The full set of sections
+    # makes a report of a few gigabytes for a thousand launches, too large to load.
     result = subprocess.run(
-        [str(tools.ncu), "--set", "full", "--import-source", "no", "--force-overwrite",
-         *names, "--export", str(report), *command],
+        [str(tools.ncu), "--section", "SourceCounters", "--import-source", "no",
+         "--force-overwrite", *names, "--export", str(report), *command],
         capture_output=True, text=True, check=False,
     )  # fmt: skip
     (report.parent / "ncu.log").write_text(result.stdout + result.stderr)

@@ -32,6 +32,12 @@ INSTRUCTION_OPCODES = {
     "cp_async_4": "LDGSTS.E",
     "cp_async_8": "LDGSTS.E.64",
     "cp_async_16": "LDGSTS.E.BYPASS.128",
+    "cp_async_16_zeros": "LDGSTS.E.BYPASS.128",
+}
+ATOMIC_OPCODES = {
+    "shared_atomic_add": "ATOMS.ADD",
+    "shared_atomic_cas": "ATOMS.CAS",
+    "global_atomic_add": "RED.E.ADD.STRONG.GPU",
 }
 
 
@@ -173,14 +179,20 @@ def test_instruction_cases_run_every_lane_with_aligned_offsets_in_their_own_kern
 
 
 def test_launches_put_the_random_cases_after_the_fixed_ones():
-    fixed = calibration.cases() + calibration.instruction_cases()
-    random = calibration.random_cases(3, 4) + calibration.random_instruction_cases(3, 4)
+    fixed = calibration.cases() + calibration.instruction_cases() + calibration.atomic_cases()
+    random = (
+        calibration.random_cases(3, 4)
+        + calibration.random_instruction_cases(3, 4)
+        + calibration.random_atomic_cases(3, 4)
+    )
     assert calibration.launches(3, 4) == fixed + random
     groups = calibration.launch_groups(3, 4)
     assert [case for _, group in groups for case in group] == fixed + random
     assert [len(group) for _, group in groups] == [
         len(calibration.cases()),
-        len(fixed) - len(calibration.cases()),
+        len(calibration.instruction_cases()),
+        len(calibration.atomic_cases()),
+        3,
         3,
         3,
     ]
@@ -265,3 +277,35 @@ def test_each_matmul_gets_a_positive_time_on_the_local_gpu(tmp_path):
     times = calibration.time_matmuls(cubin, size=128, repeats=2)
     assert [time.kernel for time in times] == list(calibration.MATMUL_KERNELS)
     assert all(time.milliseconds > 0 for time in times)
+
+
+@pytest.mark.skipif(
+    TOOLS.nvrtc is None or TOOLS.nvdisasm is None, reason="NVRTC and nvdisasm are needed"
+)
+def test_each_atomic_kernel_keeps_one_atomic_with_a_measured_opcode(tmp_path):
+    assert {case.kernel for case in calibration.atomic_cases()} == set(ATOMIC_OPCODES)
+    cubin = tmp_path / "bench.cubin"
+    cubin.write_bytes(calibration.compile_kernels("sm_89", TOOLS))
+    functions = _sass_opcodes(cubin)
+    for kernel, opcode in ATOMIC_OPCODES.items():
+        memory = [op for op in functions[kernel] if op.split(".")[0] in MEMORY_OPCODES]
+        assert memory == [opcode], kernel
+
+
+def test_atomic_cases_use_aligned_words_inside_their_buffers():
+    for case in calibration.atomic_cases() + calibration.random_atomic_cases(300, 5):
+        limit = calibration.SHARED_BYTES if case.space == Space.SHARED else calibration.GLOBAL_BYTES
+        assert case.kind == Kind.ATOMIC and case.width == 4, case.name
+        assert case.mask, case.name
+        assert all(offset % 4 == 0 and offset + 4 <= limit for offset in case.offsets), case.name
+
+
+def test_random_atomic_cases_repeat_for_one_seed_and_change_with_another():
+    first = calibration.random_atomic_cases(20, 1)
+    assert first == calibration.random_atomic_cases(20, 1)
+    assert first != calibration.random_atomic_cases(20, 2)
+
+
+def test_zero_lanes_reach_only_the_kernel_of_copies_that_fill_zeros():
+    zeros = [case for case in calibration.instruction_cases() if case.zeros]
+    assert zeros and {case.kernel for case in zeros} == {"cp_async_16_zeros"}

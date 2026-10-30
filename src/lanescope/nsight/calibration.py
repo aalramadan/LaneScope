@@ -24,8 +24,11 @@ MATMUL_TILE = 64
 MATMUL_THREADS = 128
 MATMUL_SIZE = 128
 CP_ASYNC_WIDTHS = (4, 8, 16)
-# The global buffer starts at zero, and the store cases write lane numbers below 64.
-# No loaded word, nor the XOR of the words of one load, can therefore equal the sink.
+ZERO_COPY_KERNEL = "cp_async_16_zeros"
+ATOMIC_KERNELS = ("shared_atomic_add", "shared_atomic_cas", "global_atomic_add")
+# The global buffer starts at zero, the store cases write lane numbers below 64, and the
+# atomic cases add lane numbers to it a few hundred times at most. No loaded word, nor the
+# XOR of the words of one load, can therefore equal the sink.
 SINK = 0xFFFFFFFF
 
 
@@ -39,8 +42,11 @@ class Case:
     width: int
     offsets: tuple[int, ...]
     mask: int = ALL
-    # The kernel of an ldmatrix or cp.async case, each of which runs an instruction of its own.
+    # The kernel of an ldmatrix, cp.async, or atomic case, each of which runs an instruction
+    # of its own.
     instruction: str = ""
+    # The lanes of a cp.async that fill zeros in place of reading global memory.
+    zeros: int = 0
 
     @property
     def kernel(self) -> str:
@@ -203,7 +209,59 @@ def instruction_cases() -> list[Case]:
             Case(f"{stem}-{pattern}", Space.SHARED, kind, width, offsets, instruction=kernel)
             for pattern, offsets in _instruction_patterns(width).items()
         ]
+    rows = {
+        "contiguous": _lanes(lambda lane: 16 * lane),
+        "swizzled": _lanes(lambda lane: 16 * (lane // 8 * 8 + (lane % 8 ^ lane // 8))),
+    }
+    zeros = {
+        "lane-0": 0x1,
+        "lanes-0-3": 0xF,
+        "even-lanes": 0x55555555,
+        "first-quarter": 0xFF,
+        "all": ALL,
+    }
+    found += [
+        Case(
+            f"cp-async-16-{layout}-zeros-{name}",
+            Space.SHARED,
+            Kind.STORE,
+            16,
+            offsets,
+            instruction=ZERO_COPY_KERNEL,
+            zeros=mask,
+        )
+        for layout, offsets in rows.items()
+        for name, mask in zeros.items()
+    ]
     return found
+
+
+def atomic_cases() -> list[Case]:
+    """Return every shared and global atomic case in launch order."""
+    patterns = {
+        "contiguous": (_lanes(lambda lane: 4 * lane), ALL),
+        "stride-8": (_lanes(lambda lane: 8 * lane), ALL),
+        "stride-128": (_lanes(lambda lane: 128 * lane), ALL),
+        "same-word": ((0,) * WARP_SIZE, ALL),
+        "pairs": (_lanes(lambda lane: 4 * (lane // 2)), ALL),
+        "fours": (_lanes(lambda lane: 4 * (lane // 4)), ALL),
+        "halves-same-word": (_lanes(lambda lane: 0 if lane < 16 else 16), ALL),
+        "half-warp-stride-128": (_lanes(lambda lane: 128 * lane), 0x0000FFFF),
+        "even-lanes-same-word": ((0,) * WARP_SIZE, 0x55555555),
+    }
+    return [
+        Case(
+            f"{kernel.replace('_', '-')}-{name}",
+            Space.GLOBAL if kernel.startswith("global") else Space.SHARED,
+            Kind.ATOMIC,
+            4,
+            offsets,
+            mask,
+            kernel,
+        )
+        for kernel in ATOMIC_KERNELS
+        for name, (offsets, mask) in patterns.items()
+    ]
 
 
 def _instruction_kernels() -> list[tuple[str, Kind, int]]:
@@ -232,6 +290,7 @@ def launch_groups(random_count: int = 0, seed: int = 0) -> list[tuple[str, list[
     groups = [
         ("calibration launches", cases()),
         ("ldmatrix and cp.async launches", instruction_cases()),
+        ("atomic launches", atomic_cases()),
     ]
     if random_count:
         groups += [
@@ -240,6 +299,7 @@ def launch_groups(random_count: int = 0, seed: int = 0) -> list[tuple[str, list[
                 f"random ldmatrix and cp.async patterns of seed {seed}",
                 random_instruction_cases(random_count, seed),
             ),
+            (f"random atomic patterns of seed {seed}", random_atomic_cases(random_count, seed)),
         ]
     return groups
 
@@ -280,6 +340,21 @@ def random_instruction_cases(count: int, seed: int) -> list[Case]:
         offsets = tuple(unit * width for unit in _random_units(rng, SHARED_BYTES // width))
         name = f"random-{index}-{kernel.replace('_', '-')}"
         found.append(Case(name, Space.SHARED, kind, width, offsets, instruction=kernel))
+    return found
+
+
+def random_atomic_cases(count: int, seed: int) -> list[Case]:
+    """Return `count` random lane patterns for the atomic kernels, the same for one seed."""
+    # A stream of its own leaves the measured random cases of the other kernels as they are.
+    rng = random.Random(f"atomics-{seed}")
+    found = []
+    for index in range(count):
+        kernel = rng.choice(ATOMIC_KERNELS)
+        space = Space.GLOBAL if kernel.startswith("global") else Space.SHARED
+        limit = (GLOBAL_BYTES if space == Space.GLOBAL else SHARED_BYTES) // 4
+        offsets = tuple(4 * unit for unit in _random_units(rng, limit))
+        name = f"random-{index}-{kernel.replace('_', '-')}"
+        found.append(Case(name, space, Kind.ATOMIC, 4, offsets, _random_mask(rng), kernel))
     return found
 
 
@@ -331,7 +406,7 @@ def kernel_source() -> str:
     kernels = [_access_kernel(space, kind, width) for space, kind, width in shapes]
     kernels += [_ldmatrix_kernel(name) for name in LDMATRIX_KERNELS]
     kernels += [_cp_async_kernel(width) for width in CP_ASYNC_WIDTHS]
-    return "\n".join([_PRELUDE, *kernels, _TRANSPOSES, _MATMULS])
+    return "\n".join([_PRELUDE, *kernels, _ZERO_COPY, _ATOMICS, _TRANSPOSES, _MATMULS])
 
 
 def compile_kernels(
@@ -493,10 +568,12 @@ def run(cubin_path: pathlib.Path, random_count: int = 0, seed: int = 0) -> None:
     for case in launches(random_count, seed):
         # The offsets travel by value in the parameter space, which keeps the kernel free of
         # memory instructions other than the one of the case.
+        # The kernel of copies that fill zeros takes its zero lanes where others take the sink.
+        third = case.zeros if case.kernel == ZERO_COPY_KERNEL else SINK
         arguments = [
             (ctypes.c_int32 * WARP_SIZE)(*case.offsets),
             ctypes.c_uint32(case.mask),
-            ctypes.c_uint32(SINK),
+            ctypes.c_uint32(third),
             ctypes.c_uint64(buffer),
         ]
         driver.launch(driver.function(module, case.kernel), (1, 1, 1), (WARP_SIZE, 1, 1), arguments)
@@ -618,6 +695,53 @@ extern "C" __global__ void cp_async_{width}(
 }}
 """
 
+
+_ZERO_COPY = f"""
+extern "C" __global__ void {ZERO_COPY_KERNEL}(
+    const __grid_constant__ LaneOffsets offsets, unsigned mask, unsigned zeros,
+    unsigned char* buffer) {{
+    __shared__ __align__(128) unsigned char smem[SHARED_BYTES];
+    const unsigned address =
+        static_cast<unsigned>(__cvta_generic_to_shared(smem + offsets.value[threadIdx.x]));
+    const unsigned ignore = (zeros >> threadIdx.x) & 1u;
+    asm volatile("{{ .reg .pred p; setp.ne.b32 p, %2, 0;"
+                 " cp.async.cg.shared.global [%0], [%1], 16, p; }}"
+                 :: "r"(address), "l"(buffer + 16 * threadIdx.x), "r"(ignore) : "memory");
+    asm volatile("cp.async.wait_all;" ::: "memory");
+}}
+"""
+
+_ATOMICS = """
+extern "C" __global__ void shared_atomic_add(
+    const __grid_constant__ LaneOffsets offsets, unsigned mask, unsigned sink,
+    unsigned char* buffer) {
+    __shared__ __align__(16) unsigned char smem[SHARED_BYTES];
+    const unsigned lane = threadIdx.x;
+    if ((mask >> lane) & 1u) {
+        atomicAdd(reinterpret_cast<unsigned*>(smem + offsets.value[lane]), lane + 1);
+    }
+}
+
+extern "C" __global__ void shared_atomic_cas(
+    const __grid_constant__ LaneOffsets offsets, unsigned mask, unsigned sink,
+    unsigned char* buffer) {
+    __shared__ __align__(16) unsigned char smem[SHARED_BYTES];
+    const unsigned lane = threadIdx.x;
+    if ((mask >> lane) & 1u) {
+        unsigned* word = reinterpret_cast<unsigned*>(smem + offsets.value[lane]);
+        if (atomicCAS(word, lane, lane + 1) == sink) asm volatile("trap;");
+    }
+}
+
+extern "C" __global__ void global_atomic_add(
+    const __grid_constant__ LaneOffsets offsets, unsigned mask, unsigned sink,
+    unsigned char* buffer) {
+    const unsigned lane = threadIdx.x;
+    if ((mask >> lane) & 1u) {
+        atomicAdd(reinterpret_cast<unsigned*>(buffer + offsets.value[lane]), lane + 1);
+    }
+}
+"""
 
 _TRANSPOSES = """
 #define TILE 32

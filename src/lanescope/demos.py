@@ -230,6 +230,76 @@ def column_sums_trace(blocks: int = 2) -> Trace:
     return _with_source(accesses, "column_sums", COLUMN_SUMS_SOURCE, COLUMN_SUMS_LINES)
 
 
+MATMUL_TILE_SOURCE = (
+    "__global__ void matmul_tile(float *c, const half *a, int n) {",
+    "  __shared__ half tile[64][64];  // 64 rows of 128 bytes",
+    "  for (int i = 0; i < 4; ++i) {",
+    "    int chunk = threadIdx.x + 128 * i;  // 8 chunks of 16 bytes per row",
+    "    cp_async_16(&tile[chunk / 8][chunk % 8 * 8],",
+    "                &a[(blockIdx.x * 64 + chunk / 8) * n + chunk % 8 * 8]);",
+    "  }",
+    "  cp_async_wait_all();",
+    "  __syncthreads();",
+    "  int lane = threadIdx.x % 32, row = threadIdx.x / 64 * 32;",
+    "  for (int k = 0; k < 4; ++k)",
+    "    ldmatrix_x4(fragment[k], &tile[row + lane % 16][k * 16 + lane / 16 * 8]);",
+    "  // mma.sync multiplies the fragments, and the block stores its part of c",
+    "}",
+)
+PC_COPY_TILE = 0x0A0
+PC_READ_TILE = 0x1F0
+MATMUL_TILE_LINES = {PC_COPY_TILE: 5, PC_READ_TILE: 12}
+MATMUL_TILE_OPCODES = {PC_COPY_TILE: "LDGSTS.E.BYPASS.128", PC_READ_TILE: "LDSM.16.M88.4"}
+TILE_ROW_BYTES = 128
+CHUNK_BYTES = 16
+
+
+def matmul_tile_trace(blocks: int = 2) -> Trace:
+    """Return the trace of a matrix multiply that copies a 64 x 64 tile and reads it with ldmatrix.
+
+    The tile keeps the plain row-major layout, so the eight rows of each 8x8 matrix that
+    ldmatrix reads fall on the same banks.
+    """
+    accesses = []
+    for block in range(blocks):
+        for warp in range(4):
+            for step in range(4):
+
+                def chunk(lane: int, warp: int = warp, step: int = step) -> int:
+                    return WARP_SIZE * warp + lane + 128 * step
+
+                def source(lane: int, block: int = block) -> int:
+                    row, column = divmod(chunk(lane), 8)
+                    return INPUT_BASE + (64 * block + row) * TILE_ROW_BYTES + column * CHUNK_BYTES
+
+                accesses.append(
+                    warp_access(PC_COPY_TILE, Space.GLOBAL, Kind.LOAD, 16, source, block, warp)
+                )
+                accesses.append(
+                    warp_access(
+                        PC_COPY_TILE,
+                        Space.SHARED,
+                        Kind.STORE,
+                        16,
+                        lambda lane: 16 * chunk(lane),
+                        block,
+                        warp,
+                    )
+                )
+            for k in range(4):
+
+                def row_of(lane: int, warp: int = warp, k: int = k) -> int:
+                    row = warp // 2 * 32 + lane % 16
+                    return row * TILE_ROW_BYTES + (2 * k + lane // 16) * CHUNK_BYTES
+
+                accesses.append(
+                    warp_access(PC_READ_TILE, Space.SHARED, Kind.LOAD, 16, row_of, block, warp)
+                )
+    return _with_source(
+        accesses, "matmul_tile", MATMUL_TILE_SOURCE, MATMUL_TILE_LINES, MATMUL_TILE_OPCODES
+    )
+
+
 def demo_traces() -> dict[str, Trace]:
     """Return every demo trace by the file name it takes.
 
@@ -240,16 +310,23 @@ def demo_traces() -> dict[str, Trace]:
         "1_transpose.npz": transpose_trace(),
         "2_row_sums.npz": row_sums_trace(),
         "3_column_sums.npz": column_sums_trace(),
+        "4_matmul_tile.npz": matmul_tile_trace(),
     }
 
 
 def _with_source(
-    accesses: list[Access], kernel: str, source: tuple[str, ...], lines: dict[int, int]
+    accesses: list[Access],
+    kernel: str,
+    source: tuple[str, ...],
+    lines: dict[int, int],
+    opcodes: dict[int, str] | None = None,
 ) -> Trace:
-    metadata = {
+    metadata: dict = {
         "kernel": kernel,
         "arch": "synthetic",
         "source": list(source),
         "lines": {f"{pc:#x}": line for pc, line in lines.items()},
     }
+    if opcodes:
+        metadata["opcodes"] = {f"{pc:#x}": opcode for pc, opcode in opcodes.items()}
     return Trace.from_accesses(accesses, metadata)

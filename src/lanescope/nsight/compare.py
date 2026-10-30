@@ -55,6 +55,9 @@ class KernelCounters:
     kernel: str
     metrics: dict[str, dict[int, float]]
     sass: dict[int, str]
+    # The recorder names a kernel by its mangled name, which a C++ kernel has apart from
+    # the name that Nsight Compute shows.
+    mangled: str = ""
 
     def quantity(self, name: str) -> tuple[str | None, dict[int, float]]:
         """Return the metric used for a quantity and its value per instruction offset."""
@@ -145,7 +148,7 @@ def compare(launch: int, trace: Trace, counters: KernelCounters) -> list[Row]:
             rows.append(
                 Row(
                     launch,
-                    counters.kernel,
+                    counters.mangled or counters.kernel,
                     offset,
                     counters.sass.get(theirs_offset, ""),
                     quantity,
@@ -184,6 +187,7 @@ def dump(kernels: list[KernelCounters], path: pathlib.Path) -> None:
     payload = [
         {
             "kernel": kernel.kernel,
+            "mangled": kernel.mangled,
             "sass": {f"{offset:#x}": text for offset, text in kernel.sass.items()},
             "metrics": {
                 name: {f"{offset:#x}": value for offset, value in values.items()}
@@ -214,12 +218,14 @@ def _kernel_counters(action) -> KernelCounters:
     pcs = sorted({pc for values in metrics.values() for pc in values})
     if start is None:
         start = pcs[0] if pcs else 0
+    mangled = getattr(getattr(ncu_report, "IAction", None), "NameBase_MANGLED", None)
     return KernelCounters(
         kernel=action.name(),
         metrics={
             name: {pc - start: v for pc, v in values.items()} for name, values in metrics.items()
         },
         sass={pc - start: action.sass_by_pc(pc) for pc in pcs},
+        mangled=action.name(mangled) if mangled is not None else "",
     )
 
 

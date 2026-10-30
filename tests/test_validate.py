@@ -185,12 +185,14 @@ def test_summary_gives_the_matched_counts_of_each_group_of_launches():
     starts = [sum(len(cases) for _, cases in groups[:index]) for index in range(len(groups) + 1)]
     rows = [summary_row(start, 1.0) for start in starts] + [summary_row(starts[1], 2.0)]
     lines = validate._summary_lines(rows, groups)
-    assert lines[0] == "LaneScope matches Nsight Compute in 5 of 6 instruction counts."
-    assert lines[1:5] == [
+    assert lines[0] == "LaneScope matches Nsight Compute in 7 of 8 instruction counts."
+    assert lines[1:7] == [
         f"The {len(groups[0][1])} calibration launches give 1 of 1.",
         f"The {len(groups[1][1])} ldmatrix and cp.async launches give 1 of 2.",
+        f"The {len(groups[2][1])} atomic launches give 1 of 1.",
         "The 2 random lane patterns of seed 3 give 1 of 1.",
         "The 2 random ldmatrix and cp.async patterns of seed 3 give 1 of 1.",
+        "The 2 random atomic patterns of seed 3 give 1 of 1.",
     ]
 
 
@@ -247,6 +249,14 @@ def test_validating_a_program_names_a_launch_without_counters_of_its_kernel(
     assert "Launch 0 (k) has Nsight Compute counters of other(float *)." in text
 
 
+def test_a_launch_pairs_with_counters_that_carry_its_mangled_name():
+    trace = Trace.from_accesses([], {"kernel": "_Z1kPf"})
+    counters = compare.KernelCounters(kernel="k(float *)", metrics={}, sass={}, mangled="_Z1kPf")
+    launches, problems = validate._pair([trace], [counters], ["_Z1kPf"], ["_Z1kPf"])
+    assert problems == []
+    assert launches[0].counters is counters
+
+
 def test_validating_a_program_needs_nsight_compute(tmp_path, offline_check):
     tools = dataclasses.replace(find(), ncu=None)
     with pytest.raises(validate.ValidationError, match="lanescope get-ncu"):
@@ -279,6 +289,28 @@ def test_profile_finds_the_report_of_an_nsight_compute_that_compresses_by_defaul
     report = tmp_path / "out" / "bench.ncu-rep"
     validate._profile(dataclasses.replace(find(), ncu=ncu), ["true"], report)
     assert report.exists()
+
+
+NCU_ARGUMENTS = """#!/bin/sh
+printf '%s\\n' "$@" > "$(dirname "$0")/arguments.txt"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --export ]; then touch "$2"; fi
+  shift
+done
+"""
+
+
+def test_profile_collects_only_the_source_counters_by_the_mangled_kernel_name(tmp_path):
+    ncu = tmp_path / "ncu"
+    ncu.write_text(NCU_ARGUMENTS)
+    ncu.chmod(0o755)
+    report = tmp_path / "out" / "program.ncu-rep"
+    validate._profile(dataclasses.replace(find(), ncu=ncu), ["true"], report, "cudnn")
+    arguments = (tmp_path / "arguments.txt").read_text().splitlines()
+    assert arguments[arguments.index("--kernel-name-base") + 1] == "mangled"
+    assert arguments[arguments.index("--kernel-name") + 1] == "regex:.*cudnn.*"
+    assert arguments[arguments.index("--section") + 1] == "SourceCounters"
+    assert "--set" not in arguments
 
 
 def test_metric_table_names_a_metric_that_only_later_kernels_report():

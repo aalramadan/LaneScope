@@ -89,6 +89,14 @@ def test_whatif_reports_a_change_that_does_not_fit(trace_path, capsys):
     assert "whole number" in capsys.readouterr().err
 
 
+def test_whatif_keeps_the_kind_of_an_atomic_apart_from_its_unit(tmp_path, capsys):
+    lanes = tuple(128 * lane for lane in range(WARP_SIZE))
+    path = tmp_path / "atomics.npz"
+    Trace.from_accesses([Access(0x10, Space.SHARED, Kind.ATOMIC, 4, lanes)]).save(path)
+    assert main(["whatif", str(path), "--buffer", "0:4096", "--pad", "128:4"]) == 0
+    assert "shared atomic wavefronts" in " ".join(capsys.readouterr().out.split())
+
+
 def test_report_command_writes_the_html_file(trace_path, tmp_path):
     out = tmp_path / "report.html"
     assert main(["report", str(trace_path), "-o", str(out)]) == 0
@@ -316,7 +324,7 @@ def test_suggest_with_limit_zero_lists_no_change_without_a_false_note(trace_path
     assert "no padding or swizzle" not in capsys.readouterr().out
 
 
-def test_gui_demo_serves_the_three_demo_traces(monkeypatch):
+def test_gui_demo_serves_the_four_demo_traces(monkeypatch):
     served = {}
 
     def fake_serve(paths, host, port, allowed_hosts, open_browser):
@@ -325,7 +333,12 @@ def test_gui_demo_serves_the_three_demo_traces(monkeypatch):
 
     monkeypatch.setattr(gui, "serve", fake_serve)
     assert main(["gui", "--demo", "--host", "0.0.0.0", "--allow-host", "box"]) == 0
-    assert served["files"] == ["1_transpose.npz", "2_row_sums.npz", "3_column_sums.npz"]
+    assert served["files"] == [
+        "1_transpose.npz",
+        "2_row_sums.npz",
+        "3_column_sums.npz",
+        "4_matmul_tile.npz",
+    ]
     assert served["address"] == ("0.0.0.0", gui.DEFAULT_PORT, ["box"], False)
 
 
@@ -369,7 +382,12 @@ def test_gui_demo_stopped_by_a_signal_removes_its_demo_folder(stop):
     with process:
         try:
             names = sorted(path.name for path in demo.iterdir())
-            assert names == ["1_transpose.npz", "2_row_sums.npz", "3_column_sums.npz"]
+            assert names == [
+                "1_transpose.npz",
+                "2_row_sums.npz",
+                "3_column_sums.npz",
+                "4_matmul_tile.npz",
+            ]
             process.send_signal(stop)
             assert process.wait(timeout=10) == 0
             assert not demo.exists()

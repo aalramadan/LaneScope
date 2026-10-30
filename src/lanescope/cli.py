@@ -217,7 +217,7 @@ def _parser() -> argparse.ArgumentParser:
         help="another host name that the page may use, such as a machine name",
     )
     window.add_argument("--open", action="store_true", help="open the page in the browser")
-    window.add_argument("--demo", action="store_true", help="add the traces of three demo kernels")
+    window.add_argument("--demo", action="store_true", help="add the traces of four demo kernels")
     window.set_defaults(run=_gui)
     return parser
 
@@ -477,13 +477,13 @@ def _print_comparison(buffer: layouts.Buffer, data: dict) -> None:
     if data["later_shift"]:
         print(f"shared addresses above the buffer move up by {data['later_shift']} bytes")
     print(
-        f"{'pc':8}{'line':>5}  {'space':7}{'kind':6}{'unit':11}{'before':>8}{'after':>8}"
+        f"{'pc':8}{'line':>5}  {'space':7}{'kind':7}{'unit':11}{'before':>8}{'after':>8}"
         f"{'ideal':>7}{'excessive before':>18}{'after':>7}"
     )
     for item in data["instructions"]:
         old, new = item["before"], item["after"]
         print(
-            f"{int(old['pc'], 16):#06x}  {old['line'] or '-':>5}  {old['space']:7}{old['kind']:6}"
+            f"{int(old['pc'], 16):#06x}  {old['line'] or '-':>5}  {old['space']:7}{old['kind']:7}"
             f"{old['unit']:11}{old['achieved']:8d}{new['achieved']:8d}{old['ideal']:7d}"
             f"{old['excessive']:18d}{new['excessive']:7d}"
         )

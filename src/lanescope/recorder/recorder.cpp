@@ -221,6 +221,13 @@ public:
         return count;
     }
 
+    // A later context may take the address of a destroyed one, and it needs the patches again.
+    void OnContextDestroyed(CUcontext context) {
+        OnContextSynchronized(context);
+        std::lock_guard<std::mutex> lock(mutex_);
+        patched_contexts_.erase(context);
+    }
+
     void OnContextSynchronized(CUcontext context) {
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<std::pair<CUcontext, Sanitizer_StreamHandle>> keys;
@@ -318,7 +325,7 @@ void Callback(void* userdata, Sanitizer_CallbackDomain domain, Sanitizer_Callbac
         recorder->OnStreamSynchronized(data.context, data.hStream);
     } else if (domain == SANITIZER_CB_DOMAIN_RESOURCE &&
                cbid == SANITIZER_CBID_RESOURCE_CONTEXT_DESTROY_STARTING) {
-        recorder->OnContextSynchronized(static_cast<const Sanitizer_ResourceContextData*>(cbdata)->context);
+        recorder->OnContextDestroyed(static_cast<const Sanitizer_ResourceContextData*>(cbdata)->context);
     } else if (domain == SANITIZER_CB_DOMAIN_LAUNCH && cbid == SANITIZER_CBID_LAUNCH_BEGIN) {
         recorder->OnLaunchBegin(*static_cast<const Sanitizer_LaunchData*>(cbdata));
     } else if (domain == SANITIZER_CB_DOMAIN_SYNCHRONIZE) {

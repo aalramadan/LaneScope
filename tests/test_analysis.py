@@ -4,7 +4,7 @@ import pytest
 
 from lanescope import analysis, demos
 from lanescope.fixes import layouts
-from lanescope.trace import Access, Kind, Space, Trace
+from lanescope.trace import WARP_SIZE, Access, Kind, Space, Trace
 
 TRANSPOSE = demos.transpose_trace()
 
@@ -64,6 +64,28 @@ def test_patterns_stops_at_the_limit_but_counts_every_pattern():
     data = analysis.patterns(TRANSPOSE, demos.PC_LOAD_TILE, Space.SHARED, limit=3)
     assert len(data["patterns"]) == 3
     assert data["count"] == 32
+
+
+def test_patterns_of_a_copy_keep_apart_reads_that_write_different_rows():
+    lanes = range(WARP_SIZE)
+    paired = tuple(16 * lane for lane in lanes)
+    split = tuple(512 + 16 * (lane % 2 * 16 + lane // 2) for lane in lanes)
+    accesses = [
+        Access(0x40, Space.GLOBAL, Kind.LOAD, 16, tuple(1 << 32 | 16 * lane for lane in lanes)),
+        Access(0x40, Space.SHARED, Kind.STORE, 16, paired),
+        Access(
+            0x40,
+            Space.GLOBAL,
+            Kind.LOAD,
+            16,
+            tuple(1 << 32 | 512 + 16 * lane for lane in lanes),
+            warp=1,
+        ),
+        Access(0x40, Space.SHARED, Kind.STORE, 16, split, warp=1),
+    ]
+    trace = Trace.from_accesses(accesses, {"opcodes": {"0x40": "LDGSTS.E.BYPASS.128"}})
+    data = analysis.patterns(trace, 0x40, Space.GLOBAL)
+    assert sorted(item["achieved"] for item in data["patterns"]) == [16, 32]
 
 
 def test_patterns_rejects_an_instruction_of_another_space():

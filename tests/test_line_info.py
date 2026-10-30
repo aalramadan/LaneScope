@@ -238,3 +238,8 @@ def test_an_inlined_instruction_keeps_its_own_line_inside_the_file_of_its_call()
     assert line_info.parse(INLINED_LISTING) == {
         "k": {0x0: ("/src/k.cu", 9), 0x10: ("/src/k.cu", 21), 0x20: ("/src/k.cu", 21)}
     }
+
+
+def test_opcodes_keep_shared_atomics_for_their_counting_rule():
+    listing = ".text.k:\n        /*0040*/                   ATOMS.CAS RZ, [R2], R4, R5 ;\n"
+    assert line_info.opcodes(listing) == {"k": {0x40: "ATOMS.CAS"}}

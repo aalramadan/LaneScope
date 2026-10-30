@@ -2,6 +2,7 @@ import numpy as np
 
 from lanescope import analysis, demos
 from lanescope.fixes import layouts
+from lanescope.model.counters import count
 from lanescope.trace import Kind, Space
 
 
@@ -64,4 +65,24 @@ def test_demo_traces_name_their_files_and_kernels():
         "1_transpose.npz": "transpose",
         "2_row_sums.npz": "row_sums",
         "3_column_sums.npz": "column_sums",
+        "4_matmul_tile.npz": "matmul_tile",
     }
+
+
+def test_matmul_tile_ldmatrix_puts_the_eight_rows_of_each_matrix_on_one_bank():
+    trace = demos.matmul_tile_trace()
+    (read,) = [counter for counter in count(trace) if counter.pc == demos.PC_READ_TILE]
+    assert (read.achieved, read.ideal) == (32 * read.requests, 4 * read.requests)
+
+
+def test_matmul_tile_needs_the_swizzle_that_cute_uses_for_128_byte_rows():
+    best = analysis.suggest(demos.matmul_tile_trace())["changes"][0]
+    assert best["change"] == "XOR swizzle Swizzle<3,4,3> on byte offsets"
+    assert best["excessive_after"] == 0
+
+
+def test_matmul_tile_maps_the_copy_and_the_ldmatrix_to_their_source_lines():
+    trace = demos.matmul_tile_trace()
+    copy, read = (trace.source_line(pc) for pc in (demos.PC_COPY_TILE, demos.PC_READ_TILE))
+    assert copy is not None and copy[1].startswith("cp_async_16(&tile")
+    assert read is not None and read[1].startswith("ldmatrix_x4(fragment[k]")

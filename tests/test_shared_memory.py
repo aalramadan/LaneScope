@@ -347,3 +347,78 @@ def test_analyze_row_takes_the_rule_from_the_opcode_in_the_trace():
     access = Access(0x10, Space.SHARED, Kind.LOAD, 16, tuple(_rows(128)))
     trace = Trace.from_accesses([access], metadata={"opcodes": {"0x10": "LDSM.16.M88"}})
     assert shared_memory.analyze_row(trace, 0).wavefronts == 8
+
+
+def _group(rows):
+    return [16 * row for row in rows] + [None] * (WARP_SIZE - len(rows))
+
+
+@pytest.mark.parametrize(
+    ("rows", "zeros", "wavefronts", "ideal"),
+    [
+        (list(range(8)), [0], 3, 2),
+        (list(range(8)), [0, 1], 2, 2),
+        (list(range(8)), list(range(8)), 1, 1),
+        ([0] * 8, list(range(8)), 8, 1),
+        ([2 * lane for lane in range(8)], list(range(8)), 2, 1),
+        ([0] * 8, [0], 8, 1),
+        ([0] * 8, [5], 9, 2),
+    ],
+)
+def test_a_copy_with_zero_lanes_writes_every_lane_in_a_zero_pass_before_its_data(
+    rows, zeros, wavefronts, ideal
+):
+    sources = [None if lane in zeros else 16 * lane for lane in range(WARP_SIZE)]
+    result = shared_memory.analyze(
+        _group(rows), 16, store=True, opcode="LDGSTS.E.BYPASS.128", sources=sources
+    )
+    assert (result.wavefronts, result.ideal) == (wavefronts, ideal)
+
+
+@pytest.mark.parametrize(
+    ("addresses", "opcode", "wavefronts", "ideal"),
+    [
+        ([4 * lane for lane in range(WARP_SIZE)], "ATOMS.ADD", 1, 1),
+        ([8 * lane for lane in range(WARP_SIZE)], "ATOMS.ADD", 2, 1),
+        ([0] * WARP_SIZE, "ATOMS.ADD", 32, 1),
+        ([4 * (lane // 4) for lane in range(WARP_SIZE)], "ATOMS.EXCH", 4, 1),
+        ([0] * WARP_SIZE, "ATOMS.CAS", 64, 2),
+        ([4 * lane for lane in range(WARP_SIZE)], "ATOMS.CAS", 2, 2),
+    ],
+)
+def test_shared_atomics_take_a_wavefront_for_every_lane_on_one_bank(
+    addresses, opcode, wavefronts, ideal
+):
+    result = shared_memory.analyze(addresses, 4, atomic=True, opcode=opcode)
+    assert (result.wavefronts, result.ideal) == (wavefronts, ideal)
+
+
+@pytest.mark.parametrize(
+    ("rows", "sources", "wavefronts"),
+    [
+        ([lane + 1 for lane in range(8)], [16 * lane for lane in range(8)], 1),
+        ([0] * 8, [16 * lane for lane in range(8)], 8),
+        ([lane % 2 for lane in range(8)], [16 * lane for lane in range(8)], 4),
+        (list(range(8)), [32 * lane for lane in range(8)], 2),
+        (list(range(8)), [0] * 8, 8),
+    ],
+)
+def test_a_16_byte_copy_through_l1_takes_a_turn_per_lane_on_a_bank_or_a_source(
+    rows, sources, wavefronts
+):
+    destinations = _group(rows)
+    reads = sources + [None] * (WARP_SIZE - len(sources))
+    result = shared_memory.analyze(
+        destinations, 16, store=True, opcode="LDGSTS.E.128", sources=reads
+    )
+    assert result.wavefronts == wavefronts
+
+
+def test_an_inactive_lane_never_sets_the_line_of_a_lane_that_fills_zeros():
+    rows = [0, 16, 32, 48] + [None] * 28
+    sources = [0, 16, 32, None, 4096] + [None] * 27
+    alone = sources[:4] + [None] * 28
+    copy = {"store": True, "opcode": "LDGSTS.E.BYPASS.128"}
+    first = shared_memory.analyze(rows, 16, **copy, sources=sources)
+    second = shared_memory.analyze(rows, 16, **copy, sources=alone)
+    assert first == second

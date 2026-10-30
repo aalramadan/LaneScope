@@ -37,7 +37,7 @@ class StandInAction:
     def __init__(self, metrics, sass):
         self.metrics, self.sass = metrics, sass
 
-    def name(self):
+    def name(self) -> str:
         return "transposeCoalesced"
 
     def metric_names(self):
@@ -218,3 +218,34 @@ def test_counts_split_by_direction_are_added_up():
     name, values = counters.quantity("shared_wavefronts")
     assert name == "smsp__sass_wavefronts_mem_shared_op_ld + smsp__sass_wavefronts_mem_shared_op_st"
     assert values == {0x10: 32.0, 0x20: 1.0}
+
+
+def test_read_report_keeps_the_mangled_name_that_the_recorder_gives_a_kernel(monkeypatch):
+    class MangledAction(StandInAction):
+        def name(self, base=None) -> str:
+            return "_Z18transposeCoalescedPfPKf" if base == "mangled" else "transposeCoalesced"
+
+    report = types.SimpleNamespace(
+        num_ranges=lambda: 1,
+        range_by_idx=lambda index: types.SimpleNamespace(
+            num_actions=lambda: 1,
+            action_by_idx=lambda index: MangledAction(sample_metrics(), {}),
+        ),
+    )
+    module = types.SimpleNamespace(
+        load_report=lambda p: report, IAction=types.SimpleNamespace(NameBase_MANGLED="mangled")
+    )
+    monkeypatch.setattr(compare, "ncu_report", module)
+    (kernel,) = compare.read_report(pathlib.Path("transposeCoalesced.ncu-rep"))
+    assert (kernel.kernel, kernel.mangled) == ("transposeCoalesced", "_Z18transposeCoalescedPfPKf")
+
+
+def test_rows_name_the_kernel_by_the_name_that_the_recorder_gives_it():
+    counters = compare.KernelCounters(
+        kernel="transpose(float *)",
+        metrics={"memory_l1_wavefronts_shared": {0x120: 4096.0}},
+        sass={0x120: "LDS R0, [R1]"},
+        mangled="_Z9transposePf",
+    )
+    rows = compare.compare(0, demos.transpose_trace(), counters)
+    assert {row.kernel for row in rows} == {"_Z9transposePf"}

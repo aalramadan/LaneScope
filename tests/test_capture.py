@@ -80,15 +80,15 @@ def test_import_turns_records_into_a_trace_with_kernel_relative_pcs(tmp_path):
     assert (counter.achieved, counter.conflicts) == (32, 31)
 
 
-def test_atomics_are_skipped_and_counted(tmp_path):
+def test_atomics_reach_the_trace_as_atomic_accesses(tmp_path):
     info = write_launch(
         tmp_path,
         0,
         [row(0x10, [4 * lane for lane in range(WARP_SIZE)]), row(0x20, [0] * WARP_SIZE, kind=2)],
     )
     trace = capture.to_trace(*capture.load_launch(info))
-    assert len(trace) == 1
-    assert trace.metadata["skipped"] == 1
+    assert [Kind(int(kind)) for kind in trace.kind] == [Kind.LOAD, Kind.ATOMIC]
+    assert trace.metadata["skipped"] == 0
 
 
 def test_inactive_lanes_are_cleared(tmp_path):
@@ -280,3 +280,44 @@ def test_recorder_records_the_row_address_of_each_lane_of_an_ldmatrix(tmp_path):
     assert int(trace.width[rows[0]]) == 16
     assert trace.lane_addresses(rows[0]) == tuple(16 * lane for lane in range(WARP_SIZE))
     assert trace.metadata["opcodes"] == {f"{int(trace.pc[rows[0]]):#x}": "LDSM.16.M88.4"}
+
+
+TWO_CONTEXTS_LAUNCH = r'''
+import ctypes
+
+from lanescope.cuda import nvrtc
+from lanescope.cuda.driver import Driver
+from lanescope.cuda.toolchain import find
+
+SOURCE = """
+extern "C" __global__ void read_tile(unsigned sink) {
+    __shared__ unsigned tile[32];
+    if (tile[threadIdx.x] == sink) asm volatile("trap;");
+}
+"""
+for _ in range(2):
+    # Each pass releases the primary context, so the second pass runs in a new context.
+    driver = Driver()
+    options = [f"--gpu-architecture={driver.arch()}"]
+    program = nvrtc.compile_cuda(SOURCE, "read_tile.cu", options, find().nvrtc)
+    kernel = driver.function(driver.load(program.cubin), "read_tile")
+    driver.launch(kernel, (1, 1, 1), (32, 1, 1), [ctypes.c_uint32(0xFFFFFFFF)])
+    driver.close()
+'''
+
+
+@pytest.mark.skipif(
+    TOOLS.nvrtc is None or shutil.which("g++") is None or not _has_gpu(),
+    reason="NVRTC, g++, and a GPU are needed",
+)
+def test_recorder_records_a_kernel_of_a_context_that_replaces_a_destroyed_one(tmp_path):
+    driver = Driver()
+    arch = driver.arch()
+    driver.close()
+    build = build_recorder(tmp_path / "build", arch, TOOLS)
+    script = tmp_path / "launch.py"
+    script.write_text(TWO_CONTEXTS_LAUNCH)
+    out_dir = tmp_path / "record"
+    assert capture.record([sys.executable, str(script)], build, out_dir, ctas=(0, 1 << 30)) == 0
+    traces = [Trace.load(path) for path in capture.import_recording(out_dir, TOOLS.disassemblers)]
+    assert [len(trace) for trace in traces] == [1, 1]

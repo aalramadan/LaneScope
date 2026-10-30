@@ -315,3 +315,45 @@ def test_copy_partners_pair_the_two_sides_of_each_cp_async_by_cta_and_warp():
     trace = Trace.from_accesses(accesses, {"opcodes": {"0x40": "LDGSTS.E.BYPASS.128"}})
     assert trace.copy_partners == {0: 3, 3: 0, 1: 2, 2: 1}
     assert Trace.from_accesses(accesses).copy_partners == {}
+
+
+def test_copy_sources_mark_the_lanes_and_the_warps_that_fill_zeros():
+    lanes = tuple(16 * lane for lane in range(WARP_SIZE))
+    reads = tuple(None if lane < 4 else 16 * lane for lane in range(WARP_SIZE))
+    accesses = [
+        Access(0x40, Space.GLOBAL, Kind.LOAD, 16, reads, warp=0),
+        Access(0x40, Space.SHARED, Kind.STORE, 16, lanes, warp=0),
+        Access(0x40, Space.SHARED, Kind.STORE, 16, lanes, warp=1),
+    ]
+    trace = Trace.from_accesses(accesses, {"opcodes": {"0x40": "LDGSTS.E.BYPASS.128"}})
+    assert trace.copy_sources[1] == reads
+    assert trace.copy_sources[2] == (None,) * WARP_SIZE
+
+
+def test_a_subset_of_a_trace_keeps_the_global_side_of_each_copy():
+    lanes = tuple(16 * lane for lane in range(WARP_SIZE))
+    apart = tuple(32 * lane for lane in range(WARP_SIZE))
+    accesses = [
+        Access(0x40, Space.GLOBAL, Kind.LOAD, 16, apart),
+        Access(0x40, Space.SHARED, Kind.STORE, 16, lanes),
+    ]
+    trace = Trace.from_accesses(accesses, {"opcodes": {"0x40": "LDGSTS.E.BYPASS.128"}})
+    shared = trace.select(trace.space == Space.SHARED)
+    assert shared.copy_sources == {0: apart}
+    assert shared.with_addresses(shared.addr).copy_sources == {0: apart}
+
+
+def test_a_subset_of_a_trace_keeps_the_shared_side_of_each_copy():
+    lanes = tuple(16 * lane for lane in range(WARP_SIZE))
+    apart = tuple(32 * lane for lane in range(WARP_SIZE))
+    accesses = [
+        Access(0x40, Space.GLOBAL, Kind.LOAD, 16, lanes),
+        Access(0x40, Space.SHARED, Kind.STORE, 16, apart),
+    ]
+    trace = Trace.from_accesses(accesses, {"opcodes": {"0x40": "LDGSTS.E.BYPASS.128"}})
+    assert trace.copy_destinations == {0: apart}
+    assert trace.select(trace.space == Space.GLOBAL).copy_destinations == {0: apart}
+    moved = trace.with_addresses(
+        trace.addr + np.uint64(16) * (trace.space == Space.SHARED)[:, None]
+    )
+    assert moved.copy_destinations == {0: tuple(address + 16 for address in apart)}

@@ -27,16 +27,16 @@ Recording needs the setup listed under [Requirements](#requirements). On Ubuntu,
 lanescope gui --demo
 ```
 
-The command serves the GUI at http://localhost:8765 with three demo kernels. The first is the tiled matrix transpose of the CUDA samples, which has a 32-way bank conflict. Each step of the swizzle control halves the conflict, from 32 wavefronts per warp to one.
+The command serves the GUI at http://localhost:8765 with four demo kernels. The first is the tiled matrix transpose of the CUDA samples, which has a 32-way bank conflict. Each step of the swizzle control halves the conflict, from 32 wavefronts per warp to one. The fourth loads the tiles of a tensor-core matrix multiply with `cp.async` and `ldmatrix`. Its `ldmatrix` loads take 1,024 wavefronts against an ideal of 128 until the swizzle `Swizzle<3,4,3>` removes the excess.
 
-![The swizzle control of LaneScope reducing a 32-way bank conflict to none](docs/demo.gif)
+![The swizzle control of LaneScope removing the bank conflicts of a matrix transpose and of a matrix multiply tile](docs/demo.gif)
 
 ## Features
 
 | Feature | Description |
 |---|---|
 | Lane view | Shows each shared and global memory instruction lane by lane, beside its source line |
-| Hardware counts | Reports the wavefronts and sectors that Nsight Compute reports, for loads, stores, `ldmatrix`, and `cp.async` |
+| Hardware counts | Reports the wavefronts and sectors that Nsight Compute reports, for loads, stores, atomic operations, `ldmatrix`, and `cp.async` |
 | Layout search | Ranks the paddings and XOR swizzles of each buffer by the wavefronts each one removes |
 | Code output | Writes the chosen layout as a byte offset, an element index, a 2D array index, or a CuTe `Swizzle<B, M, S>` |
 | No rebuild | Records any CUDA program through a Compute Sanitizer tool, with no change to its build, including Triton kernels that PyTorch compiles at run time |
@@ -118,7 +118,7 @@ The command runs the program under the recorder and prints the path of each trac
 | `--ctas FIRST:COUNT` | Records a range of thread blocks, by default 64 blocks from the first |
 | `--arch ARCH` | Sets the GPU architecture, such as `sm_89`, by default that of the local GPU |
 
-Recording slows the program down. On large programs, limit it with `--kernel` and `--ctas`, then open the folder with `lanescope gui run1`.
+Recording slows the program down. On the RTX 4060, the kernels of `lanescope bench time` run 22 to 40 times slower under the recorder. On large programs, limit recording with `--kernel` and `--ctas`, then open the folder with `lanescope gui run1`.
 
 ### Record a Triton Kernel
 
@@ -154,17 +154,31 @@ LaneScope computes its counts from the recorded addresses with a model of the ha
 | Test | Counts equal to Nsight Compute |
 |---|---|
 | 57 calibration launches of loads and stores | 114 of 114 |
-| 52 calibration launches of `ldmatrix` and `cp.async` | 144 of 144 |
-| 300 random loads and stores, kept out of the fit | 599 of 600 |
-| 300 random `ldmatrix` and `cp.async` patterns, kept out of the fit | 872 of 872 |
+| 62 calibration launches of `ldmatrix` and `cp.async` | 180 of 180 |
+| 27 calibration launches of atomic operations | 54 of 54 |
+| 300 random loads and stores, kept out of the fit | 592 of 600 |
+| 300 random `ldmatrix` and `cp.async` patterns, kept out of the fit | 864 of 864 |
+| 300 random atomic operations, kept out of the fit | 600 of 600 |
 | Transposes and matrix multiplies | 288 of 288 |
 | Padded and swizzled kernels, predicted from the plain ones | 6 of 6 |
 
-The second command checks any program in the same way. On the Triton example, with 32 and with 64 columns per step, all 304 counts match. The test suite checks the model against every pattern measured on that GPU, 1,355 loads and stores in `tests/data/rtx4060_counts.json` and 1,462 `ldmatrix` and `cp.async` patterns in `tests/data/rtx4060_instruction_counts.json`. The same comparison runs on any supported GPU.
+The second command checks any program in the same way. On the programs of `examples/`, it gives the following counts.
+
+| Program | Counts equal to Nsight Compute |
+|---|---|
+| PyTorch matrix multiply | 76 of 76 |
+| PyTorch softmax | 136 of 136 |
+| PyTorch layer normalization | 32 of 32 |
+| PyTorch convolution, through cuDNN | 312 of 324 |
+| Triton matrix multiply kernel, with 32 and with 64 columns per step | 304 of 304 |
+| Triton softmax | 338 of 338 |
+| Triton attention | 830 of 830 |
+
+The test suite checks the model against every pattern measured on that GPU, 1,655 loads and stores in `tests/data/rtx4060_counts.json` and 2,549 `ldmatrix`, `cp.async`, and atomic patterns in `tests/data/rtx4060_instruction_counts.json`. The same comparison runs on any supported GPU.
 
 ```bash
 lanescope get-ncu                                      # installs Nsight Compute for the local driver
-lanescope validate --out check --random 300 --seed 4
+lanescope validate --out check --random 300 --seed 5
 lanescope validate --out triton-check --kernel matmul_kernel -- python examples/triton_matmul.py
 ```
 
@@ -199,7 +213,7 @@ In three runs, the swizzle makes the transpose 1.13 to 1.19 times faster and the
 | Compiler for recording | `g++` |
 | Validated GPU | GeForce RTX 4060 Laptop GPU (Ada, sm_89) |
 | Newer GPUs | sm_90 and later use rules from the NVIDIA developer forum |
-| Triton example | PyTorch with CUDA, which brings Triton, and the Python development headers |
+| Examples | PyTorch with CUDA, which brings Triton, and for Triton the Python development headers |
 
 ## How It Works
 
@@ -213,14 +227,14 @@ In three runs, the swizzle makes the transpose 1.13 to 1.19 times faster and the
 | 6 | `gui/`, `cli.py`, `mcp_server.py` | Show the results in the browser, in the terminal, and to coding agents |
 | 7 | `nsight/` | Validates the model against Nsight Compute |
 
-The model counts one 4-byte word per bank per cycle in shared memory and aligned 32-byte sectors in global memory. Accesses of 8 and 16 bytes, `ldmatrix`, and `cp.async` follow rules measured on the GPU. All steps are deterministic and run locally.
+The model counts one 4-byte word per bank per cycle in shared memory and aligned 32-byte sectors in global memory. Accesses of 8 and 16 bytes, atomic operations, `ldmatrix`, and `cp.async` follow rules measured on the GPU. All steps are deterministic and run locally.
 
 ## Limitations
 
-- LaneScope models shared and global loads and stores, `ldmatrix`, and `cp.async`. It does not model atomic operations.
+- LaneScope models loads, stores, 32-bit atomic operations, `ldmatrix`, and `cp.async`. On shared memory, a 64-bit atomic operation compiles to a loop of compare-and-swap that LaneScope does not model.
 - The rules are calibrated on one GPU, the RTX 4060. LaneScope counts `stmatrix` with the rule of `ldmatrix`. That rule is not yet tested on sm_90 or newer, the only GPUs that run `stmatrix`.
-- Twelve of the 1,355 measured loads and stores differ from Nsight Compute. All twelve are wide loads with inactive lanes.
-- The rule for 16-byte `cp.async` is measured on copies that bypass L1, as `cp.async.cg` does.
+- Nineteen of the 1,655 measured loads and stores differ from Nsight Compute. All nineteen are 8-byte or 16-byte shared loads, 17 of them with inactive lanes.
+- On the cuDNN convolution of PyTorch, 12 of 324 counts lie up to 0.5% above those of Nsight Compute. All twelve belong to four of its ten `cp.async` instructions, whose counts in Nsight Compute vary from run to run.
 
 ## Troubleshooting
 

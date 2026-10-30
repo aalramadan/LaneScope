@@ -7,11 +7,12 @@ from lanescope.model import global_memory, shared_memory
 from lanescope.nsight import calibration
 
 # Achieved and ideal counts that Nsight Compute 2026.3.1 measured on an RTX 4060
-# Laptop GPU (sm_89): the calibration cases, four runs of 300 random lane
+# Laptop GPU (sm_89): the calibration cases, five runs of 300 random lane
 # patterns, and patterns aimed at the rules that merge the groups of wide loads.
 MEASURED = json.loads((pathlib.Path(__file__).parent / "data" / "rtx4060_counts.json").read_text())
 
-# Wide loads with inactive lanes whose wavefronts the model does not yet reproduce.
+# Wide shared loads whose counts the model does not yet reproduce. All have inactive lanes,
+# except two full-warp loads of seed 5 that differ in their ideal alone.
 KNOWN_MISSES = {
     "random-seed-1/random-22-shared-load-16",
     "random-seed-1/random-89-shared-load-16",
@@ -25,6 +26,13 @@ KNOWN_MISSES = {
     "random-seed-3/random-202-shared-load-16",
     "random-seed-3/random-271-shared-load-16",
     "random-seed-4/random-47-shared-load-16",
+    "random-seed-5/random-16-shared-load-8",
+    "random-seed-5/random-17-shared-load-16",
+    "random-seed-5/random-36-shared-load-16",
+    "random-seed-5/random-166-shared-load-16",
+    "random-seed-5/random-173-shared-load-16",
+    "random-seed-5/random-233-shared-load-16",
+    "random-seed-5/random-274-shared-load-16",
 }
 
 
@@ -46,9 +54,10 @@ def model_counts(space: str, kind: str, width: int, units: list[int | None]) -> 
 
 
 def test_measured_random_patterns_come_from_the_calibration_run():
-    for seed in (1, 2, 3, 4):
+    for seed in (1, 2, 3, 4, 5):
         measured = [case for case in MEASURED["cases"] if case[0] == f"random-seed-{seed}"]
         generated = calibration.random_cases(len(measured), seed)
+        assert len(measured) == 300
         for (_, name, _, _, width, units, *_), case in zip(measured, generated, strict=True):
             lanes = case.addresses()
             assert name == case.name
@@ -65,11 +74,14 @@ def test_model_matches_nsight_compute_on_an_rtx_4060(space, kind, width, units, 
     assert model_counts(space, kind, width, units) == measured
 
 
-# Nsight Compute 2026.3.1 counts of ldmatrix and cp.async on the same GPU: the calibration
-# cases, the random patterns of seeds 3 and 4, the random patterns of an earlier probe, 16-byte
-# copies that write two distinct rows, and a probe of 16-byte copies with chosen rows,
-# global addresses, and active lanes. A copy without global addresses reads consecutive
-# rows of its width, lane by lane.
+# Nsight Compute 2026.3.1 counts of ldmatrix, cp.async, and atomics on the same GPU: the
+# calibration cases, the random patterns of seeds 3 to 5, the random atomics of seed 5, the
+# random patterns of an earlier probe, 16-byte copies that write two distinct rows, a probe of
+# 16-byte copies with chosen rows, global addresses, and active lanes, a probe of copies whose
+# lanes fill zeros with replays of the copies of a cuDNN convolution, a probe of shared and
+# global atomics, and the 16-byte probe again through L1. A copy without global addresses
+# reads consecutive rows of its width, lane by lane, and a None among its addresses marks a
+# lane that fills zeros.
 INSTRUCTIONS = json.loads(
     (pathlib.Path(__file__).parent / "data" / "rtx4060_instruction_counts.json").read_text()
 )
@@ -83,9 +95,10 @@ def instruction_cases():
     for group, name, opcode, width, offsets, wavefronts, ideal, sources, *_ in INSTRUCTIONS[
         "cases"
     ]:
-        yield pytest.param(
-            opcode, width, offsets, sources, (wavefronts, ideal), id=f"{group}/{name}"
-        )
+        if wavefronts is not None:
+            yield pytest.param(
+                opcode, width, offsets, sources, (wavefronts, ideal), id=f"{group}/{name}"
+            )
 
 
 def copy_sector_cases():
@@ -96,17 +109,27 @@ def copy_sector_cases():
             )
 
 
-def test_measurements_cover_every_ldmatrix_and_cp_async_case():
+def test_measurements_cover_every_ldmatrix_cp_async_and_atomic_case():
     measured = {name for group, name, *_ in INSTRUCTIONS["cases"] if group == "calibration"}
-    assert measured == {case.name for case in calibration.instruction_cases()}
+    cases = calibration.instruction_cases() + calibration.atomic_cases()
+    assert measured == {case.name for case in cases}
 
 
 def test_measured_random_ldmatrix_and_cp_async_patterns_come_from_the_calibration_run():
-    for seed in (3, 4):
+    for seed in (3, 4, 5):
         measured = [case for case in INSTRUCTIONS["cases"] if case[0] == f"random-seed-{seed}"]
         generated = calibration.random_instruction_cases(len(measured), seed)
+        assert len(measured) == 300
         for (_, name, _, width, offsets, *_), case in zip(measured, generated, strict=True):
             assert (name, width, offsets) == (case.name, case.width, list(case.offsets))
+
+
+def test_measured_random_atomic_patterns_come_from_the_calibration_run():
+    measured = [case for case in INSTRUCTIONS["cases"] if case[0] == "random-atomics-seed-5"]
+    generated = calibration.random_atomic_cases(len(measured), 5)
+    assert len(measured) == 300
+    for (_, name, _, width, offsets, *_), case in zip(measured, generated, strict=True):
+        assert (name, width, offsets) == (case.name, case.width, list(case.addresses()))
 
 
 @pytest.mark.parametrize(
@@ -133,7 +156,9 @@ def test_model_matches_nsight_compute_on_the_global_sectors_of_cp_async(
         None if offset is None else address
         for offset, address in zip(offsets, sources_of(width, sources), strict=True)
     ]
-    if "BYPASS" in opcode:
+    if opcode.startswith(("RED", "ATOMG")):
+        result = global_memory.analyze(offsets, width)
+    elif "BYPASS" in opcode:
         result = global_memory.copy_sectors(reads, offsets)
     else:
         result = global_memory.analyze(reads, width)

@@ -227,6 +227,9 @@ def compare(trace: Trace, buffer: Buffer, change: Change) -> list[Comparison]:
     affected = ((changed.addr != trace.addr) & active).any(axis=1) | (
         shared & buffer.contains(trace.addr)
     ).any(axis=1)
+    # The global side of a copy into the buffer counts its sectors from the rows it writes.
+    partners = trace.copy_partners
+    affected[[partners[row] for row in np.flatnonzero(affected).tolist() if row in partners]] = True
     rows = rows_of_instructions(trace, affected)
     # Counting a subset numbers its rows from zero, so worst rows map back to the trace.
     index = np.flatnonzero(rows)

@@ -68,23 +68,32 @@ def analyze_row(trace: Trace, row: int) -> GlobalAccess:
     memory, as Nsight Compute counts it, and so takes its count from both of its rows.
     """
     addresses, width = trace.lane_addresses(row), int(trace.width[row])
-    partner = trace.copy_partners.get(row)
+    destinations = trace.copy_destinations.get(row)
     if (
-        partner is None
+        destinations is None
         or width != async_copy.ROW_BYTES
         or "BYPASS" not in trace.opcode(int(trace.pc[row]))
     ):
         return analyze(addresses, width)
-    return copy_sectors(addresses, trace.lane_addresses(partner))
+    return copy_sectors(addresses, destinations)
 
 
 def copy_sectors(sources: Sequence[int | None], destinations: Sequence[int | None]) -> GlobalAccess:
-    """Model the sectors of a 16-byte cp.async that bypasses L1, one for each write."""
-    writes = async_copy.copies(sources, destinations)
+    """Model the sectors of a 16-byte cp.async that bypasses L1, one for each write.
+
+    Only the lanes with a global address read, as the others fill zeros.
+    """
+    reads = tuple(
+        None if source is None else destination
+        for source, destination in zip(sources, destinations, strict=True)
+    )
+    writes = async_copy.copies(sources, reads)
+    if not writes:
+        return GlobalAccess(async_copy.ROW_BYTES, 0, 0, (), 0)
     base = min(write.source for write in writes) // LINE_BYTES * LINE_BYTES
     sector_lanes = tuple(((write.source - base) // SECTOR_BYTES, write.lanes) for write in writes)
-    rows = {address // async_copy.ROW_BYTES for address in destinations if address is not None}
-    active = sum(address is not None for address in destinations)
+    rows = {address // async_copy.ROW_BYTES for address in reads if address is not None}
+    active = sum(address is not None for address in reads)
     ideal = math.ceil(len(rows) * async_copy.ROW_BYTES / SECTOR_BYTES)
     return GlobalAccess(async_copy.ROW_BYTES, active, base, sector_lanes, ideal)
 

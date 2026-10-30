@@ -7,6 +7,7 @@ from lanescope.model.global_memory import LINE_BYTES
 from lanescope.trace import Kind, Space, Trace
 
 InstructionKey = tuple[int, int, int, int]
+_ZERO_LANE = np.iinfo(np.uint64).max
 
 
 @dataclasses.dataclass(frozen=True)
@@ -86,13 +87,19 @@ def row_keys(trace: Trace) -> np.ndarray:
         addresses[is_global] = np.where(lanes, addresses[is_global] - base[:, None], np.uint64(0))
     columns = [trace.pc, trace.space, trace.kind, trace.width, trace.mask]
     keys = np.column_stack([*(c.astype(np.uint64) for c in columns), addresses])
-    partners = trace.copy_partners
-    if not partners:
+    destinations, sources = trace.copy_destinations, trace.copy_sources
+    if not destinations and not sources:
         return keys
     # The two rows of a cp.async count from both sides of the copy, so each row keys on the
-    # addresses of its partner as well.
+    # other side as well: a global row on its shared addresses, and a shared row on its
+    # global addresses from their first line, with a mark for each lane that fills zeros.
     other = np.zeros_like(addresses)
-    other[list(partners)] = addresses[list(partners.values())]
+    for row, lanes in destinations.items():
+        other[row] = [0 if address is None else address for address in lanes]
+    for row, lanes in sources.items():
+        known = [address for address in lanes if address is not None]
+        base = min(known) // LINE_BYTES * LINE_BYTES if known else 0
+        other[row] = [_ZERO_LANE if address is None else address - base for address in lanes]
     return np.column_stack([keys, other])
 
 

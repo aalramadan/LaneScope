@@ -11,7 +11,7 @@ OPCODE = re.compile(
     r"^\s*/\*(?P<offset>[0-9a-f]{4,})\*/\s+(?:@!?U?P\w+\s+)?(?P<opcode>[A-Z][\w.]*)"
 )
 # Instructions whose wavefronts follow rules of their own, beyond those of their width.
-RULE_OPCODES = ("LDSM", "STSM", "LDGSTS")
+RULE_OPCODES = ("LDSM", "STSM", "LDGSTS", "ATOMS")
 # Sources larger than this are no kernel files worth carrying in a trace.
 MAX_SOURCE_BYTES = 1 << 20
 # Line tables name any file the compiler read. Only absolute paths of source files

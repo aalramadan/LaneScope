@@ -246,6 +246,8 @@ def test_gpu_script_stops_on_a_driver_older_than_cuda_12_4(layout):
 def test_scripts_with_a_shebang_are_executable():
     for name in sorted(os.listdir(SCRIPTS)):
         path = os.path.join(SCRIPTS, name)
+        if not os.path.isfile(path):
+            continue
         with open(path) as script:
             if script.readline().startswith("#!"):
                 assert os.access(path, os.X_OK), f"{name} is not executable"

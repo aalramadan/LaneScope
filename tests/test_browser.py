@@ -1,6 +1,6 @@
-import importlib.util
 import json
 import pathlib
+import runpy
 
 import pytest
 
@@ -53,14 +53,12 @@ def test_browser_api_answers_a_bad_request_with_its_status(api, method, path, pa
 
 
 def test_built_page_runs_the_api_in_the_browser_with_relative_paths(tmp_path):
-    spec = importlib.util.spec_from_file_location("build_site", ROOT / "scripts" / "build_site.py")
-    assert spec is not None and spec.loader is not None
-    build_site = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(build_site)
-    build_site.assemble(tmp_path, "lanescope-1.0.0-py3-none-any.whl")
+    # Running the file leaves no bytecode in scripts/, unlike an import.
+    build_site = runpy.run_path(str(ROOT / "scripts" / "build_site.py"))
+    build_site["assemble"](tmp_path, "lanescope-1.0.0-py3-none-any.whl")
     page = (tmp_path / "index.html").read_text()
     assert '<meta name="lanescope-backend" content="pyodide" />' in page
     assert 'content="./lanescope-1.0.0-py3-none-any.whl"' in page
     assert 'id="pyodide-status"' in page
     assert "/static/" not in page
-    assert all((tmp_path / name).is_file() for name in build_site.ASSETS + (".nojekyll",))
+    assert all((tmp_path / name).is_file() for name in build_site["ASSETS"] + (".nojekyll",))

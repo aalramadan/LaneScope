@@ -239,6 +239,16 @@ def test_validating_a_program_compares_each_of_its_launches_with_its_counters(
     assert calls == ["k"]
 
 
+def test_validating_a_program_without_nvdisasm_says_that_instruction_rules_fall_back(
+    tmp_path, offline_check, monkeypatch
+):
+    counters = compare.KernelCounters(kernel="k", metrics={}, sass={})
+    program_check(monkeypatch, tmp_path, [counters])
+    tools = dataclasses.replace(find(), ncu=pathlib.Path("ncu"), nvdisasm=None, disassemblers=())
+    summary = validate.validate_program(tmp_path / "check", ["./app"], "k", tools=tools)
+    assert "nvdisasm was not found" in summary.read_text()
+
+
 def test_validating_a_program_names_a_launch_without_counters_of_its_kernel(
     tmp_path, offline_check, monkeypatch
 ):

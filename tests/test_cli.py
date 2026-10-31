@@ -455,6 +455,20 @@ def test_import_reads_lines_with_the_next_nvdisasm_when_one_fails(tmp_path, monk
     assert Trace.load(tmp_path / "trace-0.npz").metadata["lines"] == {"0x10": 3}
 
 
+def test_import_without_nvdisasm_says_that_instruction_rules_fall_back(
+    tmp_path, monkeypatch, capsys
+):
+    records = np.zeros(1, dtype=capture.RECORD_DTYPE)
+    records[0]["pc"], records[0]["mask"], records[0]["width"] = 0x1010, 1, 4
+    (tmp_path / "launch-0.bin").write_bytes(records.tobytes())
+    info = {"format": 1, "kernel": "k", "module": 0, "function_pc": 0x1000, "record_bytes": 280}
+    (tmp_path / "launch-0.json").write_text(json.dumps(info))
+    tools = toolchain.Toolchain(*[None] * 9, disassemblers=())
+    monkeypatch.setattr(cli_module, "find", lambda: tools)
+    assert main(["import", str(tmp_path)]) == 0
+    assert "nvdisasm was not found" in capsys.readouterr().err
+
+
 def test_validate_takes_random_patterns_only_for_the_bench(tmp_path, capsys):
     command = ["validate", "--out", str(tmp_path), "--random", "5", "--", "./app"]
     assert main(command) == 2

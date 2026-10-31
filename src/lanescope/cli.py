@@ -329,13 +329,20 @@ def _record(args: argparse.Namespace) -> int:
             f"{args.out} holds no launch files. "
             "The program launched no kernel that the recorder saw"
         )
-    for path in capture.import_recording(args.out, find().disassemblers):
+    for path in _import_traces(args.out):
         print(f"wrote {path}")
     return 0
 
 
+def _import_traces(folder: pathlib.Path) -> list[pathlib.Path]:
+    disassemblers = find().disassemblers
+    if not disassemblers:
+        print(f"lanescope: {capture.NO_DISASSEMBLER}", file=sys.stderr)
+    return capture.import_recording(folder, disassemblers)
+
+
 def _import(args: argparse.Namespace) -> int:
-    paths = capture.import_recording(args.folder, find().disassemblers)
+    paths = _import_traces(args.folder)
     if not paths:
         raise ValueError(f"{args.folder} holds no launch files")
     for path in paths:

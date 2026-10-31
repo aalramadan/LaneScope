@@ -168,6 +168,8 @@ def validate(
         )
     traces = [Trace.load(path) for path in paths]
     lines = [f"# LaneScope validation on {gpu}", "", *_trace_lines(traces, names)]
+    if not tools.disassemblers:
+        lines += ["", capture.NO_DISASSEMBLER]
     if tools.ncu is None:
         lines += [
             "",
@@ -253,7 +255,10 @@ def validate_program(
         for launch, name in zip(launches, names, strict=True)
     ]
     lines = [f"# LaneScope validation of {' '.join(command)} on {gpu}", ""]
-    lines += [*_trace_lines(traces, labels), "", *problems, "", *_metric_lines(kernels), ""]
+    lines += [*_trace_lines(traces, labels), ""]
+    if not tools.disassemblers:
+        lines += [capture.NO_DISASSEMBLER, ""]
+    lines += [*problems, "", *_metric_lines(kernels), ""]
     lines += [*_summary_lines(rows, []), "", *_mismatch_lines(rows, labels)]
     return _write(out_dir, lines, rows, [])
 

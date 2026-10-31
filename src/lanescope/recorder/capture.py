@@ -29,6 +29,13 @@ LAUNCH_FORMAT = 1
 LAUNCH_NAME = re.compile(r"launch-(\d+)\.json")
 # The files that a recording and its import write, which the next recording replaces.
 RECORDING_FILE = re.compile(r"launch-\d+\.(json|bin)|module-\d+\.cubin|trace-\d+\.npz")
+# Without the SASS of each kernel, a trace cannot tell ldmatrix, cp.async, or the kind of an
+# atomic from a plain access.
+NO_DISASSEMBLER = (
+    "nvdisasm was not found, so the traces carry no source lines or SASS opcodes, and "
+    "ldmatrix, cp.async, and compare-and-swap count as plain loads, stores, and atomics. "
+    "Run pip install 'lanescope[gpu]' to add it."
+)
 
 
 def environment(

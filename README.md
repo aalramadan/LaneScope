@@ -242,6 +242,7 @@ The model counts one 4-byte word per bank per cycle in shared memory and aligned
 |---|---|---|
 | `Nsight Compute has no access to the GPU counters` | The driver restricts the performance counters | On Windows, select Enable Developer Settings in the Desktop menu of the NVIDIA Control Panel, then allow all users under Developer, Manage GPU Performance Counters. On Linux, set the `nvidia` module option `NVreg_RestrictProfilingToAdminUsers=0` and reboot |
 | `missing CUDA tools` | The `gpu` extra is not installed | Run `pip install ".[gpu]"` |
+| `nvdisasm was not found` | The `gpu` extra is not installed. Without it, the traces lack the SASS opcodes that the rules of `ldmatrix`, `cp.async`, and atomics need | Run `pip install ".[gpu]"`, then `lanescope import` on the recording folder |
 | `C++ compiler not found` | `g++` is missing | Run `sudo apt install g++` |
 | `cannot load the CUDA driver` | No GPU is visible | Recording and validation need a GPU. Analysis and the GUI do not |
 | `the CUDA tools are version 12.9, newer than the 12.8 that the driver supports` | The `gpu` extra installs the newest CUDA 12 tools, which are newer than the driver | Update the NVIDIA driver, or run `scripts/gpu_validate.sh`, which installs the CUDA tools of the driver's version and runs the check |

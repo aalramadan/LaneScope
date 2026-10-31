@@ -31,6 +31,8 @@ The command serves the GUI at http://localhost:8765 with four demo kernels. The 
 
 ![The swizzle control of LaneScope removing the bank conflicts of a matrix transpose and of a matrix multiply tile](docs/demo.gif)
 
+The same page runs in the browser at https://aalramadan.github.io/lanescope/ with no install. There, Pyodide, a build of Python for the browser, runs the analysis of the four demo kernels inside the page.
+
 ## Features
 
 | Feature | Description |

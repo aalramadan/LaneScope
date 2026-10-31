@@ -204,17 +204,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return _static("index.html")
         if url.path.startswith("/static/"):
             return _static(url.path.removeprefix("/static/"))
-        library = self.app.library
-        if url.path == "/api/info":
-            return _json({"version": __version__, "roots": [str(root) for root in library.roots]})
-        if url.path == "/api/traces":
-            return _json(library.listing())
-        route = TRACE_ROUTES.get(url.path)
-        if route is None:
-            raise NotFound(f"no route {url.path}")
-        query = _query(url.query)
-        trace, overview = library.load(_text(query, "id"))
-        return _json(route(trace, overview, query))
+        return _json(answer_get(self.app.library, url.path, _query(url.query)))
 
     def _post(self) -> tuple[int, str, bytes]:
         if urllib.parse.urlsplit(self.path).path != "/api/whatif":
@@ -228,12 +218,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ValueError(f"the request body is no JSON ({error})") from error
-        if not isinstance(body, dict):
-            raise ValueError("the request body must be a JSON object")
-        trace, overview = self.app.library.load(_field(body, "id", str))
-        bounds = _field(body, "buffer", dict)
-        buffer = _buffer(_field(bounds, "start", int), _field(bounds, "size", int))
-        return _json(_whatif(trace, overview, buffer, body))
+        return _json(answer_post(self.app.library, "/api/whatif", body))
 
     def _respond(self, route: Callable[[], tuple[int, str, bytes]]) -> None:
         if not self._host_allowed():
@@ -286,6 +271,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             # The page cancels a request once a newer one replaces it, such as on a slider.
             self.close_connection = True
+
+
+def answer_get(library: Library, path: str, query: dict[str, str]) -> dict:
+    """Return the answer of a read-only API route of the page."""
+    if path == "/api/info":
+        return {"version": __version__, "roots": [str(root) for root in library.roots]}
+    if path == "/api/traces":
+        return library.listing()
+    route = TRACE_ROUTES.get(path)
+    if route is None:
+        raise NotFound(f"no route {path}")
+    trace, overview = library.load(_text(query, "id"))
+    return route(trace, overview, query)
+
+
+def answer_post(library: Library, path: str, body: object) -> dict:
+    """Return the answer of the what-if route, the one route with a JSON body."""
+    if path != "/api/whatif":
+        raise NotFound(f"no route {path}")
+    if not isinstance(body, dict):
+        raise ValueError("the request body must be a JSON object")
+    trace, overview = library.load(_field(body, "id", str))
+    bounds = _field(body, "buffer", dict)
+    buffer = _buffer(_field(bounds, "start", int), _field(bounds, "size", int))
+    return _whatif(trace, overview, buffer, body)
 
 
 def _trace_route(trace: Trace, overview: dict, query: dict[str, str]) -> dict:

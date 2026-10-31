@@ -308,7 +308,7 @@ def _record(args: argparse.Namespace) -> int:
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         raise ValueError("give the program to record after --")
-    built = build_recorder(args.out / "build", args.arch or _local_arch())
+    built = build_recorder(args.out / "build", args.arch or _local_arch(), cache=cache_folder())
     status = capture.record(
         command, built, args.out, capacity=args.capacity, ctas=args.ctas, kernel=args.kernel
     )

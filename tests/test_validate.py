@@ -141,7 +141,7 @@ def offline_check(monkeypatch, tmp_path):
     recorder = RecorderBuild(tmp_path / "lib.so", tmp_path / "patches.cubin", tmp_path / "san.so")
     monkeypatch.setattr(validate, "Driver", StandInDriver)
     monkeypatch.setattr(validate, "check_versions", lambda tools, version: None)
-    monkeypatch.setattr(validate, "build_recorder", lambda out_dir, arch, tools: recorder)
+    monkeypatch.setattr(validate, "build_recorder", lambda out_dir, arch, tools, cache: recorder)
     monkeypatch.setattr(validate.calibration, "compile_kernels", lambda arch, tools, source: b"")
     monkeypatch.setattr(validate.capture, "record", lambda command, build, out, **kw: 0)
     monkeypatch.setattr(validate.capture, "import_recording", lambda out, tools: list(traces))

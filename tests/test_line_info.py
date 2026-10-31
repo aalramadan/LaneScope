@@ -1,6 +1,8 @@
 import json
 import re
+import struct
 import subprocess
+import warnings
 
 import numpy as np
 import pytest
@@ -139,14 +141,14 @@ def test_import_maps_a_recorded_shared_load_to_its_source_line(tmp_path):
     assert trace.metadata["source_file"] == str(source)
 
 
-def write_unreadable_module(folder):
+def write_unreadable_module(folder, **info):
     records = np.zeros(1, dtype=capture.RECORD_DTYPE)
     records[0]["pc"] = 0x1010
     records[0]["mask"] = 1
     records[0]["width"] = 4
     (folder / "launch-0.bin").write_bytes(records.tobytes())
-    info = {"format": 1, "kernel": "k", "module": 0, "function_pc": 0x1000, "record_bytes": 280}
-    (folder / "launch-0.json").write_text(json.dumps(info))
+    base = {"format": 1, "kernel": "k", "module": 0, "function_pc": 0x1000, "record_bytes": 280}
+    (folder / "launch-0.json").write_text(json.dumps(base | info))
     (folder / "module-0.cubin").write_bytes(b"not a cubin")
 
 
@@ -162,6 +164,16 @@ def test_import_keeps_a_trace_whose_module_nvdisasm_cannot_read(tmp_path):
     with pytest.warns(UserWarning, match="carry no source lines"):
         (path,) = capture.import_recording(tmp_path, TOOLS.disassemblers)
     assert "lines" not in Trace.load(path).metadata
+
+
+@pytest.mark.skipif(TOOLS.nvdisasm is None, reason="nvdisasm is needed")
+def test_import_names_an_unreadable_module_only_for_a_trace_that_would_take_its_lines(tmp_path):
+    # The record lies past the end of the kernel, so its PCs stay absolute and take no lines.
+    write_unreadable_module(tmp_path, function_size=8)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        (path,) = capture.import_recording(tmp_path, TOOLS.disassemblers)
+    assert Trace.load(path).metadata["pc_base"] == 0
 
 
 def test_metadata_reads_only_absolute_paths_of_source_files(tmp_path, monkeypatch):
@@ -221,6 +233,64 @@ def test_module_listing_passes_over_an_nvdisasm_that_cannot_start(tmp_path):
     cubin.write_bytes(b"")
     with pytest.raises(ValueError, match="cannot start"):
         line_info.module_listing([broken], cubin)
+
+
+TWO_KERNELS = """extern "C" __global__ void first(float* out) { out[threadIdx.x] = 1.0f; }
+extern "C" __global__ void second(float* out) { out[threadIdx.x] = 2.0f; }
+"""
+
+
+def two_kernel_cubin(folder):
+    assert TOOLS.nvrtc is not None
+    program = nvrtc.compile_cuda(
+        TWO_KERNELS, "two.cu", ["--gpu-architecture=sm_89", "-lineinfo"], TOOLS.nvrtc
+    )
+    assert program.cubin is not None
+    cubin = folder / "module.cubin"
+    cubin.write_bytes(program.cubin)
+    return cubin
+
+
+@pytest.mark.skipif(
+    TOOLS.nvrtc is None or TOOLS.nvdisasm is None, reason="NVRTC and nvdisasm are needed"
+)
+def test_module_listing_of_named_kernels_holds_these_kernels_alone(tmp_path):
+    cubin = two_kernel_cubin(tmp_path)
+    whole = line_info.parse(line_info.module_listing(TOOLS.disassemblers, cubin))
+    only = line_info.parse(line_info.module_listing(TOOLS.disassemblers, cubin, {"second"}))
+    assert set(whole) == {"first", "second"}
+    assert only == {"second": whole["second"]}
+
+
+@pytest.mark.skipif(
+    TOOLS.nvrtc is None or TOOLS.nvdisasm is None, reason="NVRTC and nvdisasm are needed"
+)
+def test_module_listing_lists_every_kernel_when_a_named_kernel_is_missing(tmp_path):
+    cubin = two_kernel_cubin(tmp_path)
+    listing = line_info.module_listing(TOOLS.disassemblers, cubin, {"second", "absent"})
+    assert set(line_info.parse(listing)) == {"first", "second"}
+
+
+@pytest.mark.skipif(TOOLS.nvrtc is None, reason="NVRTC is needed")
+def test_function_symbols_name_each_kernel_of_a_cubin(tmp_path):
+    data = two_kernel_cubin(tmp_path).read_bytes()
+    symbols = line_info.function_symbols(data)
+    assert {"first", "second"} <= set(symbols)
+    assert symbols["first"] != symbols["second"]
+    assert line_info.function_symbols(data[: len(data) // 2]) == {}
+
+
+# An ELF header whose section table starts beyond any offset that Python can index.
+FAR_SECTIONS = (
+    b"\x7fELF\x02\x01\x01"
+    + bytes(9)
+    + struct.pack("<HHIQQQIHHHHHH", 1, 190, 1, 0, 0, 1 << 63, 0, 64, 0, 0, 64, 1, 0)
+)
+
+
+@pytest.mark.parametrize("data", [b"", b"\x7fELF\x02" + bytes(64), b"no cubin" * 16, FAR_SECTIONS])
+def test_function_symbols_of_a_file_that_is_no_cubin_are_empty(data):
+    assert line_info.function_symbols(data) == {}
 
 
 INLINED_LISTING = """.text.k:

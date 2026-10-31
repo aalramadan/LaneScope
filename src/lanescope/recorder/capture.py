@@ -1,3 +1,4 @@
+import concurrent.futures
 import dataclasses
 import json
 import os
@@ -27,6 +28,12 @@ RECORD_DTYPE = np.dtype(
 )
 LAUNCH_FORMAT = 1
 LAUNCH_NAME = re.compile(r"launch-(\d+)\.json")
+# The import of a launch holds about four times its records in memory, so the launches
+# that import at once keep their records within this many bytes together.
+IMPORT_BYTES = 1 << 29
+IMPORT_THREADS = 8
+# The source lines and the counted opcodes of each kernel of a module.
+ModuleLines = tuple[dict[str, line_info.FunctionLines], dict[str, dict[int, str]]]
 # The files that a recording and its import write, which the next recording replaces.
 RECORDING_FILE = re.compile(r"launch-\d+\.(json|bin)|module-\d+\.cubin|trace-\d+\.npz")
 # Without the SASS of each kernel, a trace cannot tell ldmatrix, cp.async, or the kind of an
@@ -106,6 +113,10 @@ def launch_files(out_dir: pathlib.Path) -> list[pathlib.Path]:
 
 def load_launch(info_path: pathlib.Path) -> tuple[dict, np.ndarray]:
     """Return the launch description and its records, raising ValueError for a bad file."""
+    return _launch_info(info_path), _launch_records(info_path)
+
+
+def _launch_info(info_path: pathlib.Path) -> dict:
     try:
         info = json.loads(info_path.read_text())
     except json.JSONDecodeError as error:
@@ -116,20 +127,24 @@ def load_launch(info_path: pathlib.Path) -> tuple[dict, np.ndarray]:
         raise ValueError(f"{info_path} has launch format {info.get('format')!r}, expected 1")
     if info.get("record_bytes") != RECORD_DTYPE.itemsize:
         raise ValueError(f"{info_path} has {info.get('record_bytes')}-byte records, expected 280")
+    return info
+
+
+def _launch_records(info_path: pathlib.Path) -> np.ndarray:
     data = info_path.with_suffix(".bin").read_bytes()
     if len(data) % RECORD_DTYPE.itemsize:
         raise ValueError(f"{info_path.with_suffix('.bin')} ends inside a record")
-    return info, np.frombuffer(data, dtype=RECORD_DTYPE)
+    return np.frombuffer(data, dtype=RECORD_DTYPE)
 
 
 def to_trace(info: dict, records: np.ndarray) -> Trace:
     """Return the trace of one launch, with PCs relative to the kernel."""
     keep = (records["mask"] != 0) & np.isin(records["width"], WIDTHS)
-    kept = records[keep]
+    kept = records if keep.all() else records[keep]
     base = int(info.get("function_pc", 0))
     end = base + int(info.get("function_size", 0)) if info.get("function_size") else 2**64
     relative = base > 0 and bool(((kept["pc"] >= base) & (kept["pc"] < end)).all())
-    lanes = (kept["mask"].astype(np.uint64)[:, None] >> np.arange(WARP_SIZE, dtype=np.uint64)) & 1
+    lanes = (kept["mask"][:, None] >> np.arange(WARP_SIZE, dtype=np.uint32)) & 1
     metadata = {
         "kernel": str(info.get("kernel", "")),
         "arch": str(info.get("arch", "")),
@@ -161,43 +176,72 @@ def import_recording(
     """Write trace-<n>.npz next to each launch file of a recording and return their paths.
 
     With nvdisasm among the disassemblers, each trace also maps its PCs to the
-    source lines of its kernel.
+    source lines of its kernel. The modules and the launches go through threads, since
+    nvdisasm, NumPy, and the compression of a trace spend most of their time outside
+    the interpreter lock.
     """
-    paths = []
-    modules: dict[int, tuple[dict[str, line_info.FunctionLines], dict[str, dict[int, str]]]] = {}
-    for info_path in launch_files(out_dir):
-        info, records = load_launch(info_path)
-        trace = to_trace(info, records)
-        if disassemblers and trace.metadata["pc_base"]:
-            lines = _kernel_lines(out_dir, info, disassemblers, modules)
-            trace = dataclasses.replace(trace, metadata=trace.metadata | lines)
-        path = out_dir / f"trace-{info_path.stem.split('-')[1]}.npz"
-        trace.save(path)
-        paths.append(path)
-    return paths
+    paths = launch_files(out_dir)
+    infos = [_launch_info(path) for path in paths]
+    modules = _module_listings(out_dir, infos, disassemblers)
+    with concurrent.futures.ThreadPoolExecutor(_workers(paths)) as pool:
+        saved = list(
+            pool.map(lambda path, info: _save_trace(out_dir, path, info, modules), paths, infos)
+        )
+    # A module that nvdisasm cannot read leaves the traces that would take its lines without them.
+    for module in dict.fromkeys(module for _, module in saved if module is not None):
+        if isinstance(failed := modules[module], ValueError):
+            warnings.warn(f"{failed}. Its traces carry no source lines.", stacklevel=2)
+    return [path for path, _ in saved]
 
 
-def _kernel_lines(
-    out_dir: pathlib.Path,
-    info: dict,
-    disassemblers: Sequence[pathlib.Path],
-    modules: dict[int, tuple[dict[str, line_info.FunctionLines], dict[str, dict[int, str]]]],
-) -> dict:
-    module = info.get("module")
-    cubin = out_dir / f"module-{module}.cubin"
-    if not isinstance(module, int) or not cubin.is_file():
+def _workers(info_paths: Sequence[pathlib.Path]) -> int:
+    records = (path.with_suffix(".bin") for path in info_paths)
+    largest = max((path.stat().st_size for path in records if path.is_file()), default=0)
+    return max(1, min(IMPORT_THREADS, os.cpu_count() or 1, IMPORT_BYTES // max(largest, 1)))
+
+
+def _module_listings(
+    out_dir: pathlib.Path, infos: Sequence[dict], disassemblers: Sequence[pathlib.Path]
+) -> dict[int, ModuleLines | ValueError]:
+    kernels: dict[int, set[str]] = {}
+    for info in infos:
+        module = info.get("module")
+        if isinstance(module, int) and info.get("function_pc"):
+            if (out_dir / f"module-{module}.cubin").is_file():
+                kernels.setdefault(module, set()).add(str(info.get("kernel", "")))
+    if not disassemblers or not kernels:
         return {}
-    if module not in modules:
-        # A module that nvdisasm cannot read leaves its traces without lines.
+
+    def listing(module: int) -> ModuleLines | ValueError:
+        cubin = out_dir / f"module-{module}.cubin"
         try:
-            listing = line_info.module_listing(disassemblers, cubin)
-            modules[module] = (line_info.parse(listing), line_info.opcodes(listing))
+            text = line_info.module_listing(disassemblers, cubin, kernels[module])
         except ValueError as error:
-            warnings.warn(f"{error}. Its traces carry no source lines.", stacklevel=2)
-            modules[module] = ({}, {})
-    kernel = str(info.get("kernel", ""))
-    lines, codes = modules[module]
-    data = line_info.metadata(lines.get(kernel, {}))
-    if found := codes.get(kernel):
-        data["opcodes"] = {f"{offset:#x}": opcode for offset, opcode in found.items()}
-    return data
+            return error
+        return line_info.parse(text), line_info.opcodes(text)
+
+    with concurrent.futures.ThreadPoolExecutor(min(len(kernels), os.cpu_count() or 1)) as pool:
+        return dict(zip(kernels, pool.map(listing, kernels), strict=True))
+
+
+def _save_trace(
+    out_dir: pathlib.Path,
+    info_path: pathlib.Path,
+    info: dict,
+    modules: dict[int, ModuleLines | ValueError],
+) -> tuple[pathlib.Path, int | None]:
+    """Save the trace of one launch and return its path with the module whose lines it takes."""
+    trace = to_trace(info, _launch_records(info_path))
+    module = info.get("module")
+    if not (trace.metadata["pc_base"] and isinstance(module, int) and module in modules):
+        module = None
+    elif not isinstance(found := modules[module], ValueError):
+        kernel = str(info.get("kernel", ""))
+        lines, codes = found
+        data = line_info.metadata(lines.get(kernel, {}))
+        if kernel_codes := codes.get(kernel):
+            data["opcodes"] = {f"{offset:#x}": opcode for offset, opcode in kernel_codes.items()}
+        trace = dataclasses.replace(trace, metadata=trace.metadata | data)
+    path = out_dir / f"trace-{info_path.stem.split('-')[1]}.npz"
+    trace.save(path)
+    return path, module

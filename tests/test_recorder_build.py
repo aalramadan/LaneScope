@@ -1,3 +1,8 @@
+import dataclasses
+import os
+import re
+import shutil
+
 import pytest
 
 from lanescope.cuda import toolchain
@@ -16,6 +21,141 @@ def test_recorder_library_and_patches_build_for_sm_89(tmp_path):
     assert result.library.stat().st_size > 0
     assert b"LaneScopeSharedAccess" in result.patches.read_bytes()
     assert result.sanitizer_library.name == "libsanitizer-public.so"
+
+
+@needs_tools
+def test_a_cached_build_serves_a_new_folder_without_a_compile(tmp_path, monkeypatch):
+    first = build.build_recorder(tmp_path / "first", "sm_89", TOOLS, cache=tmp_path / "cache")
+    monkeypatch.setattr(build, "_compile", lambda *args: pytest.fail("the build ran again"))
+    second = build.build_recorder(tmp_path / "second", "sm_89", TOOLS, cache=tmp_path / "cache")
+    assert second.library == tmp_path / "second" / build.LIBRARY_NAME
+    assert second.library.read_bytes() == first.library.read_bytes()
+    assert second.patches.read_bytes() == first.patches.read_bytes()
+
+
+@needs_tools
+def test_a_cache_that_cannot_take_the_build_leaves_the_build_to_the_folder(tmp_path):
+    blocked = tmp_path / "cache"
+    blocked.write_text("a file where the cache folder belongs")
+    result = build.build_recorder(tmp_path / "out", "sm_89", TOOLS, cache=blocked)
+    assert result.library.parent == tmp_path / "out"
+    assert result.library.stat().st_size > 0
+
+
+def stand_in_tools(folder):
+    """Return a toolchain of empty files, for builds whose compile a test replaces."""
+    compiler = folder / "g++"
+    compiler.write_text("one compiler")
+    folders = dict.fromkeys(("sanitizer_include", "sanitizer_lib", "cuda_include"), folder)
+    return dataclasses.replace(EMPTY, compiler=compiler, **folders)
+
+
+def stand_in_compile(text, fails_under=None):
+    """Return a compile that writes the library and the patches with the given text."""
+
+    def compile_files(out_dir, arch, number, tools):
+        if fails_under is not None and fails_under in out_dir.parents:
+            raise build.BuildError("g++ failed:\nNo space left on device")
+        library, patches = out_dir / build.LIBRARY_NAME, out_dir / f"patches-{arch}.cubin"
+        library.write_text(text)
+        patches.write_text(text)
+        return build.RecorderBuild(library, patches, tools.sanitizer_lib / build.SANITIZER_LIBRARY)
+
+    return compile_files
+
+
+def test_the_build_key_changes_with_the_architecture_and_the_tools(tmp_path):
+    tools = stand_in_tools(tmp_path)
+    key = build._build_key("sm_89", tools)
+    assert build._build_key("sm_89", tools) == key
+    assert build._build_key("sm_90", tools) != key
+    assert tools.compiler is not None
+    tools.compiler.write_text("another compiler")
+    assert build._build_key("sm_89", tools) != key
+
+
+def test_the_build_key_changes_with_every_source_and_local_include(tmp_path, monkeypatch):
+    seen, waiting = set(), ["recorder.cpp", "patches.cu"]
+    while waiting:
+        name = waiting.pop()
+        seen.add(name)
+        text = (build.RECORDER_DIR / name).read_text()
+        waiting += [found for found in re.findall(r'#include "([^"]+)"', text) if found not in seen]
+    assert seen <= set(build.SOURCES)
+    for name in build.SOURCES:
+        shutil.copy(build.RECORDER_DIR / name, tmp_path / name)
+    monkeypatch.setattr(build, "RECORDER_DIR", tmp_path)
+    tools = stand_in_tools(tmp_path)
+    key = build._build_key("sm_89", tools)
+    for name in build.SOURCES:
+        (tmp_path / name).write_text((tmp_path / name).read_text() + "\n")
+        assert build._build_key("sm_89", tools) != key
+        key = build._build_key("sm_89", tools)
+
+
+def test_a_cache_entry_that_another_recording_fills_first_serves_the_build(tmp_path, monkeypatch):
+    tools, cache = stand_in_tools(tmp_path), tmp_path / "cache"
+    entry = cache / "recorder" / build._build_key("sm_89", tools)
+    mine = stand_in_compile("mine")
+
+    def racing_compile(out_dir, arch, number, tools):
+        stand_in_compile("theirs")(entry.parent / "theirs", arch, number, tools)
+        (entry.parent / "theirs").rename(entry)
+        return mine(out_dir, arch, number, tools)
+
+    (entry.parent / "theirs").mkdir(parents=True)
+    monkeypatch.setattr(build, "_compile", racing_compile)
+    result = build.build_recorder(tmp_path / "out", "sm_89", tools, cache=cache)
+    assert result.library.read_text() == "theirs"
+    assert sorted(path.name for path in entry.iterdir()) == [
+        "liblanescope_recorder.so",
+        "patches-sm_89.cubin",
+    ]
+    assert [path.name for path in entry.parent.iterdir()] == [entry.name]
+
+
+def test_a_failed_compile_leaves_neither_an_entry_nor_its_staging_folder(tmp_path, monkeypatch):
+    tools, cache = stand_in_tools(tmp_path), tmp_path / "cache"
+    monkeypatch.setattr(build, "_compile", stand_in_compile("", fails_under=tmp_path))
+    with pytest.raises(build.BuildError, match="No space left"):
+        build.build_recorder(tmp_path / "out", "sm_89", tools, cache=cache)
+    assert list((cache / "recorder").iterdir()) == []
+
+
+def test_a_compile_that_fails_in_the_cache_falls_back_to_the_folder(tmp_path, monkeypatch):
+    tools, cache = stand_in_tools(tmp_path), tmp_path / "cache"
+    monkeypatch.setattr(build, "_compile", stand_in_compile("local", fails_under=cache))
+    result = build.build_recorder(tmp_path / "out", "sm_89", tools, cache=cache)
+    assert result.library == tmp_path / "out" / build.LIBRARY_NAME
+    assert result.library.read_text() == "local"
+    assert list((cache / "recorder").iterdir()) == []
+
+
+def test_a_cache_entry_with_an_empty_library_is_built_again(tmp_path, monkeypatch):
+    tools, cache = stand_in_tools(tmp_path), tmp_path / "cache"
+    entry = cache / "recorder" / build._build_key("sm_89", tools)
+    entry.mkdir(parents=True)
+    (entry / build.LIBRARY_NAME).write_text("")
+    monkeypatch.setattr(build, "_compile", stand_in_compile("fresh"))
+    result = build.build_recorder(tmp_path / "out", "sm_89", tools, cache=cache)
+    assert result.library.read_text() == "fresh"
+    assert result.patches.read_text() == "fresh"
+    assert (entry / build.LIBRARY_NAME).read_text() == "fresh"
+
+
+def test_a_build_from_the_cache_puts_a_new_file_in_place_of_the_library(tmp_path, monkeypatch):
+    tools, cache, out = stand_in_tools(tmp_path), tmp_path / "cache", tmp_path / "out"
+    monkeypatch.setattr(build, "_compile", stand_in_compile("library"))
+    first = build.build_recorder(out, "sm_89", tools, cache=cache)
+    with open(first.library) as mapped:
+        inode = os.fstat(mapped.fileno()).st_ino
+        second = build.build_recorder(out, "sm_89", tools, cache=cache)
+        assert second.library.stat().st_ino != inode
+        assert mapped.read() == "library"
+    assert sorted(path.name for path in out.iterdir()) == [
+        "liblanescope_recorder.so",
+        "patches-sm_89.cubin",
+    ]
 
 
 @pytest.mark.parametrize(("arch", "digits"), [("sm_89", "89"), ("sm_120", "120"), ("sm_90a", "90")])

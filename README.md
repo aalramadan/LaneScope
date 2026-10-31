@@ -120,7 +120,7 @@ The command runs the program under the recorder and prints the path of each trac
 | `--ctas FIRST:COUNT` | Records a range of thread blocks, by default 64 blocks from the first |
 | `--arch ARCH` | Sets the GPU architecture, such as `sm_89`, by default that of the local GPU |
 
-Recording slows the program down. On the RTX 4060, the kernels of `lanescope bench time` run 22 to 40 times slower under the recorder. On large programs, limit recording with `--kernel` and `--ctas`, then open the folder with `lanescope gui run1`.
+Recording slows the program down. On the RTX 4060, the kernels of `lanescope bench time` run 17 to 36 times slower under the recorder. With `--kernel`, the kernels of every CUDA module without the named kernel run at full speed, such as the PyTorch kernels around a Triton kernel. On large programs, limit recording with `--kernel` and `--ctas`, then open the folder with `lanescope gui run1`.
 
 ### Record a Triton Kernel
 

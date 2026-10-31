@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -117,6 +118,44 @@ def test_import_skips_launch_files_whose_name_holds_no_launch_number(tmp_path):
     assert [path.name for path in capture.import_recording(tmp_path)] == ["trace-0.npz"]
 
 
+def test_import_keeps_the_launch_order_of_many_launches(tmp_path):
+    lanes = [4 * lane for lane in range(WARP_SIZE)]
+    for index in range(12):
+        write_launch(tmp_path, index, [row(0x10 * (index + 1), lanes)] * (index + 1))
+    paths = capture.import_recording(tmp_path)
+    assert [path.name for path in paths] == [f"trace-{index}.npz" for index in range(12)]
+    for index, path in enumerate(paths):
+        trace = Trace.load(path)
+        assert len(trace) == index + 1
+        assert set(trace.pc.tolist()) == {0x10 * (index + 1)}
+
+
+def test_import_lists_only_the_kernels_that_ran_in_each_module(tmp_path, monkeypatch):
+    lanes = [4 * lane for lane in range(WARP_SIZE)]
+    for index, (module, kernel) in enumerate([(0, "a"), (0, "b"), (1, "c"), (0, "a")]):
+        write_launch(tmp_path, index, [row(0x10, lanes)], module=module, kernel=kernel)
+    for module in (0, 1):
+        (tmp_path / f"module-{module}.cubin").write_bytes(b"cubin")
+    listed = {}
+
+    def listing(disassemblers, cubin, kernels=()):
+        listed[cubin.name] = set(kernels)
+        line = '\t//## File "/src/k.cu", line 3\n        /*0010*/ LDS R0, [R1] ;\n'
+        return "".join(f".text.{name}:\n{line}" for name in kernels)
+
+    monkeypatch.setattr(capture.line_info, "module_listing", listing)
+    paths = capture.import_recording(tmp_path, [tmp_path / "nvdisasm"])
+    assert listed == {"module-0.cubin": {"a", "b"}, "module-1.cubin": {"c"}}
+    assert [Trace.load(path).metadata["lines"] for path in paths] == [{"0x10": 3}] * 4
+
+
+def test_import_takes_one_launch_at_a_time_when_records_fill_its_memory(tmp_path, monkeypatch):
+    paths = [write_launch(tmp_path, index, [row(0x10, [0] * WARP_SIZE)]) for index in range(4)]
+    assert capture._workers(paths) == min(capture.IMPORT_THREADS, os.cpu_count() or 1)
+    monkeypatch.setattr(capture, "IMPORT_BYTES", capture.RECORD_DTYPE.itemsize)
+    assert capture._workers(paths) == 1
+
+
 def test_record_replaces_the_files_of_an_earlier_recording(tmp_path):
     for index in (0, 5):
         write_launch(tmp_path, index, [row(0x10, [4 * lane for lane in range(WARP_SIZE)])])
@@ -232,6 +271,27 @@ def _has_gpu() -> bool:
 
 
 TOOLS = toolchain.find()
+needs_gpu = pytest.mark.skipif(
+    TOOLS.nvrtc is None or shutil.which("g++") is None or not _has_gpu(),
+    reason="NVRTC, g++, and a GPU are needed",
+)
+
+
+def record_script(tmp_path, text, **settings):
+    """Run a launch script under a new recorder and return its traces and their folder."""
+    driver = Driver()
+    arch = driver.arch()
+    driver.close()
+    build = build_recorder(tmp_path / "build", arch, TOOLS)
+    script = tmp_path / "launch.py"
+    script.write_text(text)
+    out_dir = tmp_path / "record"
+    settings.setdefault("ctas", (0, 1 << 30))
+    assert capture.record([sys.executable, str(script)], build, out_dir, **settings) == 0
+    paths = capture.import_recording(out_dir, TOOLS.disassemblers)
+    return [Trace.load(path) for path in paths], out_dir
+
+
 LDMATRIX_LAUNCH = r'''
 import ctypes
 import sys
@@ -261,20 +321,9 @@ driver.close()
 '''
 
 
-@pytest.mark.skipif(
-    TOOLS.nvrtc is None or shutil.which("g++") is None or not _has_gpu(),
-    reason="NVRTC, g++, and a GPU are needed",
-)
+@needs_gpu
 def test_recorder_records_the_row_address_of_each_lane_of_an_ldmatrix(tmp_path):
-    driver = Driver()
-    arch = driver.arch()
-    driver.close()
-    build = build_recorder(tmp_path / "build", arch, TOOLS)
-    script = tmp_path / "launch.py"
-    script.write_text(LDMATRIX_LAUNCH)
-    out_dir = tmp_path / "record"
-    assert capture.record([sys.executable, str(script)], build, out_dir, ctas=(0, 1 << 30)) == 0
-    trace = Trace.load(capture.import_recording(out_dir, TOOLS.disassemblers)[0])
+    (trace,), _ = record_script(tmp_path, LDMATRIX_LAUNCH)
     rows = [row for row in range(len(trace)) if trace.space[row] == Space.SHARED]
     assert len(rows) == 1
     assert int(trace.width[rows[0]]) == 16
@@ -306,18 +355,103 @@ for _ in range(2):
 '''
 
 
-@pytest.mark.skipif(
-    TOOLS.nvrtc is None or shutil.which("g++") is None or not _has_gpu(),
-    reason="NVRTC, g++, and a GPU are needed",
-)
+@needs_gpu
 def test_recorder_records_a_kernel_of_a_context_that_replaces_a_destroyed_one(tmp_path):
-    driver = Driver()
-    arch = driver.arch()
-    driver.close()
-    build = build_recorder(tmp_path / "build", arch, TOOLS)
-    script = tmp_path / "launch.py"
-    script.write_text(TWO_CONTEXTS_LAUNCH)
-    out_dir = tmp_path / "record"
-    assert capture.record([sys.executable, str(script)], build, out_dir, ctas=(0, 1 << 30)) == 0
-    traces = [Trace.load(path) for path in capture.import_recording(out_dir, TOOLS.disassemblers)]
+    traces, _ = record_script(tmp_path, TWO_CONTEXTS_LAUNCH)
     assert [len(trace) for trace in traces] == [1, 1]
+
+
+TWO_MODULES_LAUNCH = r'''
+import ctypes
+
+from lanescope.cuda import nvrtc
+from lanescope.cuda.driver import Driver
+from lanescope.cuda.toolchain import find
+
+driver = Driver()
+options = [f"--gpu-architecture={driver.arch()}"]
+for name in ("skipped_tile", "recorded_tile"):
+    source = f"""
+extern "C" __global__ void {name}(unsigned sink) {{
+    __shared__ unsigned tile[32];
+    if (tile[threadIdx.x] == sink) asm volatile("trap;");
+}}
+"""
+    program = nvrtc.compile_cuda(source, f"{name}.cu", options, find().nvrtc)
+    kernel = driver.function(driver.load(program.cubin), name)
+    driver.launch(kernel, (1, 1, 1), (32, 1, 1), [ctypes.c_uint32(0xFFFFFFFF)])
+driver.close()
+'''
+
+
+@needs_gpu
+def test_recorder_leaves_a_module_without_the_named_kernel_unpatched(tmp_path):
+    traces, out_dir = record_script(tmp_path, TWO_MODULES_LAUNCH, kernel="recorded")
+    assert [trace.metadata["kernel"] for trace in traces] == ["recorded_tile"]
+    module = json.loads((out_dir / "launch-0.json").read_text())["module"]
+    assert [path.name for path in out_dir.glob("module-*.cubin")] == [f"module-{module}.cubin"]
+
+
+ZERO_FILL_LAUNCH = r'''
+import ctypes
+
+from lanescope.cuda import nvrtc
+from lanescope.cuda.driver import Driver
+from lanescope.cuda.toolchain import find
+
+SOURCE = """
+extern "C" __global__ void copy_odd_lanes(const unsigned char* buffer) {
+    __shared__ __align__(128) unsigned char smem[512];
+    const unsigned address =
+        static_cast<unsigned>(__cvta_generic_to_shared(smem + 16 * threadIdx.x));
+    const unsigned zeros = (threadIdx.x + 1) & 1u;
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %2, 0;"
+                 " cp.async.cg.shared.global [%0], [%1], 16, p; }"
+                 :: "r"(address), "l"(buffer + 16 * threadIdx.x), "r"(zeros) : "memory");
+    asm volatile("cp.async.wait_all;" ::: "memory");
+}
+"""
+driver = Driver()
+options = [f"--gpu-architecture={driver.arch()}"]
+program = nvrtc.compile_cuda(SOURCE, "copy.cu", options, find().nvrtc)
+kernel = driver.function(driver.load(program.cubin), "copy_odd_lanes")
+buffer = driver.alloc(512)
+driver.launch(kernel, (1, 1, 1), (32, 1, 1), [ctypes.c_uint64(buffer)])
+driver.free(buffer)
+driver.close()
+'''
+
+
+@needs_gpu
+def test_recorder_records_the_shared_side_of_a_partly_zero_filling_copy_as_one_access(tmp_path):
+    (trace,), _ = record_script(tmp_path, ZERO_FILL_LAUNCH)
+    rows = sorted(zip(trace.space.tolist(), trace.mask.tolist(), strict=True))
+    assert rows == [(Space.SHARED, 0xFFFFFFFF), (Space.GLOBAL, 0xAAAAAAAA)]
+
+
+EIGHT_CTAS_LAUNCH = r'''
+import ctypes
+
+from lanescope.cuda import nvrtc
+from lanescope.cuda.driver import Driver
+from lanescope.cuda.toolchain import find
+
+SOURCE = """
+extern "C" __global__ void read_tile(unsigned sink) {
+    __shared__ unsigned tile[32];
+    if (tile[threadIdx.x] == sink) asm volatile("trap;");
+}
+"""
+driver = Driver()
+options = [f"--gpu-architecture={driver.arch()}"]
+program = nvrtc.compile_cuda(SOURCE, "read_tile.cu", options, find().nvrtc)
+kernel = driver.function(driver.load(program.cubin), "read_tile")
+driver.launch(kernel, (8, 1, 1), (32, 1, 1), [ctypes.c_uint32(0xFFFFFFFF)])
+driver.close()
+'''
+
+
+@needs_gpu
+def test_recorder_records_only_the_ctas_of_its_window(tmp_path):
+    (trace,), _ = record_script(tmp_path, EIGHT_CTAS_LAUNCH, ctas=(2, 3))
+    assert sorted(trace.cta.tolist()) == [2, 3, 4]

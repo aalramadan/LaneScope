@@ -8,7 +8,7 @@ import sys
 
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver, version_text
-from lanescope.cuda.toolchain import Toolchain, find
+from lanescope.cuda.toolchain import Toolchain, cache_folder, find
 from lanescope.fixes.layouts import Padding, XorSwizzle, apply, infer_buffer
 from lanescope.model.counters import count
 from lanescope.nsight import calibration, compare
@@ -150,7 +150,7 @@ def validate(
     driver.close()
     check_versions(tools, supported)
     out_dir.mkdir(parents=True, exist_ok=True)
-    build = build_recorder(out_dir / "build", arch, tools)
+    build = build_recorder(out_dir / "build", arch, tools, cache=cache_folder())
     cubin = out_dir / f"bench-{arch}.cubin"
     cubin.write_bytes(calibration.compile_kernels(arch, tools, out_dir / "bench.cu"))
     command = [sys.executable, "-m", "lanescope", "bench", "run", "--cubin", str(cubin)]
@@ -226,7 +226,7 @@ def validate_program(
     driver.close()
     check_versions(tools, supported)
     out_dir.mkdir(parents=True, exist_ok=True)
-    build = build_recorder(out_dir / "build", arch, tools)
+    build = build_recorder(out_dir / "build", arch, tools, cache=cache_folder())
     record_dir = out_dir / "record"
     if capture.record(command, build, record_dir, ctas=(0, 1 << 30), kernel=kernel) != 0:
         raise ValidationError(f"the recorded run failed. Its launch files are in {record_dir}.")

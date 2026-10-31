@@ -56,6 +56,30 @@ def test_save_and_load_keep_columns_and_metadata(tmp_path):
         assert loaded.access(row) == trace.access(row)
 
 
+def test_a_saved_trace_is_a_compressed_npz_of_its_columns(tmp_path):
+    trace = Trace.from_accesses([make_access(contiguous())], metadata={"kernel": "k"})
+    path = tmp_path / "trace"
+    trace.save(path)
+    with zipfile.ZipFile(path) as archive:
+        members = archive.infolist()
+    assert {member.compress_type for member in members} == {zipfile.ZIP_DEFLATED}
+    with np.load(path) as data:
+        assert sorted(data.files) == sorted(
+            ["metadata", "pc", "space", "kind", "width", "mask", "cta", "warp", "addr"]
+        )
+        assert np.array_equal(data["addr"], trace.addr)
+
+
+def test_a_saved_trace_holds_columns_beyond_the_size_limit_of_a_plain_zip(tmp_path, monkeypatch):
+    # A column above 2 GiB needs zip64. A lower limit lets a small trace cross it.
+    trace = Trace.from_accesses([make_access(contiguous(), pc=row) for row in range(16)])
+    monkeypatch.setattr(zipfile, "ZIP64_LIMIT", 1024)
+    trace.save(tmp_path / "trace.npz")
+    loaded = Trace.load(tmp_path / "trace.npz")
+    assert np.array_equal(loaded.addr, trace.addr)
+    assert np.array_equal(loaded.pc, trace.pc)
+
+
 def test_load_rejects_another_format_version(tmp_path):
     trace = Trace.from_accesses([make_access(contiguous())])
     path = tmp_path / "trace.npz"

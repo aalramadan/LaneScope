@@ -1,3 +1,4 @@
+#include "cubin.h"
 #include "record.h"
 
 #include <dlfcn.h>
@@ -142,12 +143,18 @@ public:
 
     void OnModuleLoaded(const Sanitizer_ResourceModuleData& data) {
         std::lock_guard<std::mutex> lock(mutex_);
+        const int index = next_module_++;
+        modules_[data.module] = index;
+        // Every patched instruction slows its kernel, even where nothing records, so a
+        // module without a kernel to record keeps its own code.
+        if (!settings_.kernel_filter.empty() &&
+            !lanescope::NamesFunction(data.pCubin, data.cubinSize, settings_.kernel_filter)) {
+            return;
+        }
         if (patched_contexts_.insert(data.context).second) {
             Check(sanitizerAddPatchesFromFile(settings_.patches.c_str(), data.context),
                   "loading the patches " + settings_.patches + " (build them for this GPU)");
         }
-        const int index = next_module_++;
-        modules_[data.module] = index;
         if (data.pCubin != nullptr && data.cubinSize > 0) {
             WriteFile(Path("module-" + std::to_string(index) + ".cubin"), data.pCubin, data.cubinSize);
         }
@@ -271,15 +278,17 @@ private:
         Buffer header{};
         Check(sanitizerMemcpyDeviceToHost(&header, launch.device_memory, sizeof(header), stream),
               "copying the buffer header back");
-        const u32 count = std::min(header.count, header.capacity);
-        std::vector<Record> records(count);
-        if (count > 0) {
-            Check(sanitizerMemcpyDeviceToHost(records.data(), launch.header->records,
-                                              count * sizeof(Record), stream),
-                  "copying the records back");
+        u32 count = std::min(header.count, header.capacity);
+        // The copy fills every record, so the host buffer starts uninitialized. A failed
+        // copy leaves stale bytes there, so the launch then keeps no records.
+        std::unique_ptr<Record[]> records(new Record[count]);
+        if (count > 0 && !Check(sanitizerMemcpyDeviceToHost(records.get(), launch.header->records,
+                                                             count * sizeof(Record), stream),
+                                "copying the records back")) {
+            count = 0;
         }
         const std::string stem = "launch-" + std::to_string(launch.index);
-        WriteFile(Path(stem + ".bin"), records.data(), records.size() * sizeof(Record));
+        WriteFile(Path(stem + ".bin"), records.get(), count * sizeof(Record));
         const std::string json =
             "{\"format\": " + std::to_string(kFormatVersion) +
             ", \"kernel\": " + JsonText(launch.kernel) +

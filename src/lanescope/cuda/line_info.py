@@ -1,8 +1,9 @@
 import collections
 import pathlib
 import re
+import struct
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 
 SECTION = re.compile(r"^\.text\.(?P<name>\S+):\s*$")
 LOCATION = re.compile(r'^\s*//## File "(?P<file>[^"]+)", line (?P<line>\d+)')
@@ -17,6 +18,12 @@ MAX_SOURCE_BYTES = 1 << 20
 # Line tables name any file the compiler read. Only absolute paths of source files
 # are read, so an import never copies another file of the machine into a trace.
 SOURCE_SUFFIXES = frozenset({".cu", ".cuh", ".h", ".hpp", ".cpp", ".cc", ".cxx", ".c"})
+# The parts of a 64-bit little-endian ELF file that name the functions of a cubin.
+ELF64_MAGIC = b"\x7fELF\x02"
+ELF_SECTION = struct.Struct("<IIQQQQIIQQ")
+ELF_SYMBOL = struct.Struct("<IBBHQQ")
+SYMBOL_TABLE = 2
+FUNCTION_SYMBOL = 2
 
 FunctionLines = dict[int, tuple[str, int]]
 
@@ -60,17 +67,54 @@ def opcodes(listing: str) -> dict[str, dict[int, str]]:
     return functions
 
 
-def module_listing(disassemblers: Sequence[pathlib.Path], cubin: pathlib.Path) -> str:
+def function_symbols(cubin: bytes) -> dict[str, int]:
+    """Return the symbol index of each function of an ELF cubin, by name.
+
+    A cubin that is no readable 64-bit ELF file gives no functions.
+    """
+    try:
+        (table_offset,) = struct.unpack_from("<Q", cubin, 0x28)
+        entry_size, count = struct.unpack_from("<HH", cubin, 0x3A)
+        if cubin[:5] != ELF64_MAGIC or entry_size != ELF_SECTION.size:
+            return {}
+        sections = [
+            ELF_SECTION.unpack_from(cubin, table_offset + index * entry_size)
+            for index in range(count)
+        ]
+        found = {}
+        for _, kind, _, _, offset, size, link, _, _, symbol_size in sections:
+            if kind != SYMBOL_TABLE or symbol_size != ELF_SYMBOL.size:
+                continue
+            names = sections[link][4]
+            for index in range(size // symbol_size):
+                name, info, *_ = ELF_SYMBOL.unpack_from(cubin, offset + index * symbol_size)
+                if info & 0xF == FUNCTION_SYMBOL:
+                    start = names + name
+                    found[cubin[start : cubin.index(b"\0", start)].decode()] = index
+        return found
+    except (struct.error, IndexError, ValueError, OverflowError):
+        return {}
+
+
+def module_listing(
+    disassemblers: Sequence[pathlib.Path], cubin: pathlib.Path, kernels: Collection[str] = ()
+) -> str:
     """Return the listing of a cubin, with line information, from the first nvdisasm that reads it.
 
-    A newer nvdisasm drops older GPUs, so the next copy gets its turn when one fails.
-    Raises ValueError when none reads the cubin.
+    With the names of kernels, the listing holds these kernels alone, and nvdisasm reads a
+    large module in a fraction of the time. A name that the cubin lacks brings back the
+    whole listing. A newer nvdisasm drops older GPUs, so the next copy gets its turn when
+    one fails. Raises ValueError when none reads the cubin.
     """
+    symbols = function_symbols(cubin.read_bytes()) if kernels else {}
+    only = []
+    if kernels and all(name in symbols for name in kernels):
+        only = ["--cuda-function-index", ",".join(str(symbols[name]) for name in sorted(kernels))]
     errors = []
     for nvdisasm in disassemblers:
         try:
             result = subprocess.run(
-                [str(nvdisasm), "--print-line-info-inline", "--print-code", str(cubin)],
+                [str(nvdisasm), "--print-line-info-inline", "--print-code", *only, str(cubin)],
                 capture_output=True,
                 text=True,
                 check=False,

@@ -15,6 +15,9 @@ WARP_SIZE = 32
 FORMAT_VERSION = 1
 WIDTHS = (1, 2, 4, 8, 16)
 ZIP_MAGIC = b"PK\x03\x04"
+# Level 3 of zlib writes a trace in about a third of the time of the default level 6,
+# for a file about a tenth larger.
+SAVE_LEVEL = 3
 # zipfile raises these for an unknown compression method, an encrypted member, and a
 # member header that claims a huge array. NumPy raises the tokenize and syntax errors
 # for an array header that no Python reader can parse, and an overflow for a shape
@@ -224,12 +227,12 @@ class Trace:
     def save(self, path: str | pathlib.Path) -> None:
         """Write the trace to an .npz file."""
         metadata = dict(self.metadata, format=FORMAT_VERSION)
-        with open(path, "wb") as handle:
-            np.savez_compressed(
-                handle,
-                metadata=np.array(json.dumps(metadata, sort_keys=True)),
-                **{name: getattr(self, name) for name in _COLUMN_DTYPES},
-            )
+        arrays = {"metadata": np.array(json.dumps(metadata, sort_keys=True))}
+        arrays |= {name: getattr(self, name) for name in _COLUMN_DTYPES}
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=SAVE_LEVEL) as archive:
+            for name, array in arrays.items():
+                with archive.open(f"{name}.npy", "w", force_zip64=True) as member:
+                    np.lib.format.write_array(member, array, allow_pickle=False)
 
     @classmethod
     def load(cls, path: str | pathlib.Path) -> "Trace":

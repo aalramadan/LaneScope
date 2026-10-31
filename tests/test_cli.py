@@ -231,7 +231,7 @@ def fake_recorder(monkeypatch, status, launches):
             (out_dir / f"launch-{launch}.json").write_text(json.dumps(info))
         return status
 
-    monkeypatch.setattr(cli_module, "build_recorder", lambda out, arch: None)
+    monkeypatch.setattr(cli_module, "build_recorder", lambda out, arch, cache: None)
     monkeypatch.setattr(capture, "record", run)
     tools = toolchain.Toolchain(*[None] * 9, disassemblers=())
     monkeypatch.setattr(cli_module, "find", lambda: tools)

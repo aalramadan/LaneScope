@@ -1,6 +1,6 @@
 # LaneScope
 
-[![Tests](https://github.com/aalramadan/lanescope/actions/workflows/tests.yml/badge.svg)](https://github.com/aalramadan/lanescope/actions/workflows/tests.yml)
+[![Tests](https://github.com/aalramadan/LaneScope/actions/workflows/tests.yml/badge.svg)](https://github.com/aalramadan/LaneScope/actions/workflows/tests.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![License MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Checked on an RTX 4060](https://img.shields.io/badge/checked%20on-RTX%204060-76b900)](#accuracy)
@@ -12,8 +12,8 @@ LaneScope is a profiler for shared-memory bank conflicts in CUDA kernels. It rec
 LaneScope requires Python 3.10 or later. The analysis tools and the GUI run without a GPU.
 
 ```bash
-git clone https://github.com/aalramadan/lanescope.git
-cd lanescope
+git clone https://github.com/aalramadan/LaneScope.git
+cd LaneScope
 python3 -m venv .venv && . .venv/bin/activate
 pip install .            # analysis, command line, and GUI
 pip install ".[gpu]"     # recording on an NVIDIA GPU
@@ -31,7 +31,7 @@ The command serves the GUI at http://localhost:8765 with four demo kernels. The 
 
 ![The swizzle control of LaneScope removing the bank conflicts of a matrix transpose and of a matrix multiply tile](docs/demo.gif)
 
-The same page runs in the browser at https://aalramadan.github.io/lanescope/ with no install. There, Pyodide, a build of Python for the browser, runs the analysis of the four demo kernels inside the page.
+The same page runs in the browser at https://aalramadan.github.io/LaneScope/ with no install. There, Pyodide, a build of Python for the browser, runs the analysis of the four demo kernels inside the page.
 
 ## Features
 

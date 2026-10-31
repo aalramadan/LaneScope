@@ -25,7 +25,7 @@ gpu = [
 mcp = ["mcp>=2.3"]
 
 [project.urls]
-Repository = "https://github.com/aalramadan/lanescope"
+Repository = "https://github.com/aalramadan/LaneScope"
 
 [project.scripts]
 lanescope = "lanescope.cli:main"

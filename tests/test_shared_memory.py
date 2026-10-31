@@ -442,3 +442,50 @@ def test_an_inactive_lane_never_sets_the_line_of_a_lane_that_fills_zeros():
     first = shared_memory.analyze(rows, 16, **copy, sources=sources)
     second = shared_memory.analyze(rows, 16, **copy, sources=alone)
     assert first == second
+
+
+def units_of(width, assignment):
+    """Return the addresses of 32 lanes from a mapping of lane to unit of the width."""
+    return [
+        None if assignment.get(lane) is None else width * assignment[lane] for lane in range(32)
+    ]
+
+
+def counts_on_the_rtx_4060(width, assignment):
+    result = shared_memory.analyze(units_of(width, assignment), width, arch="sm_89")
+    return result.wavefronts, result.ideal
+
+
+# Patterns below come from the measurements in tests/data/rtx4060_counts.json.
+def test_first_half_of_a_16_byte_load_merges_past_the_slots_while_lane_31_is_idle():
+    seed_3_random_36 = {0: 4, 1: 0, 2: 7, 4: 5, 8: 0, 9: 2, 10: 2, 13: 0, 15: 3}
+    seed_3_random_36 |= {16: 7, 17: 5, 19: 0, 21: 2, 22: 3, 23: 0, 25: 6, 26: 7, 28: 1, 30: 4}
+    assert counts_on_the_rtx_4060(16, seed_3_random_36) == (3, 3)
+
+
+@pytest.mark.parametrize(
+    ("first_half", "measured"),
+    [({7: 0, 15: 1}, (3, 1)), ({7: 0, 15: 0}, (2, 1)), ({0: 0, 2: 0, 8: 1, 10: 1}, (2, 1))],
+)
+def test_lane_31_splits_a_first_half_whose_lone_lanes_read_two_rows(first_half, measured):
+    assert counts_on_the_rtx_4060(16, first_half | {31: 2}) == measured
+
+
+@pytest.mark.parametrize(
+    ("second_half", "measured"),
+    [({16: 0, 17: 1, 20: 2, 22: 3, 24: 4}, (2, 1)), ({16: 0, 18: 1, 20: 2, 22: 3, 24: 4}, (1, 1))],
+)
+def test_second_half_of_a_16_byte_load_merges_only_under_one_pairing(second_half, measured):
+    assert counts_on_the_rtx_4060(16, second_half) == measured
+
+
+def test_8_byte_load_merges_the_warp_only_under_one_pairing():
+    seed_2_random_86 = {0: 3, 1: 3, 4: 1, 7: 1, 8: 1, 9: 3, 10: 1, 13: 0, 14: 1, 16: 0}
+    seed_2_random_86 |= {19: 2, 20: 0, 22: 2, 25: 3, 31: 0}
+    assert counts_on_the_rtx_4060(8, seed_2_random_86) == (2, 1)
+
+
+def test_ideal_counts_the_bytes_up_to_the_wavefronts_of_a_load_with_a_bank_conflict():
+    seed_5_random_36 = [2, 3, 2, 3, 9, 13, 9, 13, 10, 2, 10, 2, 13, 1, 13, 1]
+    seed_5_random_36 += [7, 13, 7, 13, 7, 8, 7, 8, 2, 4, 2, 4, 8, 3, 8, 3]
+    assert counts_on_the_rtx_4060(16, dict(enumerate(seed_5_random_36))) == (4, 4)

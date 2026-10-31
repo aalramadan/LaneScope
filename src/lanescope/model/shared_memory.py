@@ -20,8 +20,11 @@ _FOURS = tuple(tuple(range(start, start + 4)) for start in range(0, WARP_SIZE, 4
 _GROUPS = {1: (_ALL_LANES,), 2: (_ALL_LANES,), 4: (_ALL_LANES,), 8: _HALVES, 16: _QUARTERS}
 # The lanes inside which a load merges its groups into one.
 _MERGE_SPANS = {8: (_ALL_LANES,), 16: _HALVES}
-# The blocks of a merged span and the slots each block may take in its wavefront.
-_SLOT_LIMITS = {8: (_QUARTERS, 4), 16: (_FOURS, 2)}
+# The slots that a block of four lanes may take in a merged wavefront of a 16-byte load.
+_SLOT_LIMIT = 2
+# On the RTX 4060, an active lane 31 makes the first half-warp of a 16-byte load merge
+# only under strict pairing.
+_LAST_LANE = WARP_SIZE - 1
 # A 16-byte load whose active lanes read one address fits one wavefront for the
 # whole warp up to this many slots.
 _BROADCAST_SLOTS = 8
@@ -151,8 +154,9 @@ def _analyze(
             phases.append(_phase(addresses, lanes, width))
     active = sum(address is not None for address in addresses)
     # Nsight Compute counts the bytes of the active lanes, but never more
-    # wavefronts than the groups that the banks serve.
-    ideal = min(math.ceil(active * width / WAVEFRONT_BYTES), len(phases))
+    # wavefronts than the access takes.
+    wavefronts = sum(phase.wavefronts for phase in phases)
+    ideal = min(math.ceil(active * width / WAVEFRONT_BYTES), wavefronts)
     return SharedAccess(width, active, paired, ideal, tuple(phases))
 
 
@@ -318,21 +322,66 @@ def _merge(
     active = {address for address in addresses if address is not None}
     if width == 16 and len(active) == 1 and _slots(addresses, _ALL_LANES) <= _BROADCAST_SLOTS:
         return (_ALL_LANES,), True
-    spans = [span for span in _MERGE_SPANS[width] if _active(addresses, span)]
-    blocks, limit = _SLOT_LIMITS[width]
     groups: list[tuple[int, ...]] = []
     paired = False
-    for span in spans:
-        # A half-warp whose partner half is idle may use the slots of both.
-        alone = width == 16 and len(spans) == 1
-        if _fits(addresses, span, width) and (
-            alone or all(_slots(addresses, block) <= limit for block in blocks if block[0] in span)
-        ):
+    for span in _MERGE_SPANS[width]:
+        if not _active(addresses, span):
+            continue
+        if _fits(addresses, span, width) and _span_merges(addresses, width, span):
             groups.append(span)
             paired = True
         else:
             groups.extend(group for group in _GROUPS[width] if group[0] in span)
     return tuple(groups), paired
+
+
+def _span_merges(addresses: tuple[int | None, ...], width: int, span: tuple[int, ...]) -> bool:
+    # The first half-warp of a 16-byte load merges freely while lane 31 is idle. The second
+    # half-warp, and the whole warp of an 8-byte load, merge under one pairing of all lanes.
+    if width == 16 and span == _HALVES[0]:
+        if addresses[_LAST_LANE] is None:
+            return True
+        blocks = [block for block in _FOURS if block[0] in span]
+        return all(_slots(addresses, block) <= _SLOT_LIMIT for block in blocks) and _strict(
+            addresses, blocks
+        )
+    return any(_agree(addresses, span, distance) for distance in _PAIR_DISTANCES)
+
+
+def _agree(addresses: tuple[int | None, ...], lanes: tuple[int, ...], distance: int) -> bool:
+    # An idle lane agrees with any partner.
+    return all(
+        addresses[lane] is None
+        or addresses[lane ^ distance] is None
+        or addresses[lane] == addresses[lane ^ distance]
+        for lane in lanes
+    )
+
+
+def _strict(addresses: tuple[int | None, ...], blocks: list[tuple[int, ...]]) -> bool:
+    # Each block pairs all its active lanes but one at most, and the lanes left over in the
+    # half-warp read one address.
+    left: list[int | None] = []
+    for block in blocks:
+        rest = _left_over(addresses, block)
+        if len(rest) > 1:
+            return False
+        left += rest
+    return len(set(left)) <= 1
+
+
+def _left_over(addresses: tuple[int | None, ...], block: tuple[int, ...]) -> list[int | None]:
+    # The pairing that covers more lanes of the block leaves the fewest lanes over.
+    found = []
+    for distance in _PAIR_DISTANCES:
+        found.append(
+            [
+                addresses[lane]
+                for lane in block
+                if addresses[lane] is not None and addresses[lane ^ distance] != addresses[lane]
+            ]
+        )
+    return min(found, key=len)
 
 
 def _merge_full_warp(

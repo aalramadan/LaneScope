@@ -156,8 +156,8 @@ LaneScope computes its counts from the recorded addresses with a model of the ha
 | 57 calibration launches of loads and stores | 114 of 114 |
 | 62 calibration launches of `ldmatrix` and `cp.async` | 180 of 180 |
 | 27 calibration launches of atomic operations | 54 of 54 |
-| 300 random loads and stores, kept out of the fit | 592 of 600 |
-| 300 random `ldmatrix` and `cp.async` patterns, kept out of the fit | 864 of 864 |
+| 300 random loads and stores, kept out of the fit | 600 of 600 |
+| 300 random `ldmatrix` and `cp.async` patterns, kept out of the fit | 868 of 868 |
 | 300 random atomic operations, kept out of the fit | 600 of 600 |
 | Transposes and matrix multiplies | 288 of 288 |
 | Padded and swizzled kernels, predicted from the plain ones | 6 of 6 |
@@ -169,16 +169,16 @@ The second command checks any program in the same way. On the programs of `examp
 | PyTorch matrix multiply | 76 of 76 |
 | PyTorch softmax | 136 of 136 |
 | PyTorch layer normalization | 32 of 32 |
-| PyTorch convolution, through cuDNN | 312 of 324 |
+| PyTorch convolution, through cuDNN | 311 of 324 |
 | Triton matrix multiply kernel, with 32 and with 64 columns per step | 304 of 304 |
 | Triton softmax | 338 of 338 |
 | Triton attention | 830 of 830 |
 
-The test suite checks the model against every pattern measured on that GPU, 1,655 loads and stores in `tests/data/rtx4060_counts.json` and 2,549 `ldmatrix`, `cp.async`, and atomic patterns in `tests/data/rtx4060_instruction_counts.json`. The same comparison runs on any supported GPU.
+The test suite checks the model against every pattern measured on that GPU, 2,835 loads and stores in `tests/data/rtx4060_counts.json` and 3,149 `ldmatrix`, `cp.async`, and atomic patterns in `tests/data/rtx4060_instruction_counts.json`. The same comparison runs on any supported GPU.
 
 ```bash
 lanescope get-ncu                                      # installs Nsight Compute for the local driver
-lanescope validate --out check --random 300 --seed 5
+lanescope validate --out check --random 300 --seed 6
 lanescope validate --out triton-check --kernel matmul_kernel -- python examples/triton_matmul.py
 ```
 
@@ -233,8 +233,8 @@ The model counts one 4-byte word per bank per cycle in shared memory and aligned
 
 - LaneScope models loads, stores, 32-bit atomic operations, `ldmatrix`, and `cp.async`. On shared memory, a 64-bit atomic operation compiles to a loop of compare-and-swap that LaneScope does not model.
 - The rules are calibrated on one GPU, the RTX 4060. LaneScope counts `stmatrix` with the rule of `ldmatrix`. That rule is not yet tested on sm_90 or newer, the only GPUs that run `stmatrix`.
-- Nineteen of the 1,655 measured loads and stores differ from Nsight Compute. All nineteen are 8-byte or 16-byte shared loads, 17 of them with inactive lanes.
-- On the cuDNN convolution of PyTorch, 12 of 324 counts lie up to 0.5% above those of Nsight Compute. All twelve belong to four of its ten `cp.async` instructions, whose counts in Nsight Compute vary from run to run.
+- Five of the 2,835 measured loads and stores differ from Nsight Compute. All five are 16-byte shared loads with lane 31 active and idle lanes in the first half-warp.
+- On the cuDNN convolution of PyTorch, 13 of 324 counts lie up to 0.5% above those of Nsight Compute. All thirteen belong to four of its ten `cp.async` instructions, whose counts in Nsight Compute vary from run to run.
 
 ## Troubleshooting
 

@@ -7,32 +7,19 @@ from lanescope.model import global_memory, shared_memory
 from lanescope.nsight import calibration
 
 # Achieved and ideal counts that Nsight Compute 2026.3.1 measured on an RTX 4060
-# Laptop GPU (sm_89): the calibration cases, five runs of 300 random lane
-# patterns, and patterns aimed at the rules that merge the groups of wide loads.
+# Laptop GPU (sm_89): the calibration cases, six runs of 300 random lane
+# patterns, patterns aimed at the rules that merge the groups of wide loads, and
+# probes of 8-byte and 16-byte loads with idle lanes, repeated rows, and bank conflicts.
 MEASURED = json.loads((pathlib.Path(__file__).parent / "data" / "rtx4060_counts.json").read_text())
 
-# Wide shared loads whose counts the model does not yet reproduce. All have inactive lanes,
-# except two full-warp loads of seed 5 that differ in their ideal alone.
+# 16-byte shared loads whose counts the model does not yet reproduce. Each has lane 31
+# active and idle lanes in its first half-warp.
 KNOWN_MISSES = {
-    "random-seed-1/random-22-shared-load-16",
-    "random-seed-1/random-89-shared-load-16",
     "random-seed-1/random-105-shared-load-16",
-    "random-seed-1/random-248-shared-load-16",
-    "random-seed-1/random-273-shared-load-8",
-    "random-seed-2/random-48-shared-load-16",
-    "random-seed-2/random-86-shared-load-8",
-    "random-seed-3/random-32-shared-load-16",
-    "random-seed-3/random-36-shared-load-16",
-    "random-seed-3/random-202-shared-load-16",
-    "random-seed-3/random-271-shared-load-16",
-    "random-seed-4/random-47-shared-load-16",
-    "random-seed-5/random-16-shared-load-8",
-    "random-seed-5/random-17-shared-load-16",
-    "random-seed-5/random-36-shared-load-16",
-    "random-seed-5/random-166-shared-load-16",
-    "random-seed-5/random-173-shared-load-16",
-    "random-seed-5/random-233-shared-load-16",
-    "random-seed-5/random-274-shared-load-16",
+    "probe-confirm/hunt-lane-31-d3-singles-with-d8-partners",
+    "probe-confirm/hunt-lane-31-wide-31-5-second-half-clean-first",
+    "probe-confirm/hunt-lane-31-seed1-105-first-half-with-31",
+    "probe-confirm/random-2-with-31-63",
 }
 
 
@@ -54,7 +41,7 @@ def model_counts(space: str, kind: str, width: int, units: list[int | None]) -> 
 
 
 def test_measured_random_patterns_come_from_the_calibration_run():
-    for seed in (1, 2, 3, 4, 5):
+    for seed in (1, 2, 3, 4, 5, 6):
         measured = [case for case in MEASURED["cases"] if case[0] == f"random-seed-{seed}"]
         generated = calibration.random_cases(len(measured), seed)
         assert len(measured) == 300
@@ -75,7 +62,7 @@ def test_model_matches_nsight_compute_on_an_rtx_4060(space, kind, width, units, 
 
 
 # Nsight Compute 2026.3.1 counts of ldmatrix, cp.async, and atomics on the same GPU: the
-# calibration cases, the random patterns of seeds 3 to 5, the random atomics of seed 5, the
+# calibration cases, the random patterns of seeds 3 to 6, the random atomics of seeds 5 and 6, the
 # random patterns of an earlier probe, 16-byte copies that write two distinct rows, a probe of
 # 16-byte copies with chosen rows, global addresses, and active lanes, a probe of copies whose
 # lanes fill zeros with replays of the copies of a cuDNN convolution, a probe of shared and
@@ -116,7 +103,7 @@ def test_measurements_cover_every_ldmatrix_cp_async_and_atomic_case():
 
 
 def test_measured_random_ldmatrix_and_cp_async_patterns_come_from_the_calibration_run():
-    for seed in (3, 4, 5):
+    for seed in (3, 4, 5, 6):
         measured = [case for case in INSTRUCTIONS["cases"] if case[0] == f"random-seed-{seed}"]
         generated = calibration.random_instruction_cases(len(measured), seed)
         assert len(measured) == 300
@@ -125,11 +112,13 @@ def test_measured_random_ldmatrix_and_cp_async_patterns_come_from_the_calibratio
 
 
 def test_measured_random_atomic_patterns_come_from_the_calibration_run():
-    measured = [case for case in INSTRUCTIONS["cases"] if case[0] == "random-atomics-seed-5"]
-    generated = calibration.random_atomic_cases(len(measured), 5)
-    assert len(measured) == 300
-    for (_, name, _, width, offsets, *_), case in zip(measured, generated, strict=True):
-        assert (name, width, offsets) == (case.name, case.width, list(case.addresses()))
+    for seed in (5, 6):
+        group = f"random-atomics-seed-{seed}"
+        measured = [case for case in INSTRUCTIONS["cases"] if case[0] == group]
+        generated = calibration.random_atomic_cases(len(measured), seed)
+        assert len(measured) == 300
+        for (_, name, _, width, offsets, *_), case in zip(measured, generated, strict=True):
+            assert (name, width, offsets) == (case.name, case.width, list(case.addresses()))
 
 
 @pytest.mark.parametrize(

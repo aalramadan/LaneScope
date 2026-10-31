@@ -52,7 +52,7 @@ class Phase:
     lanes: tuple[int, ...]
     bank_words: tuple[tuple[int, ...], ...]
 
-    @property
+    @functools.cached_property
     def wavefronts(self) -> int:
         """Return the most words that one bank serves in this phase."""
         return max(len(words) for words in self.bank_words)
@@ -74,7 +74,7 @@ class SharedAccess:
     ideal: int
     phases: tuple[Phase, ...]
 
-    @property
+    @functools.cached_property
     def wavefronts(self) -> int:
         """Return the wavefronts of all phases."""
         return sum(phase.wavefronts for phase in self.phases)

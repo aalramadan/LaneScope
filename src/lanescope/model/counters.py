@@ -8,6 +8,8 @@ from lanescope.trace import Kind, Space, Trace
 
 InstructionKey = tuple[int, int, int, int]
 _ZERO_LANE = np.iinfo(np.uint64).max
+# An odd 64-bit constant of the hash of FNV-1a, which spreads the bits of each column.
+_HASH_MULTIPLIER = np.uint64(0x100000001B3)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -105,9 +107,25 @@ def row_keys(trace: Trace) -> np.ndarray:
 
 def distinct_rows(trace: Trace) -> tuple[np.ndarray, np.ndarray]:
     """Return the first row of each distinct row key in trace order and how many rows share it."""
-    _, first, repeats = np.unique(row_keys(trace), axis=0, return_index=True, return_counts=True)
+    keys = row_keys(trace)
+    # Sorting one hash per row is far faster than sorting whole rows. Comparing every row
+    # with the first row of its hash keeps the result exact.
+    _, first, inverse, repeats = np.unique(
+        _row_hashes(keys), return_index=True, return_inverse=True, return_counts=True
+    )
+    if not np.array_equal(keys, keys[first[inverse]]):
+        _, first, repeats = np.unique(keys, axis=0, return_index=True, return_counts=True)
     order = np.argsort(first)
     return first[order], repeats[order]
+
+
+def _row_hashes(keys: np.ndarray) -> np.ndarray:
+    # Unsigned integers wrap, which makes this a hash modulo 2**64.
+    hashes = np.zeros(len(keys), dtype=np.uint64)
+    for column in keys.T:
+        hashes = (hashes ^ column) * _HASH_MULTIPLIER
+        hashes ^= hashes >> np.uint64(29)
+    return hashes
 
 
 def measure(trace: Trace, row: int) -> tuple[int, int, int, int]:

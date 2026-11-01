@@ -1,17 +1,19 @@
+import ctypes
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 
 import numpy as np
 import pytest
 
-from lanescope.cuda import toolchain
+from lanescope.cuda import nvrtc, toolchain
 from lanescope.cuda.driver import Driver, DriverError
 from lanescope.model import counters
 from lanescope.recorder import capture
-from lanescope.recorder.build import RecorderBuild, build_recorder
+from lanescope.recorder.build import RECORDER_DIR, RecorderBuild, build_recorder
 from lanescope.trace import WARP_SIZE, Kind, Space, Trace
 
 BASE_PC = 0x7F00_0000_1000
@@ -455,3 +457,100 @@ driver.close()
 def test_recorder_records_only_the_ctas_of_its_window(tmp_path):
     (trace,), _ = record_script(tmp_path, EIGHT_CTAS_LAUNCH, ctas=(2, 3))
     assert sorted(trace.cta.tolist()) == [2, 3, 4]
+
+
+DIVERGED_LOADS_LAUNCH = r'''
+import ctypes
+
+from lanescope.cuda import nvrtc
+from lanescope.cuda.driver import Driver
+from lanescope.cuda.toolchain import find
+
+SOURCE = """
+// A call keeps the two sides of the branch apart, where the compiler would otherwise
+// predicate the two loads.
+__device__ __noinline__ unsigned load_shared(unsigned address) {
+    unsigned value;
+    asm volatile("ld.volatile.shared.u32 %0, [%1];" : "=r"(value) : "r"(address));
+    return value;
+}
+
+extern "C" __global__ void diverged_loads(unsigned* out) {
+    __shared__ unsigned tile[96];
+    const unsigned lane = threadIdx.x % 32;
+    const unsigned base = static_cast<unsigned>(__cvta_generic_to_shared(tile));
+    const unsigned odd = base + 4 * lane;
+    const unsigned even = base + 128 + 4 * (lane / 2);
+    unsigned sum = 0;
+    #pragma unroll 1
+    for (unsigned round = 0; round < 8; ++round) {
+        unsigned value;
+        asm volatile("{ .reg .pred p; setp.ne.u32 p, %3, 0; @p ld.volatile.shared.u32 %0, [%1];"
+                     " @!p ld.volatile.shared.u32 %0, [%2]; }"
+                     : "=r"(value) : "r"(odd), "r"(even), "r"((lane ^ round) & 1u));
+        sum += value;
+        if ((lane ^ round) & 1u) {
+            value = load_shared(odd);
+        } else {
+            asm volatile("ld.volatile.shared.u32 %0, [%1];" : "=r"(value) : "r"(even));
+        }
+        sum += value;
+    }
+    out[threadIdx.x] = sum;
+}
+"""
+driver = Driver()
+options = [f"--gpu-architecture={driver.arch()}"]
+program = nvrtc.compile_cuda(SOURCE, "diverged.cu", options, find().nvrtc)
+kernel = driver.function(driver.load(program.cubin), "diverged_loads")
+out = driver.alloc(4 * 128)
+driver.launch(kernel, (1, 1, 1), (128, 1, 1), [ctypes.c_uint64(out)])
+driver.free(out)
+driver.close()
+'''
+
+
+@needs_gpu
+def test_recorder_keeps_the_lanes_of_two_diverged_loads_in_records_of_their_own(tmp_path):
+    (trace,), _ = record_script(tmp_path, DIVERGED_LOADS_LAUNCH)
+    loads = trace.mask[trace.space == Space.SHARED].tolist()
+    # Four warps run two pairs of loads in eight rounds, each load on half of the lanes.
+    assert len(loads) == 4 * 8 * 4
+    assert set(loads) == {0x55555555, 0xAAAAAAAA}
+
+
+SPLIT_SOURCE = """
+#include "patches.cu"
+
+extern "C" __global__ void two_pcs(void* buffer) {
+    const unsigned lane = threadIdx.x % 32;
+    LaneScopeSharedAccess(buffer, 0x1000 + 0x10 * (lane & 1),
+                          reinterpret_cast<void*>(4ull * lane), 4, 0x1, nullptr);
+}
+"""
+
+
+@needs_gpu
+def test_patches_split_the_lanes_of_one_call_by_pc():
+    assert TOOLS.nvrtc is not None
+    driver = Driver()
+    try:
+        options = [f"--gpu-architecture={driver.arch()}", f"--include-path={RECORDER_DIR}"]
+        program = nvrtc.compile_cuda(SPLIT_SOURCE, "two_pcs.cu", options, TOOLS.nvrtc)
+        assert program.cubin is not None
+        kernel = driver.function(driver.load(program.cubin), "two_pcs")
+        size = 32 + 4 * capture.RECORD_DTYPE.itemsize
+        buffer = driver.alloc(size)
+        # count, dropped, capacity, first CTA, CTA count, reserved, then the records.
+        driver.upload(buffer, struct.pack("<6IQ", 0, 0, 4, 0, 1, 0, buffer + 32))
+        driver.launch(kernel, (1, 1, 1), (32, 1, 1), [ctypes.c_uint64(buffer)])
+        data = driver.download(buffer, size)
+        driver.free(buffer)
+    finally:
+        driver.close()
+    (count,) = struct.unpack_from("<I", data)
+    records = np.frombuffer(data[32:], dtype=capture.RECORD_DTYPE)[:count]
+    assert sorted(zip(records["pc"].tolist(), records["mask"].tolist(), strict=True)) == [
+        (0x1000, 0x55555555),
+        (0x1010, 0xAAAAAAAA),
+    ]

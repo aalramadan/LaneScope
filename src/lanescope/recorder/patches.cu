@@ -54,7 +54,13 @@ __device__ __forceinline__ PatchResult record(void* userdata, u64 pc, u64 addres
 template <int Site>
 __device__ __noinline__ PatchResult store(Buffer* buffer, u32 cta, u64 pc, u64 address, u32 width,
                                           u8 space, u8 kind) {
+#if __CUDA_ARCH__ >= 700
+    // Lanes of two instructions that meet in this store split by PC, so a record never holds
+    // the lanes of another instruction.
+    const u32 mask = __match_any_sync(__activemask(), pc);
+#else
     const u32 mask = __activemask();
+#endif
     const u32 thread = linear_thread();
     const u32 lane = thread % kWarpSize;
     const u32 leader = __ffs(mask) - 1;

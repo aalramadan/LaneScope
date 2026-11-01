@@ -1,5 +1,10 @@
 import asyncio
 import json
+import os
+import pathlib
+import subprocess
+import sys
+import threading
 
 import pytest
 
@@ -12,6 +17,7 @@ try:
 except ImportError:  # The MCP SDK is an optional dependency.
     Client = TextContent = None
 
+SOURCE = pathlib.Path(__file__).parent.parent / "src"
 pytestmark = pytest.mark.skipif(mcp_server.MCPServer is None, reason="the MCP SDK is needed")
 
 
@@ -107,3 +113,46 @@ def test_server_reports_the_version_of_lanescope():
 
     info = asyncio.run(run())
     assert info is not None and info.version == lanescope.__version__
+
+
+def test_lanescope_mcp_serves_the_tools_over_standard_input_and_output():
+    client = {"name": "test", "version": "1"}
+    hello = {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": client}
+    messages = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": hello},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    ]
+    process = subprocess.Popen(
+        [sys.executable, "-m", "lanescope", "mcp"],
+        env=dict(os.environ, PYTHONPATH=str(SOURCE)),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdin is not None and process.stdout is not None
+    # The server drops the requests still open when its input ends, so the input stays open
+    # until the last reply arrives.
+    watchdog = threading.Timer(120, process.kill)
+    watchdog.start()
+    replies = {}
+    try:
+        for message in messages:
+            process.stdin.write(json.dumps(message) + "\n")
+        process.stdin.flush()
+        while 2 not in replies and (line := process.stdout.readline()):
+            reply = json.loads(line)
+            replies[reply["id"]] = reply["result"]
+    finally:
+        process.stdin.close()
+        process.wait()
+        watchdog.cancel()
+    assert process.returncode == 0
+    assert replies[1]["serverInfo"]["name"] == "lanescope"
+    assert sorted(tool["name"] for tool in replies[2]["tools"]) == [
+        "explain",
+        "lanes",
+        "suggest",
+        "whatif",
+    ]

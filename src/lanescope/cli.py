@@ -6,7 +6,7 @@ import sys
 import tempfile
 from collections.abc import Sequence
 
-from lanescope import analysis, demos, html_report, mcp_server, text_view
+from lanescope import analysis, demos, html_report, text_view
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver, DriverError, version_text
 from lanescope.cuda.nvrtc import CompileError
@@ -452,6 +452,10 @@ def _get_ncu(args: argparse.Namespace) -> int:
 
 
 def _mcp(args: argparse.Namespace) -> int:
+    # Only this command needs the MCP SDK, whose import takes about 0.4 s, and the import
+    # therefore waits until the command runs.
+    from lanescope import mcp_server
+
     mcp_server.serve()
     return 0
 

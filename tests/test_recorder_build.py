@@ -5,7 +5,7 @@ import shutil
 
 import pytest
 
-from lanescope.cuda import toolchain
+from lanescope.cuda import nvrtc, toolchain
 from lanescope.recorder import build
 
 TOOLS = toolchain.find()
@@ -21,6 +21,21 @@ def test_recorder_library_and_patches_build_for_sm_89(tmp_path):
     assert result.library.stat().st_size > 0
     assert b"LaneScopeSharedAccess" in result.patches.read_bytes()
     assert result.sanitizer_library.name == "libsanitizer-public.so"
+
+
+@needs_tools
+@pytest.mark.parametrize(("digits", "splits"), [("61", False), ("89", True)])
+def test_the_patches_split_records_by_pc_from_sm_70_on(digits, splits):
+    assert TOOLS.nvrtc is not None
+    options = [
+        f"--gpu-architecture=compute_{digits}",
+        "--relocatable-device-code=true",
+        f"--include-path={build.RECORDER_DIR}",
+        "-std=c++17",
+    ]
+    source = (build.RECORDER_DIR / "patches.cu").read_text()
+    program = nvrtc.compile_cuda(source, "patches.cu", options, TOOLS.nvrtc)
+    assert (b"match.any.sync.b64" in program.ptx) == splits
 
 
 @needs_tools

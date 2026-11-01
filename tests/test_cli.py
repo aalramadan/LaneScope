@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 import lanescope.cli as cli_module
-from lanescope import demos
+from lanescope import demos, mcp_server
 from lanescope.cli import main
 from lanescope.cuda import toolchain
 from lanescope.gui import server as gui
@@ -486,3 +486,26 @@ def test_bench_time_rejects_a_matmul_size_that_is_not_a_multiple_of_64(tmp_path,
 def test_bench_time_rejects_a_matrix_size_that_is_not_a_multiple_of_32(tmp_path, capsys):
     assert main(["bench", "time", "--cubin", str(tmp_path / "bench.cubin"), "--size", "100"]) == 2
     assert "multiple of 32" in capsys.readouterr().err
+
+
+def test_mcp_serves_the_tools_of_the_mcp_server(monkeypatch):
+    served = []
+    monkeypatch.setattr(mcp_server, "serve", lambda: served.append(True))
+    assert main(["mcp"]) == 0
+    assert served == [True]
+
+
+def test_mcp_names_the_package_extra_that_brings_the_sdk(monkeypatch, capsys):
+    monkeypatch.setattr(mcp_server, "MCPServer", None)
+    assert main(["mcp"]) == 2
+    assert "pip install 'lanescope[mcp]'" in capsys.readouterr().err
+
+
+def test_the_command_line_starts_without_the_mcp_sdk():
+    modules = "{'mcp', 'lanescope.mcp_server'}"
+    code = f"import sys, lanescope.cli; print(sorted({modules} & set(sys.modules)))"
+    environment = dict(os.environ, PYTHONPATH=str(SOURCE))
+    result = subprocess.run(
+        [sys.executable, "-c", code], env=environment, capture_output=True, text=True, check=True
+    )
+    assert result.stdout.strip() == "[]"

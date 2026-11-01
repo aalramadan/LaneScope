@@ -1,5 +1,5 @@
 include LICENSE requirements.txt
 recursive-include docs *.gif
 recursive-include examples *.py
-recursive-include scripts *.sh
+recursive-include scripts *.sh *.py
 recursive-include tests *.py *.mjs *.json

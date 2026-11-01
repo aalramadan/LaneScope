@@ -251,3 +251,10 @@ def test_scripts_with_a_shebang_are_executable():
         with open(path) as script:
             if script.readline().startswith("#!"):
                 assert os.access(path, os.X_OK), f"{name} is not executable"
+
+
+def test_the_source_archive_takes_every_kind_of_script():
+    with open(os.path.join(SCRIPTS, os.pardir, "MANIFEST.in")) as manifest:
+        line = next(text for text in manifest if text.startswith("recursive-include scripts "))
+    suffixes = {os.path.splitext(name)[1] for name in os.listdir(SCRIPTS) if "." in name}
+    assert suffixes <= {pattern.lstrip("*") for pattern in line.split()[2:]}

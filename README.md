@@ -96,6 +96,8 @@ tile[r][c ^ (r & 0x1f)]   // CuTe: Swizzle<5, 0, 5>
 
 ### ⏺️ Record Your Own Program
 
+Recording runs your program under LaneScope and saves the memory address of every thread at each memory access. The GUI and the other commands read these traces.
+
 ```bash
 lanescope record --out run1 -- ./my_app --size 4096
 lanescope record --out triton --kernel matmul_kernel -- python examples/triton_matmul.py

@@ -38,6 +38,63 @@ lanescope gui run1                            # explore the recording
 lanescope suggest run1/trace-0.npz            # rank the fixes in the terminal
 ```
 
+## Usage
+
+### Find the Conflicts
+
+`lanescope explain` lists the memory instructions of a trace, worst first.
+
+```console
+$ lanescope demo --out transpose.npz
+$ lanescope explain transpose.npz
+kernel transpose (synthetic), 512 warp-level accesses
+
+pc       line  space  kind  width  requests  unit        achieved  ideal excessive
+0x0120     10  shared load      4       128  wavefronts      4096    128      3968
+0x00a0      5  global load      4       128  sectors          512    512         0
+0x00b0      5  shared store     4       128  wavefronts       128    128         0
+0x0130     10  global store     4       128  sectors          512    512         0
+```
+
+The shared load at line 10 takes 4,096 wavefronts, 32 times its ideal of 128.
+
+### Fix Them
+
+`lanescope suggest` ranks the layouts of each buffer by the conflicts each layout removes.
+
+```console
+$ lanescope suggest transpose.npz
+buffer 0x0+4096
+XOR swizzle Swizzle<5,2,5> on byte offsets: excessive wavefronts 3968 -> 0, 0 extra bytes
+pad each 128-byte row by 4 bytes: excessive wavefronts 3968 -> 0, 128 extra bytes
+...
+```
+
+For a `float tile[32][32]`, the top-ranked swizzle changes one index.
+
+```cpp
+tile[r][c ^ (r & 0x1f)]   // CuTe: Swizzle<5, 0, 5>
+```
+
+### Record Your Own Program
+
+```bash
+lanescope record --out run1 -- ./my_app --size 4096
+lanescope record --out triton --kernel matmul_kernel -- python examples/triton_matmul.py
+lanescope gui run1
+```
+
+`--kernel` records only the kernels whose names contain the given text. `--ctas` records a range of thread blocks. Compile with `-lineinfo` to see source lines.
+
+### Use with Coding Agents
+
+```bash
+pip install ".[mcp]"
+lanescope mcp
+```
+
+An MCP client adds the server with the command `lanescope` and the argument `mcp`.
+
 ## Commands
 
 | Command | Description |
@@ -51,6 +108,19 @@ lanescope suggest run1/trace-0.npz            # rank the fixes in the terminal
 | `mcp` | Serves the analyses to coding agents |
 
 Run `lanescope <command> --help` for the options of each command.
+
+## Accuracy
+
+On an RTX 4060 Laptop GPU, the counts of LaneScope match those of Nsight Compute in all 2,710 cases of its bench and in 2,027 of the 2,040 cases of the PyTorch and Triton examples. `lanescope validate` runs the same comparison on any GPU or program.
+
+```bash
+lanescope get-ncu                 # installs Nsight Compute for the local driver
+lanescope validate --out check
+```
+
+## Performance
+
+On the RTX 4060, the swizzle that LaneScope ranks first makes the transpose of its bench 1.13 to 1.19 times faster and its matrix multiply 1.72 to 1.77 times faster. `lanescope bench build` and `lanescope bench time` repeat these timings.
 
 ## Requirements
 

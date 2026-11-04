@@ -7,7 +7,7 @@ name = "lanescope"
 version = "1.0.0"
 description = "Lane-level explanations of the shared and global memory counters of CUDA kernels"
 readme = "README.md"
-license = "MIT"
+license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 authors = [{ name = "Ali Al-Ramadan" }]
 requires-python = ">=3.10"

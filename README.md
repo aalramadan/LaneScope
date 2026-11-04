@@ -6,7 +6,7 @@
 
 [![Tests](https://github.com/aalramadan/LaneScope/actions/workflows/tests.yml/badge.svg)](https://github.com/aalramadan/LaneScope/actions/workflows/tests.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
-[![License MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License GPL v3](https://img.shields.io/badge/license-GPL%20v3-blue)](LICENSE)
 [![Live demo](https://img.shields.io/badge/demo-live-orange)](https://aalramadan.github.io/LaneScope/)
 
 ![The swizzle control of LaneScope removing the bank conflicts of a matrix transpose and of a matrix multiply tile](docs/demo.gif)
@@ -173,4 +173,4 @@ The swizzle notation follows CuTe from NVIDIA CUTLASS. The rules for H100 and ne
 
 ## 📄 License
 
-LaneScope is released under the MIT License. See [LICENSE](LICENSE).
+LaneScope is released under the GNU General Public License v3.0 or later. See [LICENSE](LICENSE).

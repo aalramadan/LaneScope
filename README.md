@@ -1,26 +1,40 @@
+<div align="center">
+
 # LaneScope
+
+**Find and fix shared-memory bank conflicts in CUDA kernels.**
 
 [![Tests](https://github.com/aalramadan/LaneScope/actions/workflows/tests.yml/badge.svg)](https://github.com/aalramadan/LaneScope/actions/workflows/tests.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![License MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-
-Find and fix shared-memory bank conflicts in CUDA kernels.
+[![Live demo](https://img.shields.io/badge/demo-live-orange)](https://aalramadan.github.io/LaneScope/)
 
 ![The swizzle control of LaneScope removing the bank conflicts of a matrix transpose and of a matrix multiply tile](docs/demo.gif)
 
-LaneScope records the memory accesses of a running CUDA program, shows which threads collide in shared memory, and ranks the padding or swizzle that removes each conflict. The demo also runs in the browser at https://aalramadan.github.io/LaneScope/ with no install.
+</div>
 
-## Highlights
+LaneScope records the memory accesses of a running CUDA program, shows which threads collide in shared memory, and ranks the padding or swizzle that removes each conflict.
+
+## 🌐 Live Demo
+
+Try LaneScope in your browser, with no install.
+
+### 👉 [aalramadan.github.io/LaneScope](https://aalramadan.github.io/LaneScope/)
+
+> [!NOTE]
+> The page runs the analysis of four demo kernels inside the browser. Recording your own program needs the local install below.
+
+## ✨ Highlights
 
 | Feature | Description |
 |---|---|
-| Thread view | Every shared and global memory access, thread by thread, beside its source line |
-| Hardware counts | The wavefronts and sectors that Nsight Compute reports |
-| Fix search | Paddings and swizzles ranked by the conflicts each removes, written as code |
-| No rebuild | Any CUDA program, including the Triton kernels that PyTorch compiles |
-| Three interfaces | A browser GUI, a command line, and an MCP server for coding agents |
+| 🔬 Thread view | Every shared and global memory access, thread by thread, beside its source line |
+| 📊 Hardware counts | The wavefronts and sectors that Nsight Compute reports |
+| 🛠️ Fix search | Paddings and swizzles ranked by the conflicts each removes, written as code |
+| 🔌 No rebuild | Any CUDA program, including the Triton kernels that PyTorch compiles |
+| 🖥️ Three interfaces | A browser GUI, a command line, and an MCP server for coding agents |
 
-## Installation
+## 📦 Installation
 
 ```bash
 git clone https://github.com/aalramadan/LaneScope.git
@@ -29,7 +43,10 @@ pip install .            # analysis, command line, and GUI
 pip install ".[gpu]"     # recording on an NVIDIA GPU
 ```
 
-## Quick Start
+> [!TIP]
+> The analysis and the GUI run without a GPU. Only recording needs an NVIDIA GPU and `g++`.
+
+## 🚀 Quick Start
 
 ```bash
 lanescope gui --demo                          # the GUI with four demo kernels
@@ -38,9 +55,9 @@ lanescope gui run1                            # explore the recording
 lanescope suggest run1/trace-0.npz            # rank the fixes in the terminal
 ```
 
-## Usage
+## 📖 Usage
 
-### Find the Conflicts
+### 🔍 Find the Conflicts
 
 `lanescope explain` lists the memory instructions of a trace, worst first.
 
@@ -56,9 +73,10 @@ pc       line  space  kind  width  requests  unit        achieved  ideal excessi
 0x0130     10  global store     4       128  sectors          512    512         0
 ```
 
-The shared load at line 10 takes 4,096 wavefronts, 32 times its ideal of 128.
+> [!IMPORTANT]
+> The shared load at line 10 takes 4,096 wavefronts, 32 times its ideal of 128.
 
-### Fix Them
+### 🛠️ Fix Them
 
 `lanescope suggest` ranks the layouts of each buffer by the conflicts each layout removes.
 
@@ -76,7 +94,7 @@ For a `float tile[32][32]`, the top-ranked swizzle changes one index.
 tile[r][c ^ (r & 0x1f)]   // CuTe: Swizzle<5, 0, 5>
 ```
 
-### Record Your Own Program
+### ⏺️ Record Your Own Program
 
 ```bash
 lanescope record --out run1 -- ./my_app --size 4096
@@ -84,9 +102,10 @@ lanescope record --out triton --kernel matmul_kernel -- python examples/triton_m
 lanescope gui run1
 ```
 
-`--kernel` records only the kernels whose names contain the given text. `--ctas` records a range of thread blocks. Compile with `-lineinfo` to see source lines.
+> [!TIP]
+> `--kernel` records only the kernels whose names contain the given text. `--ctas` records a range of thread blocks. Compile with `-lineinfo` to see source lines.
 
-### Use with Coding Agents
+### 🤖 Use with Coding Agents
 
 ```bash
 pip install ".[mcp]"
@@ -95,7 +114,7 @@ lanescope mcp
 
 An MCP client adds the server with the command `lanescope` and the argument `mcp`.
 
-## Commands
+## 🧰 Commands
 
 | Command | Description |
 |---|---|
@@ -109,26 +128,26 @@ An MCP client adds the server with the command `lanescope` and the argument `mcp
 
 Run `lanescope <command> --help` for the options of each command.
 
-## Accuracy
+## 🎯 Accuracy
 
-On an RTX 4060 Laptop GPU, the counts of LaneScope match those of Nsight Compute in all 2,710 cases of its bench and in 2,027 of the 2,040 cases of the PyTorch and Triton examples. `lanescope validate` runs the same comparison on any GPU or program.
+On an RTX 4060 Laptop GPU, the counts of LaneScope match those of Nsight Compute in **all 2,710 cases** of its bench and in **2,027 of the 2,040 cases** of the PyTorch and Triton examples. `lanescope validate` runs the same comparison on any GPU or program.
 
 ```bash
 lanescope get-ncu                 # installs Nsight Compute for the local driver
 lanescope validate --out check
 ```
 
-## Performance
+## ⚡ Performance
 
-On the RTX 4060, the swizzle that LaneScope ranks first makes the transpose of its bench 1.13 to 1.19 times faster and its matrix multiply 1.72 to 1.77 times faster. `lanescope bench build` and `lanescope bench time` repeat these timings.
+On the RTX 4060, the swizzle that LaneScope ranks first makes the transpose of its bench **1.13 to 1.19 times faster** and its matrix multiply **1.72 to 1.77 times faster**. `lanescope bench build` and `lanescope bench time` repeat these timings.
 
-## Requirements
+## 📋 Requirements
 
 - Linux or WSL2 with Python 3.10 or later
 - For recording, `g++` and an NVIDIA GPU with a driver for CUDA 12.4 or later
 - Validated on an RTX 4060 Laptop GPU
 
-## How It Works
+## ⚙️ How It Works
 
 | Step | Module | Description |
 |---|---|---|
@@ -138,7 +157,7 @@ On the RTX 4060, the swizzle that LaneScope ranks first makes the transpose of i
 | 4 | `gui/`, `cli.py`, `mcp_server.py` | Show the results |
 | 5 | `nsight/` | Checks the counts against Nsight Compute |
 
-## Development
+## 🧑‍💻 Development
 
 ```bash
 pip install -e ".[gpu,mcp]" pytest ruff pyright playwright
@@ -146,10 +165,10 @@ python -m playwright install chromium-headless-shell
 pytest
 ```
 
-## Acknowledgments
+## 🙏 Acknowledgments
 
 The swizzle notation follows CuTe from NVIDIA CUTLASS. The rules for H100 and newer GPUs come from the NVIDIA developer forum.
 
-## License
+## 📄 License
 
 LaneScope is released under the MIT License. See [LICENSE](LICENSE).

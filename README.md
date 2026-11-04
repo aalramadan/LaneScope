@@ -29,10 +29,10 @@ Try LaneScope in your browser, with no install.
 | Feature | Description |
 |---|---|
 | 🔬 Thread view | Every shared and global memory access, thread by thread, beside its source line |
-| 📊 Hardware counts | The wavefronts and sectors that Nsight Compute reports |
+| 📊 Nsight-matching counts | The wavefronts and sectors that Nsight Compute reports, computed from the recorded addresses |
 | 🛠️ Fix search | Paddings and swizzles ranked by the conflicts each removes, written as code |
 | 🔌 No rebuild | Any CUDA program, including the Triton kernels that PyTorch compiles |
-| 🖥️ Three interfaces | A browser GUI, a command line, and an MCP server for coding agents |
+| 🖥️ Three interfaces | A browser GUI, a command line, and a Model Context Protocol (MCP) server for coding agents |
 
 ## 📦 Installation
 
@@ -44,12 +44,12 @@ pip install ".[gpu]"     # recording on an NVIDIA GPU
 ```
 
 > [!TIP]
-> The analysis and the GUI run without a GPU. Only recording needs an NVIDIA GPU and `g++`.
+> The analysis and the GUI run without a GPU. Only recording needs an NVIDIA GPU and `g++`. The `gpu` extra brings the CUDA tools that recording uses, with no CUDA Toolkit to install.
 
 ## 🚀 Quick Start
 
 ```bash
-lanescope gui --demo                          # the GUI with four demo kernels
+lanescope gui --demo                          # opens http://localhost:8765 with four demo kernels
 lanescope record --out run1 -- ./my_app       # record a CUDA program
 lanescope gui run1                            # explore the recording
 lanescope suggest run1/trace-0.npz            # rank the fixes in the terminal
@@ -59,7 +59,7 @@ lanescope suggest run1/trace-0.npz            # rank the fixes in the terminal
 
 ### 🔍 Find the Conflicts
 
-`lanescope explain` lists the memory instructions of a trace, worst first.
+`lanescope explain` lists the memory instructions of a trace, worst first. It counts shared-memory wavefronts, the passes that the access of a warp takes, and global-memory sectors, the 32-byte blocks that it moves.
 
 ```console
 $ lanescope demo --out transpose.npz
@@ -74,7 +74,7 @@ pc       line  space  kind  width  requests  unit        achieved  ideal excessi
 ```
 
 > [!IMPORTANT]
-> The shared load at line 10 takes 4,096 wavefronts, 32 times its ideal of 128.
+> The shared load at line 10 has a 32-way bank conflict. It takes 4,096 wavefronts, 32 times its ideal of 128.
 
 ### 🛠️ Fix Them
 
@@ -88,7 +88,7 @@ pad each 128-byte row by 4 bytes: excessive wavefronts 3968 -> 0, 128 extra byte
 ...
 ```
 
-For a `float tile[32][32]`, the top-ranked swizzle changes one index.
+For a `float tile[32][32]`, the top-ranked swizzle changes one index. On float indices in place of byte offsets, `Swizzle<5,2,5>` becomes the CuTe `Swizzle<5, 0, 5>`.
 
 ```cpp
 tile[r][c ^ (r & 0x1f)]   // CuTe: Swizzle<5, 0, 5>
@@ -105,7 +105,7 @@ lanescope gui run1
 ```
 
 > [!TIP]
-> `--kernel` records only the kernels whose names contain the given text. `--ctas` records a range of thread blocks. Compile with `-lineinfo` to see source lines.
+> `--kernel` records only the kernels whose names contain the given text. `--ctas` records a range of thread blocks. Compiling with `-lineinfo` adds source lines and is optional.
 
 ### 🤖 Use with Coding Agents
 
@@ -126,13 +126,16 @@ An MCP client adds the server with the command `lanescope` and the argument `mcp
 | `lanes` | Shows where each thread of a warp lands |
 | `suggest` | Ranks the paddings and swizzles of each buffer |
 | `validate` | Compares the counts with Nsight Compute |
+| `get-ncu` | Installs Nsight Compute for the local driver |
+| `demo` | Writes the trace of a demo kernel |
+| `bench` | Runs the built-in test kernels and their timings |
 | `mcp` | Serves the analyses to coding agents |
 
 Run `lanescope <command> --help` for the options of each command.
 
 ## 🎯 Accuracy
 
-On an RTX 4060 Laptop GPU, the counts of LaneScope match those of Nsight Compute in **all 2,710 cases** of its bench and in **2,027 of the 2,040 cases** of the PyTorch and Triton examples. `lanescope validate` runs the same comparison on any GPU or program.
+On an RTX 4060 Laptop GPU, the counts of LaneScope match those of Nsight Compute in **all 2,710 counts** of its built-in test kernels and in **2,027 of the 2,040 counts** of the PyTorch and Triton examples. `lanescope validate` runs the same comparison on any GPU or program.
 
 ```bash
 lanescope get-ncu                 # installs Nsight Compute for the local driver
@@ -141,13 +144,13 @@ lanescope validate --out check
 
 ## ⚡ Performance
 
-On the RTX 4060, the swizzle that LaneScope ranks first makes the transpose of its bench **1.13 to 1.19 times faster** and its matrix multiply **1.72 to 1.77 times faster**. `lanescope bench build` and `lanescope bench time` repeat these timings.
+On the RTX 4060, the swizzle that LaneScope ranks first makes its built-in transpose **1.13 to 1.19 times faster** than the plain layout and its matrix multiply **1.72 to 1.77 times faster**. `lanescope bench build` and `lanescope bench time` repeat these timings.
 
 ## 📋 Requirements
 
 - Linux or WSL2 with Python 3.10 or later
 - For recording, `g++` and an NVIDIA GPU with a driver for CUDA 12.4 or later
-- Validated on an RTX 4060 Laptop GPU
+- Counts validated on an RTX 4060 Laptop GPU. `lanescope validate` checks them on any other GPU.
 
 ## ⚙️ How It Works
 

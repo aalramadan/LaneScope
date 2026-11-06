@@ -21,8 +21,18 @@ Try LaneScope in your browser, with no install.
 
 ### 👉 [aalramadan.github.io/LaneScope](https://aalramadan.github.io/LaneScope/)
 
+The demo opens the recordings below.
+
+| Example | What it shows |
+|---|---|
+| Transpose | A shared tile read down its columns, a 32-way bank conflict that padding or a swizzle removes |
+| Row sums | Threads that each read one 256-byte row of a shared tile, a conflict of the same kind |
+| Column sums | Threads that each read one column of a column-major matrix in global memory, one sector per thread |
+| Matmul tile | A tile copied with `cp.async` and read with `ldmatrix`, which needs the swizzle of CuTe |
+| llama.cpp indexer | The conflicts LaneScope found in llama.cpp, before and after the fix of [pull request #31803](https://github.com/ggml-org/llama.cpp/pull/31803) ([details](examples/llama.cpp)) |
+
 > [!NOTE]
-> The page runs the analysis of four demo kernels and of a recording of llama.cpp, before and after its fix, inside the browser. Recording your own program needs the local install below.
+> The page runs the whole analysis inside your browser. Recording your own program needs the local install below.
 
 ## ✨ Highlights
 
@@ -34,8 +44,6 @@ Try LaneScope in your browser, with no install.
 | 🔌 No rebuild | Any CUDA program, including the Triton kernels that PyTorch compiles |
 | 🖥️ Three interfaces | A browser GUI, a command line, and a Model Context Protocol (MCP) server for coding agents |
 | 🎮 Tested GPUs | Counts checked against Nsight Compute on an RTX 4060 and an RTX 5070 Laptop GPU |
-| 🦙 Real-world fix | A conflict found in llama.cpp, with an approved upstream fix that makes the kernel up to 6.9% faster, in [examples/llama.cpp](examples/llama.cpp) |
-
 ## 📦 Installation
 
 ```bash

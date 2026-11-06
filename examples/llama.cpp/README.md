@@ -1,12 +1,19 @@
 # Example: the lightning indexer of llama.cpp
 
-LaneScope found two bank conflicts in `lightning_indexer_kernel_mma`, the CUDA kernel of llama.cpp that scores the keys for the attention of DeepSeek V3.2. A small fix in [`lightning-indexer.patch`](lightning-indexer.patch) removes every conflict of the kernel and makes it **4.6% to 6.9% faster** on an RTX 5070 Laptop GPU. The patch applies to llama.cpp at commit `4b77dee`.
+LaneScope found two bank conflicts in `lightning_indexer_kernel_mma`, the CUDA kernel of llama.cpp that scores the keys for the attention of DeepSeek V3.2. A small fix in [`lightning-indexer.patch`](lightning-indexer.patch) removes every conflict of the kernel and makes it **4.6% to 6.9% faster** on an RTX 5070 Laptop GPU.
+
+The [live demo](https://aalramadan.github.io/LaneScope/) opens the recordings of the kernel before and after the fix.
+
+Every result below comes from llama.cpp at commit `4b77dee0524c64b8471869232e2958bd9589607d` of 2026-11-05, built with CUDA 13.5 and timed on an RTX 5070 Laptop GPU with the driver for CUDA 13.5.
 
 ## 🔍 Record the Kernel
 
-Build llama.cpp with line information, then record one test case of the indexer:
+The commands below check out that commit, build llama.cpp with line information, and record one test case of the indexer.
 
 ```bash
+git clone https://github.com/ggml-org/llama.cpp
+cd llama.cpp
+git checkout 4b77dee0524c64b8471869232e2958bd9589607d
 cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_FLAGS=-lineinfo
 cmake --build build -j 8 --target test-backend-ops
 lanescope record --out indexer --kernel lightning_indexer_kernel_mma -- \
@@ -30,6 +37,16 @@ pc       line  space  kind  width  requests  unit        achieved  ideal excessi
 
 1. Each row of `qk_chunk` grows by 8 floats, through `K_VECS_PADDED = K_VECS_PER_BLOCK + 8`. The four rows of a half-warp then start 8 banks apart.
 2. The four halves go to shared memory in one 8-byte store through `ggml_cuda_memcpy_1<8>`, as the key tile of the same kernel already does.
+
+The commands below apply the fix in the same checkout, then test and time the kernel.
+
+```bash
+git apply path/to/LaneScope/examples/llama.cpp/lightning-indexer.patch
+cmake --build build -j 8 --target test-backend-ops
+build/bin/test-backend-ops -o LIGHTNING_INDEXER -b CUDA0
+build/bin/test-backend-ops perf -o LIGHTNING_INDEXER -b CUDA0 \
+    -p 'nh=64,kv=(4096|65536),nb=(512|2048),ns=1,nm=1,type_K=(f16|q8_0)$'
+```
 
 After the fix, `lanescope explain` lists no instruction above its ideal. All 192 `LIGHTNING_INDEXER` tests of `test-backend-ops` pass.
 

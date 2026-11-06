@@ -22,7 +22,7 @@ Try LaneScope in your browser, with no install.
 ### 👉 [aalramadan.github.io/LaneScope](https://aalramadan.github.io/LaneScope/)
 
 > [!NOTE]
-> The page runs the analysis of four demo kernels inside the browser. Recording your own program needs the local install below.
+> The page runs the analysis of four demo kernels and of a recording of llama.cpp, before and after its fix, inside the browser. Recording your own program needs the local install below.
 
 ## ✨ Highlights
 
@@ -52,7 +52,7 @@ pip install ".[gpu-cuda13]"  # recording with the CUDA 13 tools, as on RTX 50 GP
 ## 🚀 Quick Start
 
 ```bash
-lanescope gui --demo                          # opens http://localhost:8765 with four demo kernels
+lanescope gui --demo                          # opens http://localhost:8765 with the demo kernels
 lanescope record --out run1 -- ./my_app       # record a CUDA program
 lanescope gui run1                            # explore the recording
 lanescope suggest run1/trace-0.npz            # rank the fixes in the terminal

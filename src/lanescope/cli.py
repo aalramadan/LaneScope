@@ -217,7 +217,9 @@ def _parser() -> argparse.ArgumentParser:
         help="another host name that the page may use, such as a machine name",
     )
     window.add_argument("--open", action="store_true", help="open the page in the browser")
-    window.add_argument("--demo", action="store_true", help="add the traces of four demo kernels")
+    window.add_argument(
+        "--demo", action="store_true", help="add four demo kernels and two recordings of llama.cpp"
+    )
     window.set_defaults(run=_gui)
     return parser
 
@@ -466,7 +468,7 @@ def _gui(args: argparse.Namespace) -> int:
         if args.demo:
             demo = pathlib.Path(folder) / "demo"
             demo.mkdir()
-            for name, trace in demos.demo_traces().items():
+            for name, trace in demos.gallery_traces().items():
                 trace.save(demo / name)
             paths.append(demo)
         server.serve(

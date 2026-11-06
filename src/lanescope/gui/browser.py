@@ -11,7 +11,7 @@ class BrowserApi:
     def __init__(self, folder: str) -> None:
         root = pathlib.Path(folder)
         root.mkdir(parents=True, exist_ok=True)
-        for name, trace in demos.demo_traces().items():
+        for name, trace in demos.gallery_traces().items():
             trace.save(root / name)
         self.library = Library([root])
 

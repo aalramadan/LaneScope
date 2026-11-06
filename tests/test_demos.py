@@ -86,3 +86,35 @@ def test_matmul_tile_maps_the_copy_and_the_ldmatrix_to_their_source_lines():
     copy, read = (trace.source_line(pc) for pc in (demos.PC_COPY_TILE, demos.PC_READ_TILE))
     assert copy is not None and copy[1].startswith("cp_async_16(&tile")
     assert read is not None and read[1].startswith("ldmatrix_x4(fragment[k]")
+
+
+def test_the_llama_cpp_recordings_show_the_conflicts_that_the_fix_removes():
+    traces = demos.recorded_traces()
+    before = analysis.overview(traces["5_llama_cpp_indexer.npz"])["totals"]["wavefronts"]
+    after = analysis.overview(traces["6_llama_cpp_indexer_fixed.npz"])["totals"]["wavefronts"]
+    assert (before["achieved"], before["ideal"], before["excessive"]) == (2584, 1848, 736)
+    assert (after["achieved"], after["ideal"], after["excessive"]) == (1752, 1752, 0)
+
+
+def test_the_llama_cpp_recordings_name_the_kernel_and_the_file_of_llama_cpp():
+    for trace in demos.recorded_traces().values():
+        assert (
+            trace.metadata["kernel"]
+            == "lightning_indexer_kernel_mma<4, 32, 128, 64, GGML_TYPE_F16>"
+        )
+        assert trace.metadata["source_file"] == "ggml/src/ggml-cuda/lightning-indexer.cu"
+        assert trace.metadata["arch"] == "sm_120"
+
+
+def test_the_qk_chunk_store_of_the_llama_cpp_recording_takes_four_times_its_ideal():
+    trace = demos.recorded_traces()["5_llama_cpp_indexer.npz"]
+    stores = [
+        counter
+        for counter in count(trace)
+        if counter.space == Space.SHARED and trace.source_line(counter.pc)[0] == 147
+    ]
+    assert stores and all(counter.achieved == 4 * counter.ideal for counter in stores)
+
+
+def test_the_gallery_lists_the_demo_traces_before_the_recordings():
+    assert list(demos.gallery_traces()) == [*demos.demo_traces(), *demos.RECORDINGS]

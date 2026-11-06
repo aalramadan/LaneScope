@@ -18,11 +18,18 @@ def ask(api, method, path, payload):
     return json.loads(api.request(method, path, json.dumps(payload)))
 
 
-def test_browser_api_lists_the_four_demo_traces(api):
+def test_browser_api_lists_the_demo_traces_and_the_llama_cpp_recordings(api):
     answer = ask(api, "GET", "/api/traces", {})
     assert answer["status"] == 200
     names = [trace["name"] for trace in answer["data"]["traces"]]
-    assert names == ["1_transpose.npz", "2_row_sums.npz", "3_column_sums.npz", "4_matmul_tile.npz"]
+    assert names == [
+        "1_transpose.npz",
+        "2_row_sums.npz",
+        "3_column_sums.npz",
+        "4_matmul_tile.npz",
+        "5_llama_cpp_indexer.npz",
+        "6_llama_cpp_indexer_fixed.npz",
+    ]
 
 
 def test_browser_api_answers_the_overview_and_the_whatif_of_a_trace(api):

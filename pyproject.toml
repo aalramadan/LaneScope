@@ -43,6 +43,7 @@ lanescope = "lanescope.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
+"lanescope" = ["recordings/*.npz", "recordings/LICENSE-llama.cpp"]
 "lanescope.recorder" = ["*.h", "*.cu", "*.cpp"]
 "lanescope.gui" = ["*.html", "*.js", "*.css", "*.svg"]
 

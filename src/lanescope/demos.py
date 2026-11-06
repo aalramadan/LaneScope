@@ -1,3 +1,4 @@
+import importlib.resources
 from collections.abc import Callable
 
 from lanescope.trace import WARP_SIZE, Access, Kind, Space, Trace
@@ -312,6 +313,30 @@ def demo_traces() -> dict[str, Trace]:
         "3_column_sums.npz": column_sums_trace(),
         "4_matmul_tile.npz": matmul_tile_trace(),
     }
+
+
+# Two CTAs of the lightning indexer of llama.cpp at commit
+# 4b77dee0524c64b8471869232e2958bd9589607d, recorded on an RTX 5070 before and after the fix
+# of examples/llama.cpp.
+RECORDINGS = {
+    "5_llama_cpp_indexer.npz": "llama_cpp_indexer.npz",
+    "6_llama_cpp_indexer_fixed.npz": "llama_cpp_indexer_fixed.npz",
+}
+
+
+def recorded_traces() -> dict[str, Trace]:
+    """Return the shipped recordings of real kernels, by the file name each takes."""
+    folder = importlib.resources.files("lanescope") / "recordings"
+    traces = {}
+    for name, packaged in RECORDINGS.items():
+        with importlib.resources.as_file(folder / packaged) as path:
+            traces[name] = Trace.load(path)
+    return traces
+
+
+def gallery_traces() -> dict[str, Trace]:
+    """Return the demo traces and the shipped recordings that the demo of the GUI shows."""
+    return demo_traces() | recorded_traces()
 
 
 def _with_source(

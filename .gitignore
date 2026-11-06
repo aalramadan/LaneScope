@@ -8,6 +8,7 @@ dist/
 .ruff_cache/
 node_modules/
 *.npz
+!src/lanescope/recordings/*.npz
 *.cubin
 *.ncu-rep
 *.ncu-repz

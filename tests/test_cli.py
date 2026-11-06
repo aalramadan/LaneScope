@@ -334,7 +334,7 @@ def test_suggest_with_limit_zero_lists_no_change_without_a_false_note(trace_path
     assert "no padding or swizzle" not in capsys.readouterr().out
 
 
-def test_gui_demo_serves_the_four_demo_traces(monkeypatch):
+def test_gui_demo_serves_the_demo_traces_and_the_llama_cpp_recordings(monkeypatch):
     served = {}
 
     def fake_serve(paths, host, port, allowed_hosts, open_browser):
@@ -348,6 +348,8 @@ def test_gui_demo_serves_the_four_demo_traces(monkeypatch):
         "2_row_sums.npz",
         "3_column_sums.npz",
         "4_matmul_tile.npz",
+        "5_llama_cpp_indexer.npz",
+        "6_llama_cpp_indexer_fixed.npz",
     ]
     assert served["address"] == ("0.0.0.0", gui.DEFAULT_PORT, ["box"], False)
 
@@ -397,6 +399,8 @@ def test_gui_demo_stopped_by_a_signal_removes_its_demo_folder(stop):
                 "2_row_sums.npz",
                 "3_column_sums.npz",
                 "4_matmul_tile.npz",
+                "5_llama_cpp_indexer.npz",
+                "6_llama_cpp_indexer_fixed.npz",
             ]
             process.send_signal(stop)
             assert process.wait(timeout=10) == 0

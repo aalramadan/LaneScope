@@ -33,6 +33,7 @@ Try LaneScope in your browser, with no install.
 | 🛠️ Fix search | Paddings and swizzles ranked by the conflicts each removes, written as code |
 | 🔌 No rebuild | Any CUDA program, including the Triton kernels that PyTorch compiles |
 | 🖥️ Three interfaces | A browser GUI, a command line, and a Model Context Protocol (MCP) server for coding agents |
+| 🎮 Tested GPUs | Counts checked against Nsight Compute on an RTX 4060 and an RTX 5070 Laptop GPU |
 
 ## 📦 Installation
 

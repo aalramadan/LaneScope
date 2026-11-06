@@ -83,6 +83,8 @@ def find(environ: Mapping[str, str] | None = None) -> Toolchain:
     compiler = _first_file(_on_path(env.get("CXX", "g++"), path))
     use_wheels = env.get("LANESCOPE_USE_WHEELS") == "1"
     root = None if use_wheels else next((root for root in roots if _complete(root)), None)
+    # The CUDA 13 wheels share one folder laid out like a toolkit.
+    root = root or next((d for d in _wheel_dirs("nvidia.cu13") if _complete(d)), None)
     if root is not None:
         return Toolchain(
             sanitizer_include=root / "compute-sanitizer" / "include",
@@ -91,7 +93,11 @@ def find(environ: Mapping[str, str] | None = None) -> Toolchain:
             ptxas=_first_file([root / "bin" / "ptxas"]),
             nvcc=root / "bin" / "nvcc",
             nvrtc=_first_file(
-                [Path(p) for p in sorted(glob.glob(str(root / "lib64" / "libnvrtc.so*")))]
+                [
+                    Path(p)
+                    for lib in ("lib64", "lib")
+                    for p in sorted(glob.glob(str(root / lib / "libnvrtc.so*")))
+                ]
             ),
             ncu=ncu,
             nvdisasm=nvdisasm,

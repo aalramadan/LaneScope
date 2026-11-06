@@ -27,6 +27,8 @@ def test_recorder_library_and_patches_build_for_sm_89(tmp_path):
 @pytest.mark.parametrize(("digits", "splits"), [("61", False), ("89", True)])
 def test_the_patches_split_records_by_pc_from_sm_70_on(digits, splits):
     assert TOOLS.nvrtc is not None
+    if int(digits) < 75 and nvrtc.version(TOOLS.nvrtc)[0] >= 13:
+        pytest.skip("CUDA 13 compiles for sm_75 and newer only")
     options = [
         f"--gpu-architecture=compute_{digits}",
         "--relocatable-device-code=true",
@@ -261,7 +263,34 @@ def test_find_takes_the_wheels_over_a_complete_toolkit_on_request(tmp_path, monk
     assert found.nvrtc == wheels["nvidia.cuda_nvrtc"] / "lib" / "libnvrtc.so.12"
 
 
-def test_find_skips_an_incomplete_toolkit_and_an_nvcc_on_the_path(tmp_path):
+def test_find_takes_the_cuda_13_wheels_as_one_toolkit_after_a_complete_toolkit(
+    tmp_path, monkeypatch
+):
+    make_toolkit(tmp_path / "toolkit")
+    wheel = tmp_path / "cu13"
+    for part in (
+        "bin/nvcc",
+        "bin/ptxas",
+        "include/cuda.h",
+        "compute-sanitizer/include/sanitizer.h",
+        "compute-sanitizer/libsanitizer-public.so",
+        "lib/libnvrtc.so.13",
+    ):
+        (wheel / part).parent.mkdir(parents=True, exist_ok=True)
+        (wheel / part).write_text("")
+    monkeypatch.setattr(
+        toolchain, "_wheel_dirs", lambda package: [wheel] if package == "nvidia.cu13" else []
+    )
+    environ = {"CUDA_HOME": str(tmp_path / "toolkit"), "PATH": ""}
+    assert toolchain.find(environ).nvcc == tmp_path / "toolkit" / "bin" / "nvcc"
+    found = toolchain.find(environ | {"LANESCOPE_USE_WHEELS": "1"})
+    assert found.nvcc == wheel / "bin" / "nvcc"
+    assert found.sanitizer_lib == wheel / "compute-sanitizer"
+    assert found.nvrtc == wheel / "lib" / "libnvrtc.so.13"
+
+
+def test_find_skips_an_incomplete_toolkit_and_an_nvcc_on_the_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(toolchain, "_wheel_dirs", lambda package: [])
     (tmp_path / "toolkit" / "bin").mkdir(parents=True)
     (tmp_path / "toolkit" / "bin" / "nvcc").write_text("")
     (tmp_path / "path").mkdir()

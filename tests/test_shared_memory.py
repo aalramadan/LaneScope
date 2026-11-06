@@ -263,15 +263,15 @@ def test_pairing_needs_a_full_warp_on_h100():
         ("sm_90a", False),
         ("sm_100", False),
         ("sm_103", False),
-        ("sm_120", False),
-        ("sm_121a", False),
+        ("sm_120", True),
+        ("sm_121a", True),
         ("sm_80", True),
         ("sm_89", True),
         ("synthetic", True),
         ("", True),
     ],
 )
-def test_every_architecture_from_h100_on_pairs_only_full_warps(arch, paired):
+def test_hopper_and_data_center_blackwell_pair_only_full_warps(arch, paired):
     addresses = [16 * (lane // 8) if lane % 8 < 2 else None for lane in range(WARP_SIZE)]
     assert shared_memory.analyze(addresses, 16, arch=arch).paired == paired
 
@@ -393,6 +393,24 @@ def test_a_copy_with_zero_lanes_writes_every_lane_in_a_zero_pass_before_its_data
         _group(rows), 16, store=True, opcode="LDGSTS.E.BYPASS.128", sources=sources
     )
     assert (result.wavefronts, result.ideal) == (wavefronts, ideal)
+
+
+@pytest.mark.parametrize(
+    "zeros",
+    [[0], list(range(4)), list(range(8)), list(range(0, WARP_SIZE, 2))],
+)
+def test_a_copy_on_the_rtx_5070_writes_its_zero_lanes_with_its_data(zeros):
+    # Nsight Compute counts 4 wavefronts for each of these copies on the RTX 5070.
+    sources = [None if lane in zeros else 16 * lane for lane in range(WARP_SIZE)]
+    result = shared_memory.analyze(
+        [16 * lane for lane in range(WARP_SIZE)],
+        16,
+        store=True,
+        arch="sm_120",
+        opcode="LDGSTS.E.BYPASS.128",
+        sources=sources,
+    )
+    assert (result.wavefronts, result.ideal) == (4, 4)
 
 
 @pytest.mark.parametrize(

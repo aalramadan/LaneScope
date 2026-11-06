@@ -329,7 +329,10 @@ def test_recorder_records_the_row_address_of_each_lane_of_an_ldmatrix(tmp_path):
     rows = [row for row in range(len(trace)) if trace.space[row] == Space.SHARED]
     assert len(rows) == 1
     assert int(trace.width[rows[0]]) == 16
-    assert trace.lane_addresses(rows[0]) == tuple(16 * lane for lane in range(WARP_SIZE))
+    # The array starts at offset 0 on the RTX 4060 and at 1024 on the RTX 5070.
+    first = trace.lane_addresses(rows[0])[0]
+    assert first is not None and first % 128 == 0
+    assert trace.lane_addresses(rows[0]) == tuple(first + 16 * lane for lane in range(WARP_SIZE))
     assert trace.metadata["opcodes"] == {f"{int(trace.pc[rows[0]]):#x}": "LDSM.16.M88.4"}
 
 
@@ -341,9 +344,13 @@ from lanescope.cuda.driver import Driver
 from lanescope.cuda.toolchain import find
 
 SOURCE = """
+// From sm_120 on, the compiler drops a plain read of shared memory that nothing wrote.
 extern "C" __global__ void read_tile(unsigned sink) {
     __shared__ unsigned tile[32];
-    if (tile[threadIdx.x] == sink) asm volatile("trap;");
+    const unsigned address = static_cast<unsigned>(__cvta_generic_to_shared(tile + threadIdx.x));
+    unsigned value;
+    asm volatile("ld.volatile.shared.u32 %0, [%1];" : "=r"(value) : "r"(address));
+    if (value == sink) asm volatile("trap;");
 }
 """
 for _ in range(2):
@@ -439,9 +446,13 @@ from lanescope.cuda.driver import Driver
 from lanescope.cuda.toolchain import find
 
 SOURCE = """
+// From sm_120 on, the compiler drops a plain read of shared memory that nothing wrote.
 extern "C" __global__ void read_tile(unsigned sink) {
     __shared__ unsigned tile[32];
-    if (tile[threadIdx.x] == sink) asm volatile("trap;");
+    const unsigned address = static_cast<unsigned>(__cvta_generic_to_shared(tile + threadIdx.x));
+    unsigned value;
+    asm volatile("ld.volatile.shared.u32 %0, [%1];" : "=r"(value) : "r"(address));
+    if (value == sink) asm volatile("trap;");
 }
 """
 driver = Driver()

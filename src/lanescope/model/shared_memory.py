@@ -35,6 +35,9 @@ _PAIR_DISTANCES = (1, 2)
 
 # The first compute capability measured to merge only full warps (H100 is sm_90).
 _FULL_WARP_MERGE_MAJOR = 9
+# The RTX 5070 (sm_120) merges loads like the RTX 4060 and writes the rows that a 16-byte
+# cp.async fills with zeros together with its data.
+_CONSUMER_BLACKWELL_MAJOR = 12
 
 # An ldmatrix or stmatrix moves one 8x8 matrix for each group of eight lanes. Its
 # SASS opcode ends in .2 or .4 for two or four matrices.
@@ -102,8 +105,9 @@ def analyze(
 ) -> SharedAccess:
     """Model one access from the byte offset of each lane, with None for inactive lanes.
 
-    The architecture, such as sm_89, decides how loads merge their groups. An
-    unknown one takes the rule measured on the RTX 4060. The SASS opcode, such as
+    The architecture, such as sm_89, decides how loads merge their groups and whether a
+    cp.async writes its zero rows in a pass of their own. An unknown one takes the rules
+    measured on the RTX 4060. The SASS opcode, such as
     LDSM.16.M88.4, selects the rule of an ldmatrix, stmatrix, cp.async, or atomic access.
     The global address of each lane of a cp.async shapes its writes. Without them, the
     lanes read consecutive rows, and a lane with None among them fills zeros.
@@ -117,7 +121,9 @@ def analyze(
         return _atomic(tuple(addresses), width, _SWAP_SUFFIX in opcode)
     if base == _ASYNC_COPY_OPCODE and store:
         lanes = sources if sources is not None else [width * lane for lane in range(len(addresses))]
-        return _async_copy(tuple(addresses), width, tuple(lanes), "BYPASS" in opcode)
+        return _async_copy(
+            tuple(addresses), width, tuple(lanes), "BYPASS" in opcode, _zero_pass(arch)
+        )
     return _analyze(tuple(addresses), width, store, _full_warp_merge(arch))
 
 
@@ -173,10 +179,14 @@ def _matrix(addresses: tuple[int | None, ...], width: int, matrices: int) -> Sha
 
 @functools.lru_cache(maxsize=1 << 16)
 def _async_copy(
-    addresses: tuple[int | None, ...], width: int, sources: tuple[int | None, ...], bypass: bool
+    addresses: tuple[int | None, ...],
+    width: int,
+    sources: tuple[int | None, ...],
+    bypass: bool,
+    zero_pass: bool,
 ) -> SharedAccess:
     if width == 16 and bypass:
-        return _async_copy_rows(addresses, sources)
+        return _async_copy_rows(addresses, sources, zero_pass)
     # Through L1, a copy writes the lanes that read one global line together, each lane on
     # its own. A bank serves one lane per wavefront, also when lanes share an address, and
     # lanes that read the same bytes take turns.
@@ -199,10 +209,11 @@ def _async_copy(
 
 
 def _async_copy_rows(
-    addresses: tuple[int | None, ...], sources: tuple[int | None, ...]
+    addresses: tuple[int | None, ...], sources: tuple[int | None, ...], zero_pass: bool
 ) -> SharedAccess:
     active = _active(addresses, _ALL_LANES)
-    zeros = {lane for lane in active if sources[lane] is None}
+    # Without a zero pass, a lane that fills zeros writes its row like a lane with data.
+    zeros = {lane for lane in active if sources[lane] is None} if zero_pass else set()
     first: dict[int | None, int] = {}
     for lane in active:
         first.setdefault(addresses[lane], lane)
@@ -308,10 +319,20 @@ def _phase(addresses: tuple[int | None, ...], lanes: tuple[int, ...], width: int
     return Phase(lanes, tuple(tuple(sorted(found)) for found in bank_words))
 
 
-def _full_warp_merge(arch: str) -> bool:
+def _major(arch: str) -> int | None:
     # The last digit of a name such as sm_89, sm_90a, or sm_120 is the minor version.
     digits = re.match(r"sm_(\d+)", arch)
-    return digits is not None and int(digits[1]) // 10 >= _FULL_WARP_MERGE_MAJOR
+    return int(digits[1]) // 10 if digits else None
+
+
+def _full_warp_merge(arch: str) -> bool:
+    major = _major(arch)
+    return major is not None and _FULL_WARP_MERGE_MAJOR <= major < _CONSUMER_BLACKWELL_MAJOR
+
+
+def _zero_pass(arch: str) -> bool:
+    major = _major(arch)
+    return major is None or major < _CONSUMER_BLACKWELL_MAJOR
 
 
 def _merge(

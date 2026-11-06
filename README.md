@@ -39,12 +39,13 @@ Try LaneScope in your browser, with no install.
 ```bash
 git clone https://github.com/aalramadan/LaneScope.git
 cd LaneScope
-pip install .            # analysis, command line, and GUI
-pip install ".[gpu]"     # recording on an NVIDIA GPU
+pip install .                # analysis, command line, and GUI
+pip install ".[gpu]"         # recording on an NVIDIA GPU
+pip install ".[gpu-cuda13]"  # recording with the CUDA 13 tools, as on RTX 50 GPUs
 ```
 
 > [!TIP]
-> The analysis and the GUI run without a GPU. Only recording needs an NVIDIA GPU and `g++`. The `gpu` extra brings the CUDA tools that recording uses, with no CUDA Toolkit to install.
+> The analysis and the GUI run without a GPU. Only recording needs an NVIDIA GPU and `g++`. The `gpu` extra brings the CUDA tools that recording uses, with no CUDA Toolkit to install. On a driver for CUDA 13 or later, as on RTX 50 GPUs, the `gpu-cuda13` extra brings the matching tools.
 
 ## 🚀 Quick Start
 
@@ -135,7 +136,7 @@ Run `lanescope <command> --help` for the options of each command.
 
 ## 🎯 Accuracy
 
-On an RTX 4060 Laptop GPU, the counts of LaneScope match those of Nsight Compute in **all 2,710 counts** of its built-in test kernels and in **2,027 of the 2,040 counts** of the PyTorch and Triton examples. `lanescope validate` runs the same comparison on any GPU or program.
+On an RTX 4060 Laptop GPU, the counts of LaneScope match those of Nsight Compute in **all 2,710 counts** of its built-in test kernels and in **2,027 of the 2,040 counts** of the PyTorch and Triton examples. On an RTX 5070 Laptop GPU, LaneScope matches **2,819 of the 2,826 counts** of the test kernels. `lanescope validate` runs the same comparison on any GPU or program.
 
 ```bash
 lanescope get-ncu                 # installs Nsight Compute for the local driver
@@ -150,7 +151,7 @@ On the RTX 4060, the swizzle that LaneScope ranks first makes its built-in trans
 
 - Linux or WSL2 with Python 3.10 or later
 - For recording, `g++` and an NVIDIA GPU with a driver for CUDA 12.4 or later
-- Counts validated on an RTX 4060 Laptop GPU. `lanescope validate` checks them on any other GPU.
+- Counts validated on an RTX 4060 and an RTX 5070 Laptop GPU. `lanescope validate` checks them on any other GPU.
 
 ## ⚙️ How It Works
 

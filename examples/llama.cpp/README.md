@@ -1,6 +1,6 @@
 # Example: the lightning indexer of llama.cpp
 
-LaneScope found two bank conflicts in `lightning_indexer_kernel_mma`, the CUDA kernel of llama.cpp that scores the keys for the attention of DeepSeek V3.2. A small fix in [`lightning-indexer.patch`](lightning-indexer.patch) removes every conflict of the kernel and makes it **4.6% to 6.9% faster** on an RTX 5070 Laptop GPU.
+LaneScope found two bank conflicts in `lightning_indexer_kernel_mma`, the CUDA kernel behind the `LIGHTNING_INDEXER` op of llama.cpp. This op scores the earlier tokens for models that run attention on their top-scored tokens only, a design that DeepSeek V3.2 introduced and nine model implementations of llama.cpp now use. A small fix in [`lightning-indexer.patch`](lightning-indexer.patch) removes every conflict of the kernel and makes it **4.6% to 6.9% faster** on an RTX 5070 Laptop GPU.
 
 The [live demo](https://aalramadan.github.io/LaneScope/) opens the recordings of the kernel before and after the fix.
 

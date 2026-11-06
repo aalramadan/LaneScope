@@ -34,6 +34,7 @@ Try LaneScope in your browser, with no install.
 | 🔌 No rebuild | Any CUDA program, including the Triton kernels that PyTorch compiles |
 | 🖥️ Three interfaces | A browser GUI, a command line, and a Model Context Protocol (MCP) server for coding agents |
 | 🎮 Tested GPUs | Counts checked against Nsight Compute on an RTX 4060 and an RTX 5070 Laptop GPU |
+| 🦙 Real-world fix | A conflict found in llama.cpp whose fix makes the kernel up to 6.9% faster, in [examples/llama.cpp](examples/llama.cpp) |
 
 ## 📦 Installation
 

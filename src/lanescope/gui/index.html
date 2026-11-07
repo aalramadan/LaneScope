@@ -53,10 +53,10 @@
             <table class="instructions">
               <thead>
                 <tr>
-                  <th scope="col" class="pc-col">PC</th>
+                  <th scope="col" class="pc-col" data-term="pc">PC</th>
                   <th scope="col">Access</th>
-                  <th scope="col" class="num achieved-col">Achieved</th>
-                  <th scope="col" class="num excess-col">Excess</th>
+                  <th scope="col" class="num achieved-col" data-term="achieved">Achieved</th>
+                  <th scope="col" class="num excess-col" data-term="excess">Excess</th>
                 </tr>
               </thead>
               <tbody id="instruction-rows"></tbody>
@@ -88,6 +88,7 @@
           <dl id="access-stats" class="stats"></dl>
         </header>
         <div class="panel-body">
+          <div id="diagnosis" class="diagnosis" aria-live="polite" hidden></div>
           <div class="pattern-bar">
             <div class="pattern-head">
               <h3 id="patterns-title">Access patterns</h3>

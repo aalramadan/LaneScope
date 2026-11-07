@@ -52,6 +52,45 @@ def test_best_ranked_fix_removes_the_conflict_and_shows_its_code(page):
     assert "Swizzle<5, 0, 5>" in page.locator("#code-forms").inner_text()
 
 
+def test_the_card_explains_the_conflict_and_its_fix_in_plain_words(page):
+    card = page.locator("#diagnosis")
+    expect(card.locator(".diagnosis-title")).to_have_text("Bank conflicts")
+    expect(card.locator(".diagnosis-badge")).to_have_text("32× the passes it needs")
+    expect(card).to_contain_text("up to 32 threads hit different words in the same bank")
+    expect(card).to_contain_text("This line causes all the extra passes of the kernel.")
+    fix = card.locator(".fix-line")
+    expect(fix).to_contain_text("This removes all 3,968 extra passes on this buffer.")
+
+
+def test_the_card_shows_its_fix_beside_the_recorded_access_and_hides_it_again(page):
+    page.locator("#diagnosis .primary-button").click()
+    after = page.locator("figure.grid figcaption").nth(1)
+    expect(after).to_contain_text("With the fix")
+    expect(after).to_contain_text("1 wavefront, ideal 1, 0 bank conflicts")
+    button = page.locator("#diagnosis .primary-button")
+    expect(button).to_have_text("Hide the fix")
+    expect(button).to_have_attribute("aria-pressed", "true")
+    button.click()
+    expect(page.locator("figure.grid")).to_have_count(1)
+    expect(page.locator("#diagnosis .primary-button")).to_have_text("Show this fix")
+    expect(page.locator('input[name="kind"][value="none"]')).to_be_checked()
+
+
+def test_a_clean_global_load_says_that_it_wastes_no_sector(page):
+    page.locator('#instruction-rows tr[data-key="0xa0/global"]').click()
+    card = page.locator("#diagnosis")
+    expect(card.locator(".diagnosis-title")).to_have_text("No wasted sectors")
+    expect(card).to_contain_text("The instructions with extra passes or sectors come first")
+    expect(card.locator(".fix-line")).to_have_count(0)
+
+
+def test_column_headers_and_counts_explain_their_terms_on_hover(page):
+    excess = page.locator('th[data-term="excess"]').get_attribute("title")
+    assert excess.startswith("Passes or sectors above the fewest")
+    whole_run = page.locator("#access-stats div").first.get_attribute("title")
+    assert whole_run.startswith("A wavefront is one pass of shared memory.")
+
+
 def predicted_excess(change):
     """Return the excess wavefronts of the demo transpose after a change, as the page shows it."""
     data = analysis.whatif(TRANSPOSE, layouts.Buffer(0, 4096), change)
@@ -270,6 +309,42 @@ def test_secondary_text_keeps_a_contrast_of_at_least_four_and_a_half(browser, ur
         ratio = (lighter + 0.05) / (darker + 0.05)
         if ratio < 4.5:
             low.append((item["text"], round(ratio, 2)))
+    assert low == []
+
+
+# Each visible text of the diagnosis card, with its color and the background layers behind it.
+CARD_TEXTS = """() => [...document.querySelectorAll("#diagnosis *")]
+  .filter((element) => [...element.childNodes].some(
+    (node) => node.nodeType === Node.TEXT_NODE && node.textContent.trim()))
+  .map((element) => {
+    const layers = [];
+    for (let node = element; node; node = node.parentElement) {
+      layers.push(getComputedStyle(node).backgroundColor);
+    }
+    return { text: element.textContent.trim(), color: getComputedStyle(element).color, layers };
+  })"""
+
+
+@pytest.mark.parametrize("scheme", ["light", "dark"])
+@pytest.mark.parametrize("key", ["0x120/shared", "0xa0/global"], ids=["conflict", "clean"])
+def test_the_diagnosis_card_keeps_a_contrast_of_at_least_four_and_a_half(browser, url, scheme, key):
+    context = browser.new_context(viewport={"width": 1440, "height": 900}, color_scheme=scheme)
+    page = context.new_page()
+    page.goto(f"{url}#trace=0/transpose.npz")
+    page.locator(f'#instruction-rows tr[data-key="{key}"]').click()
+    expect(page.locator("#diagnosis .diagnosis-title")).to_be_visible()
+    if key.endswith("shared"):
+        expect(page.locator("#diagnosis .primary-button")).to_be_visible()
+    texts = page.evaluate(CARD_TEXTS)
+    context.close()
+    low = []
+    for item in texts:
+        ink = luminance(rgb(item["color"]))
+        ground = luminance(backdrop(item["layers"]))
+        ratio = (max(ink, ground) + 0.05) / (min(ink, ground) + 0.05)
+        if ratio < 4.5:
+            low.append((item["text"], round(ratio, 2)))
+    assert texts
     assert low == []
 
 

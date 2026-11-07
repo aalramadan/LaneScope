@@ -17,6 +17,8 @@
   --band: rgba(11, 11, 11, 0.06);
   --good: #0ca30c;
   --good-ink: #006300;
+  --warning: #d4870a;
+  --warning-ink: #8a5200;
   --critical: #d03b3b;
   --d0: #86b6ef;
   --d1: #5598e7;
@@ -47,6 +49,8 @@
     --source-bit: #d95926;
     --band: rgba(255, 255, 255, 0.07);
     --good-ink: #0ca30c;
+    --warning: #e8a33a;
+    --warning-ink: #f0b955;
     --d0: #184f95;
     --d1: #256abf;
     --d2: #3987e5;
@@ -74,6 +78,8 @@
   --source-bit: #d95926;
   --band: rgba(255, 255, 255, 0.07);
   --good-ink: #0ca30c;
+  --warning: #e8a33a;
+  --warning-ink: #f0b955;
   --d0: #184f95;
   --d1: #256abf;
   --d2: #3987e5;
@@ -580,6 +586,104 @@ table.instructions {
   display: flex;
   gap: 20px;
   margin: 0;
+}
+
+.diagnosis {
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--muted);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  font-size: 13.5px;
+}
+
+.diagnosis.warn {
+  border-left-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+}
+
+.diagnosis.ok {
+  border-left-color: var(--good);
+  background: color-mix(in srgb, var(--good) 7%, var(--surface));
+}
+
+.diagnosis p {
+  margin: 4px 0;
+}
+
+.diagnosis-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.diagnosis-title {
+  font-size: 15px;
+}
+
+.diagnosis.warn .diagnosis-title,
+.diagnosis.warn .diagnosis-icon {
+  color: var(--warning-ink);
+}
+
+.diagnosis.ok .diagnosis-title,
+.diagnosis.ok .diagnosis-icon {
+  color: var(--good-ink);
+}
+
+.diagnosis-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  color: var(--warning-ink);
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+}
+
+.diagnosis-cost {
+  color: var(--ink-2);
+}
+
+.fix-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.fix-line p {
+  flex: 1 1 320px;
+  margin: 0;
+}
+
+.primary-button {
+  border: 1px solid var(--accent-ink);
+  background: var(--accent-ink);
+  color: var(--surface);
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.primary-button:hover {
+  background: color-mix(in srgb, var(--accent-ink) 85%, var(--ink));
+}
+
+.primary-button[aria-pressed="true"] {
+  background: transparent;
+  color: var(--accent-ink);
+}
+
+[data-term] {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: help;
 }
 
 .pattern-bar {

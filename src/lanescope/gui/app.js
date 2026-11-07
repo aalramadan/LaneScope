@@ -28,6 +28,7 @@ const state = {
   touched: false,
   result: null,
   suggestions: null,
+  suggestionError: null,
 };
 
 const latest = {
@@ -82,6 +83,9 @@ function sameBuffer(first, second) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  for (const element of document.querySelectorAll("[data-term]")) {
+    element.title = format.TERMS[element.dataset.term];
+  }
   setupTheme();
   followTopBar();
   bindEvents();
@@ -139,6 +143,7 @@ async function openTrace(id, wanted = {}) {
     bufferFromUser: false,
     result: null,
     suggestions: null,
+    suggestionError: null,
   });
   $("trace-select").value = id;
   $("layout").hidden = false;
@@ -158,6 +163,7 @@ async function openTrace(id, wanted = {}) {
 // A launch that only ran atomics leaves a trace without a memory instruction.
 function showNoAccesses() {
   $("lanes-title").textContent = "No memory accesses";
+  $("diagnosis").hidden = true;
   $("lanes-subtitle").textContent = "This trace holds no shared or global load or store.";
   for (const id of ["access-stats", "patterns", "grids", "legend"]) {
     $(id).replaceChildren();
@@ -228,6 +234,7 @@ async function loadAccess(row, token) {
 }
 
 async function prepareBuffer(record, token) {
+  state.suggestionError = null;
   const covered = state.buffer && state.bufferFromUser && bufferHolds(state.buffer, state.access);
   if (!covered) {
     let buffer;
@@ -238,7 +245,9 @@ async function prepareBuffer(record, token) {
     } catch (error) {
       if (!isAbort(error) && current(token)) {
         state.buffer = null;
+        state.suggestionError = error.message;
         renderFixPanel(error.message);
+        renderDiagnosis();
       }
       return;
     }
@@ -304,7 +313,8 @@ function renderHeader() {
     ["sectors", "Excess sectors"],
   ]) {
     if (overview.totals[unit]) {
-      totals.append(stat(label, format.count(overview.totals[unit].excessive)));
+      const title = `${format.TERMS[unit]} ${format.TERMS.excess}`;
+      totals.append(stat(label, format.count(overview.totals[unit].excessive), title));
     }
   }
   if (overview.measured) {
@@ -500,7 +510,11 @@ function renderLanes() {
   $("lanes-subtitle").textContent = `${format.instructionLabel(selected)}${source}`;
   const stats = $("access-stats");
   stats.replaceChildren(
-    stat(`${capitalize(selected.unit)}, whole run`, `${format.count(selected.achieved)} / ${format.count(selected.ideal)}`),
+    stat(
+      `${capitalize(selected.unit)}, whole run`,
+      `${format.count(selected.achieved)} / ${format.count(selected.ideal)}`,
+      `${format.TERMS[selected.unit]} The second number is the fewest the accesses could take.`,
+    ),
     stat("This access", `${access.achieved} / ${access.ideal}`),
   );
   if (access.space === "global") {
@@ -512,9 +526,96 @@ function renderLanes() {
     stats.append(stat("Nsight Compute, whole run", value === null ? "no count" : format.count(value)));
   }
   stats.append(stat("Warp", `CTA ${access.cta}, warp ${access.warp}`));
+  renderDiagnosis();
   renderPatterns(patterns);
   renderGrids();
   $("text-view").textContent = access.text;
+}
+
+function renderDiagnosis() {
+  const holder = $("diagnosis");
+  const { selected, access, overview } = state;
+  holder.hidden = !(selected && access && selected.space === access.space);
+  if (holder.hidden) {
+    return;
+  }
+  const verdict = format.diagnosis(selected, access, overview.totals);
+  holder.className = `diagnosis ${verdict.tone}`;
+  const head = document.createElement("div");
+  head.className = "diagnosis-head";
+  const icon = document.createElement("span");
+  icon.className = "diagnosis-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = verdict.tone === "warn" ? "\u26a0\ufe0e" : "\u2713";
+  head.append(icon);
+  const title = document.createElement("strong");
+  title.className = "diagnosis-title";
+  title.textContent = verdict.title;
+  head.append(title);
+  if (verdict.badge) {
+    const badge = document.createElement("span");
+    badge.className = "diagnosis-badge";
+    badge.textContent = verdict.badge;
+    head.append(badge);
+  }
+  const cause = document.createElement("p");
+  cause.textContent = verdict.cause;
+  holder.replaceChildren(head, cause);
+  if (verdict.cost) {
+    const cost = document.createElement("p");
+    cost.className = "diagnosis-cost";
+    cost.textContent = verdict.cost;
+    holder.append(cost);
+  }
+  if (verdict.tone === "warn") {
+    holder.append(fixLine(verdict.advice));
+  }
+}
+
+function fixLine(advice) {
+  const line = document.createElement("div");
+  line.className = "fix-line";
+  const what = document.createElement("p");
+  line.append(what);
+  if (advice) {
+    what.textContent = advice;
+    return line;
+  }
+  const { suggestions } = state;
+  if (!suggestions || !sameBuffer(suggestions.buffer, state.buffer)) {
+    what.textContent = state.suggestionError || "Looking for a padding or a swizzle that removes the conflicts...";
+    return line;
+  }
+  const [item] = suggestions.changes;
+  if (!item) {
+    what.textContent = "No padding or swizzle of this buffer lowers its extra passes.";
+    return line;
+  }
+  what.textContent = `Fix by ${format.fixName(item.params)}. This ${format.fixEffect(item)}.`;
+  const shown = Object.entries(item.params).every(([key, value]) => state.change[key] === value);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "primary-button";
+  button.textContent = shown ? "Hide the fix" : "Show this fix";
+  button.setAttribute("aria-pressed", String(shown));
+  button.addEventListener("click", () => (shown ? hideFix() : applySuggestion(item)));
+  line.append(button);
+  return line;
+}
+
+function hideFix() {
+  writeControls({ kind: "none" });
+  onControlsChanged();
+}
+
+function applySuggestion(item) {
+  if (!fixCurrent()) {
+    return;
+  }
+  state.touched = true;
+  writeControls(item.params);
+  state.change = readControls();
+  scheduleWhatif(0);
 }
 
 function renderPatterns(patterns) {
@@ -781,6 +882,7 @@ function onControlsChanged() {
     $("result").hidden = true;
     $("code").hidden = true;
     renderGrids();
+    renderDiagnosis();
     return;
   }
   if (fixCurrent()) {
@@ -909,6 +1011,7 @@ async function runWhatif() {
     renderCode();
   }
   renderGrids();
+  renderDiagnosis();
 }
 
 function renderResult() {
@@ -1065,6 +1168,7 @@ function showSearching() {
 async function runSuggestions(buffer) {
   const traceId = state.traceId;
   state.suggestions = null;
+  state.suggestionError = null;
   searching = buffer;
   showSearching();
   let answer;
@@ -1075,6 +1179,8 @@ async function runSuggestions(buffer) {
   } catch (error) {
     if (!isAbort(error) && sameBuffer(state.buffer, buffer)) {
       $("suggestions-note").textContent = error.message;
+      state.suggestionError = error.message;
+      renderDiagnosis();
     }
     return;
   } finally {
@@ -1097,6 +1203,7 @@ function renderSuggestions() {
   $("suggestions").hidden = false;
   const list = $("suggestion-list");
   list.replaceChildren();
+  renderDiagnosis();
   if (suggestions.found === 0) {
     $("suggestions-note").textContent = "No padding or swizzle lowers the excess wavefronts of this buffer.";
     return;
@@ -1123,15 +1230,7 @@ function renderSuggestions() {
     }
     extra.textContent = notes.join(", ");
     button.append(what, after, extra);
-    button.addEventListener("click", () => {
-      if (!fixCurrent()) {
-        return;
-      }
-      state.touched = true;
-      writeControls(item.params);
-      state.change = readControls();
-      scheduleWhatif(0);
-    });
+    button.addEventListener("click", () => applySuggestion(item));
     entry.append(button);
     list.append(entry);
   }
@@ -1348,8 +1447,9 @@ function writeHash() {
 
 // Small builders
 
-function stat(label, value) {
+function stat(label, value, title = "") {
   const wrapper = document.createElement("div");
+  wrapper.title = title;
   const term = document.createElement("dt");
   term.textContent = label;
   const detail = document.createElement("dd");

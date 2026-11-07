@@ -9,7 +9,7 @@
 [![License GPL v3](https://img.shields.io/badge/license-GPL%20v3-blue)](LICENSE)
 [![Live demo](https://img.shields.io/badge/demo-live-orange)](https://aalramadan.github.io/LaneScope/)
 
-![The swizzle control of LaneScope removing the bank conflicts of a matrix transpose and of a matrix multiply tile](docs/demo.gif)
+![LaneScope explaining the bank conflict of a matrix transpose, showing its fix, and removing the conflicts of a matrix multiply tile with a swizzle](docs/demo.gif)
 
 </div>
 
@@ -38,7 +38,7 @@ The demo opens the recordings below.
 
 | Feature | Description |
 |---|---|
-| 🔬 Thread view | Every shared and global memory access, thread by thread, beside its source line |
+| 🔬 Thread view | Every shared and global memory access, thread by thread, beside its source line, with its cost and its best fix in plain words |
 | 📊 Nsight-matching counts | The wavefronts and sectors that Nsight Compute reports, computed from the recorded addresses |
 | 🛠️ Fix search | Paddings and swizzles ranked by the conflicts each removes, written as code |
 | 🔌 No rebuild | Any CUDA program, including the Triton kernels that PyTorch compiles |

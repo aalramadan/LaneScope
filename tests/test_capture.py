@@ -470,6 +470,51 @@ def test_recorder_records_only_the_ctas_of_its_window(tmp_path):
     assert sorted(trace.cta.tolist()) == [2, 3, 4]
 
 
+QUEUED_LAUNCHES = r'''
+import ctypes
+
+from lanescope.cuda import nvrtc
+from lanescope.cuda.driver import Driver, _pointers
+from lanescope.cuda.toolchain import find
+
+SOURCE = """
+extern "C" __global__ void reverse(unsigned* out) {
+    __shared__ unsigned tile[32];
+    tile[threadIdx.x] = threadIdx.x;
+    __syncwarp();
+    out[threadIdx.x] = tile[31 - threadIdx.x];
+}
+"""
+driver = Driver()
+options = [f"--gpu-architecture={driver.arch()}"]
+program = nvrtc.compile_cuda(SOURCE, "reverse.cu", options, find().nvrtc)
+kernel = driver.function(driver.load(program.cubin), "reverse")
+out = driver.alloc(4 * 32)
+arguments = _pointers([ctypes.c_uint64(out)])
+# The two launches queue on the stream without a synchronization between them.
+for _ in range(2):
+    driver._call("cuLaunchKernel", kernel, 1, 1, 1, 32, 1, 1, 0, None, arguments, None)
+driver._call("cuCtxSynchronize")
+driver.free(out)
+driver.close()
+'''
+
+
+@needs_gpu
+def test_recorder_leaves_a_queued_launch_unrecorded_past_a_quarter_of_the_gpu(tmp_path):
+    driver = Driver()
+    free, total = ctypes.c_size_t(), ctypes.c_size_t()
+    driver._call("cuMemGetInfo_v2", ctypes.byref(free), ctypes.byref(total))
+    driver.close()
+    # Each record buffer takes a sixth of the GPU, so the second queued launch passes a quarter.
+    capacity = total.value // 6 // capture.RECORD_DTYPE.itemsize
+    if capacity > 1 << 26:
+        pytest.skip("the GPU holds more than six of the largest record buffers")
+    traces, _ = record_script(tmp_path, QUEUED_LAUNCHES, capacity=capacity)
+    assert len(traces) == 1
+    assert int((traces[0].space == Space.SHARED).sum()) == 2
+
+
 DIVERGED_LOADS_LAUNCH = r'''
 import ctypes
 

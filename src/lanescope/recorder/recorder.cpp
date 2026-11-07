@@ -111,11 +111,27 @@ struct Launch {
     int arch_major = 0;
     int arch_minor = 0;
     CUcontext context = nullptr;
+    CUdevice device = 0;
     void* device_memory = nullptr;
+    size_t bytes = 0;
     // The asynchronous copy reads this header after the launch callback returns,
     // so the header lives on the heap until the flush.
     std::unique_ptr<Buffer> header;
 };
+
+size_t DeviceMemory(CUdevice device) {
+    using TotalMemory = CUresult (*)(size_t*, CUdevice);
+    static const auto get = [] {
+        void* driver = dlopen("libcuda.so.1", RTLD_NOW | RTLD_NOLOAD);
+        void* symbol = driver ? dlsym(driver, "cuDeviceTotalMem_v2") : nullptr;
+        return reinterpret_cast<TotalMemory>(symbol);
+    }();
+    size_t bytes = 0;
+    if (get == nullptr || get(&bytes, device) != CUDA_SUCCESS) {
+        return 0;
+    }
+    return bytes;
+}
 
 int DeviceAttribute(CUdevice_attribute attribute, CUdevice device) {
     // The application has loaded the CUDA driver already, so the tool needs no link to it.
@@ -182,6 +198,15 @@ public:
             return;
         }
         const size_t bytes = sizeof(Buffer) + static_cast<size_t>(settings_.capacity) * sizeof(Record);
+        // Each launch keeps its buffer until its stream synchronizes. A program that queues
+        // many launches would fill the device, so a launch past a quarter of its memory
+        // goes unrecorded instead.
+        size_t& pending = pending_bytes_[data.device];
+        if (pending > 0 && pending + bytes > DeviceMemory(data.device) / 4) {
+            ++skipped_;
+            sanitizerSetCallbackData(data.function, nullptr);
+            return;
+        }
         void* memory = nullptr;
         if (!Check(sanitizerAlloc(data.context, &memory, bytes), "allocating the record buffer")) {
             sanitizerSetCallbackData(data.function, nullptr);
@@ -204,7 +229,10 @@ public:
         launch.arch_major = DeviceAttribute(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, data.device);
         launch.arch_minor = DeviceAttribute(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, data.device);
         launch.context = data.context;
+        launch.device = data.device;
         launch.device_memory = memory;
+        launch.bytes = bytes;
+        pending += bytes;
         auto* records = reinterpret_cast<Record*>(static_cast<char*>(memory) + sizeof(Buffer));
         launch.header.reset(new Buffer{0, 0, settings_.capacity, settings_.cta_first,
                                        settings_.cta_count, 0, records});
@@ -217,6 +245,11 @@ public:
     void OnStreamSynchronized(CUcontext context, Sanitizer_StreamHandle stream) {
         std::lock_guard<std::mutex> lock(mutex_);
         Flush({context, stream});
+    }
+
+    int SkippedCount() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return skipped_;
     }
 
     size_t PendingCount() {
@@ -309,6 +342,7 @@ private:
             ", \"record_bytes\": " + std::to_string(sizeof(Record)) + "}\n";
         WriteFile(Path(stem + ".json"), json.data(), json.size());
         Check(sanitizerFree(launch.context, launch.device_memory), "freeing the record buffer");
+        pending_bytes_[launch.device] -= launch.bytes;
     }
 
     Settings settings_;
@@ -316,6 +350,8 @@ private:
     std::set<CUcontext> patched_contexts_;
     std::map<CUmodule, int> modules_;
     std::map<std::pair<CUcontext, Sanitizer_StreamHandle>, std::vector<Launch>> pending_;
+    std::map<CUdevice, size_t> pending_bytes_;
+    int skipped_ = 0;
     int next_module_ = 0;
     int next_launch_ = 0;
 };
@@ -352,6 +388,12 @@ void WarnAboutPendingLaunches() {
     if (pending > 0) {
         Warn(std::to_string(pending) +
              " launches were never synchronized before exit, so they have no launch files");
+    }
+    const int skipped = active_recorder ? active_recorder->SkippedCount() : 0;
+    if (skipped > 0) {
+        Warn(std::to_string(skipped) +
+             " launches have no launch files, since the launches before them held a quarter of the GPU "
+             "memory until their streams synchronized. A smaller --capacity records more of them");
     }
 }
 

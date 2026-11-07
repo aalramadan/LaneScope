@@ -29,7 +29,7 @@ The demo opens the recordings below.
 | Row sums | Threads that each read one 256-byte row of a shared tile, a conflict of the same kind |
 | Column sums | Threads that each read one column of a column-major matrix in global memory, one sector per thread |
 | Matmul tile | A tile copied with `cp.async` and read with `ldmatrix`, which needs the swizzle of CuTe |
-| llama.cpp indexer | The conflicts LaneScope found in llama.cpp, before and after the fix of [pull request #31803](https://github.com/ggml-org/llama.cpp/pull/31803) ([details](examples/llama.cpp)) |
+| llama.cpp indexer | The conflicts LaneScope found in llama.cpp, before and after the fix that llama.cpp merged in [pull request #31803](https://github.com/ggml-org/llama.cpp/pull/31803) ([details](examples/llama.cpp)) |
 
 > [!NOTE]
 > The page runs the whole analysis inside your browser. Recording your own program needs the local install below.

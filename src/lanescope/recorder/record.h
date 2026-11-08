@@ -25,14 +25,23 @@ struct Record {
 };
 static_assert(sizeof(Record) == 280, "the importer expects 280-byte records");
 
-// Header of the device buffer that the patches fill during one launch.
-struct Buffer {
+// Counts of one launch, in pinned host memory just before its records. The threads that
+// have exited tell the host when the records are complete.
+struct Counters {
     u32 count;
     u32 dropped;
+    u64 exited;
+};
+
+// Header of one launch in device memory, which every patched access reads. The counters
+// and the records live in pinned host memory, which the patches write through the same
+// addresses, so the host reads a finished launch without a copy.
+struct Buffer {
     u32 capacity;
     u32 cta_first;
     u32 cta_count;
     u32 reserved;
+    Counters* counters;
     Record* records;
 };
 static_assert(sizeof(Buffer) == 32, "the host copies a 32-byte header");

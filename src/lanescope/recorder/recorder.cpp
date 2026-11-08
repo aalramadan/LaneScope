@@ -5,26 +5,32 @@
 #include <sanitizer.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 namespace {
 
 using lanescope::Buffer;
+using lanescope::Counters;
 using lanescope::Record;
 using lanescope::u32;
 using lanescope::u64;
 
 constexpr int kFormatVersion = 1;
+// Pinned host memory that saved buffers may keep for reuse.
+constexpr size_t kPendingBytes = size_t{1} << 30;
 
 void Warn(const std::string& message) {
     std::fprintf(stderr, "lanescope recorder: %s\n", message.c_str());
@@ -99,7 +105,16 @@ struct Settings {
     }
 };
 
-// One recorded launch whose buffer waits for the next synchronization of its stream.
+// The pinned host memory of the counters and records of one launch, with the device header
+// that points the patches at them. Saved launches give theirs back for reuse, since pinning
+// memory takes far longer than a launch.
+struct Slot {
+    void* host = nullptr;
+    void* device_header = nullptr;
+    size_t bytes = 0;
+};
+
+// One recorded launch whose records wait until it has finished.
 struct Launch {
     int index = 0;
     std::string kernel;
@@ -112,8 +127,8 @@ struct Launch {
     int arch_minor = 0;
     CUcontext context = nullptr;
     CUdevice device = 0;
-    void* device_memory = nullptr;
-    size_t bytes = 0;
+    Slot slot;
+    u64 threads = 0;
     // The asynchronous copy reads this header after the launch callback returns,
     // so the header lives on the heap until the flush.
     std::unique_ptr<Buffer> header;
@@ -186,6 +201,8 @@ public:
         Check(sanitizerPatchInstructions(SANITIZER_INSTRUCTION_MATRIX_MEMORY_ACCESS, data.module,
                                          "LaneScopeMatrixAccess"),
               "patching ldmatrix and stmatrix");
+        Check(sanitizerPatchInstructions(SANITIZER_INSTRUCTION_BLOCK_EXIT, data.module, "LaneScopeBlockExit"),
+              "patching block exits");
         Check(sanitizerPatchModule(data.module), "patching the module");
     }
 
@@ -197,22 +214,23 @@ public:
             sanitizerSetCallbackData(data.function, nullptr);
             return;
         }
-        const size_t bytes = sizeof(Buffer) + static_cast<size_t>(settings_.capacity) * sizeof(Record);
-        // Each launch keeps its buffer until its stream synchronizes. A program that queues
-        // many launches would fill the device, so a launch past a quarter of its memory
-        // goes unrecorded instead.
+        SaveFinished(data.context);
+        const size_t bytes = sizeof(Counters) + static_cast<size_t>(settings_.capacity) * sizeof(Record);
+        // A launch that has not finished keeps its buffer. Launches past a quarter of the
+        // memory of the device go unrecorded, which only a program whose launches run
+        // behind its queue reaches.
         size_t& pending = pending_bytes_[data.device];
         if (pending > 0 && pending + bytes > DeviceMemory(data.device) / 4) {
             ++skipped_;
             sanitizerSetCallbackData(data.function, nullptr);
             return;
         }
-        void* memory = nullptr;
-        if (!Check(sanitizerAlloc(data.context, &memory, bytes), "allocating the record buffer")) {
+        const Slot slot = TakeSlot(data.context, bytes);
+        if (slot.host == nullptr) {
             sanitizerSetCallbackData(data.function, nullptr);
             return;
         }
-        Check(sanitizerMemset(memory, 0, bytes, data.hStream), "clearing the record buffer");
+        auto* counters = static_cast<Counters*>(slot.host);
         Launch launch;
         launch.index = next_launch_++;
         launch.kernel = kernel;
@@ -230,21 +248,26 @@ public:
         launch.arch_minor = DeviceAttribute(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, data.device);
         launch.context = data.context;
         launch.device = data.device;
-        launch.device_memory = memory;
-        launch.bytes = bytes;
+        launch.slot = slot;
         pending += bytes;
-        auto* records = reinterpret_cast<Record*>(static_cast<char*>(memory) + sizeof(Buffer));
-        launch.header.reset(new Buffer{0, 0, settings_.capacity, settings_.cta_first,
-                                       settings_.cta_count, 0, records});
-        Check(sanitizerMemcpyHostToDeviceAsync(memory, launch.header.get(), sizeof(Buffer), data.hStream),
+        launch.header.reset(new Buffer{settings_.capacity, settings_.cta_first, settings_.cta_count, 0,
+                                       counters, reinterpret_cast<Record*>(counters + 1)});
+        Check(sanitizerMemcpyHostToDeviceAsync(slot.device_header, launch.header.get(), sizeof(Buffer),
+                                               data.hStream),
               "copying the buffer header");
-        Check(sanitizerSetCallbackData(data.function, memory), "passing the buffer to the patches");
+        Check(sanitizerSetCallbackData(data.function, slot.device_header),
+              "passing the buffer to the patches");
+        launch.threads = static_cast<u64>(data.gridDim_x) * data.gridDim_y * data.gridDim_z *
+                         data.blockDim_x * data.blockDim_y * data.blockDim_z;
         pending_[{data.context, data.hStream}].push_back(std::move(launch));
     }
 
     void OnStreamSynchronized(CUcontext context, Sanitizer_StreamHandle stream) {
         std::lock_guard<std::mutex> lock(mutex_);
-        Flush({context, stream});
+        auto found = pending_.find({context, stream});
+        if (found != pending_.end()) {
+            SaveFinishedOf(found->second);
+        }
     }
 
     int SkippedCount() {
@@ -258,27 +281,62 @@ public:
         for (const auto& entry : pending_) {
             count += entry.second.size();
         }
+        for (const auto& entry : orphans_) {
+            count += entry.second.size();
+        }
         return count;
+    }
+
+    // A later stream may take the handle of a destroyed one, so the launches of a destroyed
+    // stream wait in a list of their own until all their threads have exited.
+    void OnStreamDestroyed(CUcontext context, Sanitizer_StreamHandle stream) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = pending_.find({context, stream});
+        if (found == pending_.end()) {
+            return;
+        }
+        auto& orphans = orphans_[context];
+        for (Launch& launch : found->second) {
+            orphans.push_back(std::move(launch));
+        }
+        pending_.erase(found);
     }
 
     // A later context may take the address of a destroyed one, and it needs the patches again.
     void OnContextDestroyed(CUcontext context) {
+        WaitForContext(context);
         OnContextSynchronized(context);
         std::lock_guard<std::mutex> lock(mutex_);
         patched_contexts_.erase(context);
+        auto found = free_slots_.find(context);
+        if (found != free_slots_.end()) {
+            for (const Slot& slot : found->second) {
+                free_bytes_ -= slot.bytes;
+                FreeSlot(context, slot);
+            }
+            free_slots_.erase(found);
+        }
     }
 
     void OnContextSynchronized(CUcontext context) {
         std::lock_guard<std::mutex> lock(mutex_);
-        std::vector<std::pair<CUcontext, Sanitizer_StreamHandle>> keys;
-        for (const auto& entry : pending_) {
-            if (entry.first.first == context) {
-                keys.push_back(entry.first);
+        SaveFinished(context);
+    }
+
+    // A context that goes without a synchronization may still run some launches, so the
+    // recorder waits a while for them to finish.
+    void WaitForContext(CUcontext context) {
+        for (int poll = 0; poll < 30000; ++poll) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                SaveFinished(context);
+                if (!HasLaunches(context)) {
+                    return;
+                }
             }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        for (const auto& key : keys) {
-            Flush(key);
-        }
+        Warn("some launches had not finished when their context went, so they have no launch files");
     }
 
 private:
@@ -296,32 +354,92 @@ private:
         std::fclose(file);
     }
 
-    void Flush(const std::pair<CUcontext, Sanitizer_StreamHandle>& key) {
-        auto found = pending_.find(key);
-        if (found == pending_.end()) {
-            return;
-        }
-        for (Launch& launch : found->second) {
-            Save(launch, key.second);
-        }
-        pending_.erase(found);
+    // The threads of a launch count their exits after their records, so a launch whose every
+    // thread has exited holds its complete records.
+    static bool Finished(const Launch& launch) {
+        const auto* counters = static_cast<const Counters*>(launch.slot.host);
+        return __atomic_load_n(&counters->exited, __ATOMIC_ACQUIRE) >= launch.threads;
     }
 
-    void Save(Launch& launch, Sanitizer_StreamHandle stream) {
-        Buffer header{};
-        Check(sanitizerMemcpyDeviceToHost(&header, launch.device_memory, sizeof(header), stream),
-              "copying the buffer header back");
-        u32 count = std::min(header.count, header.capacity);
-        // The copy fills every record, so the host buffer starts uninitialized. A failed
-        // copy leaves stale bytes there, so the launch then keeps no records.
-        std::unique_ptr<Record[]> records(new Record[count]);
-        if (count > 0 && !Check(sanitizerMemcpyDeviceToHost(records.get(), launch.header->records,
-                                                             count * sizeof(Record), stream),
-                                "copying the records back")) {
-            count = 0;
+    // Saves the finished launches of one stream in order. A launch that another thread queued
+    // after the last synchronization may still run, and it waits for a later check.
+    void SaveFinishedOf(std::deque<Launch>& launches) {
+        while (!launches.empty() && Finished(launches.front())) {
+            Save(launches.front());
+            launches.pop_front();
         }
+    }
+
+    void SaveFinished(CUcontext context) {
+        for (auto entry = pending_.begin(); entry != pending_.end();) {
+            if (entry->first.first == context) {
+                SaveFinishedOf(entry->second);
+            }
+            entry = entry->second.empty() ? pending_.erase(entry) : std::next(entry);
+        }
+        auto found = orphans_.find(context);
+        if (found == orphans_.end()) {
+            return;
+        }
+        auto& orphans = found->second;
+        for (auto launch = orphans.begin(); launch != orphans.end();) {
+            if (Finished(*launch)) {
+                Save(*launch);
+                launch = orphans.erase(launch);
+            } else {
+                ++launch;
+            }
+        }
+        if (orphans.empty()) {
+            orphans_.erase(found);
+        }
+    }
+
+    bool HasLaunches(CUcontext context) const {
+        for (const auto& entry : pending_) {
+            if (entry.first.first == context && !entry.second.empty()) {
+                return true;
+            }
+        }
+        return orphans_.count(context) > 0;
+    }
+
+    Slot TakeSlot(CUcontext context, size_t bytes) {
+        auto& kept = free_slots_[context];
+        if (!kept.empty()) {
+            const Slot slot = kept.back();
+            kept.pop_back();
+            free_bytes_ -= slot.bytes;
+            return slot;
+        }
+        Slot slot;
+        slot.bytes = bytes;
+        if (!Check(sanitizerAllocHost(context, &slot.host, bytes), "allocating the record buffer")) {
+            return Slot{};
+        }
+        if (!Check(sanitizerAlloc(context, &slot.device_header, sizeof(Buffer)),
+                   "allocating the buffer header")) {
+            sanitizerFreeHost(context, slot.host);
+            return Slot{};
+        }
+        std::memset(slot.host, 0, bytes);
+        return slot;
+    }
+
+    static void FreeSlot(CUcontext context, const Slot& slot) {
+        Check(sanitizerFreeHost(context, slot.host), "freeing the record buffer");
+        Check(sanitizerFree(context, slot.device_header), "freeing the buffer header");
+    }
+
+    // The launch has finished, so its counters and records in pinned host memory are
+    // complete and need no copy.
+    void Save(Launch& launch) {
+        const Buffer& header = *launch.header;
+        auto* counters = static_cast<Counters*>(launch.slot.host);
+        const u32 count = std::min(counters->count, header.capacity);
+        const auto* records = reinterpret_cast<const Record*>(counters + 1);
         const std::string stem = "launch-" + std::to_string(launch.index);
-        WriteFile(Path(stem + ".bin"), records.get(), count * sizeof(Record));
+        WriteFile(Path(stem + ".bin"), records, count * sizeof(Record));
         const std::string json =
             "{\"format\": " + std::to_string(kFormatVersion) +
             ", \"kernel\": " + JsonText(launch.kernel) +
@@ -335,21 +453,32 @@ private:
             ", " + std::to_string(launch.block[2]) + "]" +
             ", \"arch\": \"sm_" + std::to_string(launch.arch_major) + std::to_string(launch.arch_minor) + "\"" +
             ", \"records\": " + std::to_string(count) +
-            ", \"dropped\": " + std::to_string(header.dropped) +
+            ", \"dropped\": " + std::to_string(counters->dropped) +
             ", \"capacity\": " + std::to_string(header.capacity) +
             ", \"cta_first\": " + std::to_string(header.cta_first) +
             ", \"cta_count\": " + std::to_string(header.cta_count) +
             ", \"record_bytes\": " + std::to_string(sizeof(Record)) + "}\n";
         WriteFile(Path(stem + ".json"), json.data(), json.size());
-        Check(sanitizerFree(launch.context, launch.device_memory), "freeing the record buffer");
-        pending_bytes_[launch.device] -= launch.bytes;
+        pending_bytes_[launch.device] -= launch.slot.bytes;
+        // The next launch of the slot reads zeros wherever its warps write nothing.
+        std::memset(counters, 0, sizeof(Counters) + count * sizeof(Record));
+        // Every buffer of a recording has the same size, so a kept one serves any later launch.
+        if (free_bytes_ + launch.slot.bytes <= kPendingBytes) {
+            free_slots_[launch.context].push_back(launch.slot);
+            free_bytes_ += launch.slot.bytes;
+        } else {
+            FreeSlot(launch.context, launch.slot);
+        }
     }
 
     Settings settings_;
     std::mutex mutex_;
     std::set<CUcontext> patched_contexts_;
     std::map<CUmodule, int> modules_;
-    std::map<std::pair<CUcontext, Sanitizer_StreamHandle>, std::vector<Launch>> pending_;
+    std::map<std::pair<CUcontext, Sanitizer_StreamHandle>, std::deque<Launch>> pending_;
+    std::map<CUcontext, std::deque<Launch>> orphans_;
+    std::map<CUcontext, std::vector<Slot>> free_slots_;
+    size_t free_bytes_ = 0;
     std::map<CUdevice, size_t> pending_bytes_;
     int skipped_ = 0;
     int next_module_ = 0;
@@ -365,14 +494,14 @@ void Callback(void* userdata, Sanitizer_CallbackDomain domain, Sanitizer_Callbac
         recorder->OnModuleLoaded(*static_cast<const Sanitizer_ResourceModuleData*>(cbdata));
     } else if (domain == SANITIZER_CB_DOMAIN_RESOURCE &&
                cbid == SANITIZER_CBID_RESOURCE_STREAM_DESTROY_STARTING) {
-        // A program may destroy a stream without a synchronize, so its launches flush here.
         const auto& data = *static_cast<const Sanitizer_ResourceStreamData*>(cbdata);
-        recorder->OnStreamSynchronized(data.context, data.hStream);
+        recorder->OnStreamDestroyed(data.context, data.hStream);
     } else if (domain == SANITIZER_CB_DOMAIN_RESOURCE &&
                cbid == SANITIZER_CBID_RESOURCE_CONTEXT_DESTROY_STARTING) {
         recorder->OnContextDestroyed(static_cast<const Sanitizer_ResourceContextData*>(cbdata)->context);
     } else if (domain == SANITIZER_CB_DOMAIN_LAUNCH && cbid == SANITIZER_CBID_LAUNCH_BEGIN) {
         recorder->OnLaunchBegin(*static_cast<const Sanitizer_LaunchData*>(cbdata));
+
     } else if (domain == SANITIZER_CB_DOMAIN_SYNCHRONIZE) {
         const auto& data = *static_cast<const Sanitizer_SynchronizeData*>(cbdata);
         if (cbid == SANITIZER_CBID_SYNCHRONIZE_STREAM_SYNCHRONIZED) {
@@ -392,8 +521,8 @@ void WarnAboutPendingLaunches() {
     const int skipped = active_recorder ? active_recorder->SkippedCount() : 0;
     if (skipped > 0) {
         Warn(std::to_string(skipped) +
-             " launches have no launch files, since the launches before them held a quarter of the GPU "
-             "memory until their streams synchronized. A smaller --capacity records more of them");
+             " launches have no launch files, since the unfinished launches before them held a quarter of "
+             "the GPU memory. A smaller --capacity records more of them");
     }
 }
 

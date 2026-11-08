@@ -116,7 +116,7 @@ lanescope gui run1
 ```
 
 > [!TIP]
-> `--kernel` records only the kernels whose names contain the given text. `--ctas` records a range of thread blocks. Compiling with `-lineinfo` adds source lines and is optional. A program that queues many launches without synchronizing gets its launches recorded until their record buffers fill a quarter of the GPU memory. A smaller `--capacity` fits more of these launches.
+> `--kernel` records only the kernels whose names contain the given text. `--ctas` records a range of thread blocks. Compiling with `-lineinfo` adds source lines and is optional. A program that queues many launches without synchronizing gets every launch recorded, since each launch saves its records once its threads finish.
 
 ### 🤖 Use with Coding Agents
 

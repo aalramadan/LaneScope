@@ -66,12 +66,12 @@ __device__ __noinline__ PatchResult store(Buffer* buffer, u32 cta, u64 pc, u64 a
     const u32 leader = __ffs(mask) - 1;
     u32 slot = 0;
     if (lane == leader) {
-        slot = atomicAdd(&buffer->count, 1u);
+        slot = atomicAdd(&buffer->counters->count, 1u);
     }
     slot = __shfl_sync(mask, slot, leader);
     if (slot >= buffer->capacity) {
         if (lane == leader) {
-            atomicAdd(&buffer->dropped, 1u);
+            atomicAdd(&buffer->counters->dropped, 1u);
         }
         return kPatchSuccess;
     }
@@ -128,4 +128,19 @@ extern "C" __device__ __noinline__ PatchResult LaneScopeMatrixAccess(
     const void* data) {
     const u8 kind = kind_of(flags, data != nullptr);
     return record<4>(userdata, pc, address, accessSize, kShared, kind);
+}
+
+// Every thread of the grid counts its exit, after its records, so the host knows when a
+// launch has finished without a wait.
+extern "C" __device__ __noinline__ PatchResult LaneScopeBlockExit(void* userdata, u64 /*pc*/) {
+    Buffer* buffer = static_cast<Buffer*>(userdata);
+    if (buffer == nullptr) {
+        return kPatchSuccess;
+    }
+    __threadfence_system();
+    const u32 mask = __activemask();
+    if (linear_thread() % kWarpSize == static_cast<u32>(__ffs(mask) - 1)) {
+        atomicAdd(&buffer->counters->exited, static_cast<u64>(__popc(mask)));
+    }
+    return kPatchSuccess;
 }

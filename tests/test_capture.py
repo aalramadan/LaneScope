@@ -472,6 +472,7 @@ def test_recorder_records_only_the_ctas_of_its_window(tmp_path):
 
 QUEUED_LAUNCHES = r'''
 import ctypes
+import time
 
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver, _pointers
@@ -491,9 +492,11 @@ program = nvrtc.compile_cuda(SOURCE, "reverse.cu", options, find().nvrtc)
 kernel = driver.function(driver.load(program.cubin), "reverse")
 out = driver.alloc(4 * 32)
 arguments = _pointers([ctypes.c_uint64(out)])
-# The two launches queue on the stream without a synchronization between them.
-for _ in range(2):
-    driver._call("cuLaunchKernel", kernel, 1, 1, 1, 32, 1, 1, 0, None, arguments, None)
+# The two launches queue on the stream without a synchronization between them. The first
+# has finished by the time the second starts.
+driver._call("cuLaunchKernel", kernel, 1, 1, 1, 32, 1, 1, 0, None, arguments, None)
+time.sleep(0.5)
+driver._call("cuLaunchKernel", kernel, 1, 1, 1, 32, 1, 1, 0, None, arguments, None)
 driver._call("cuCtxSynchronize")
 driver.free(out)
 driver.close()
@@ -501,18 +504,69 @@ driver.close()
 
 
 @needs_gpu
-def test_recorder_leaves_a_queued_launch_unrecorded_past_a_quarter_of_the_gpu(tmp_path):
+def test_recorder_saves_a_finished_launch_that_waits_for_no_synchronization(tmp_path):
     driver = Driver()
     free, total = ctypes.c_size_t(), ctypes.c_size_t()
     driver._call("cuMemGetInfo_v2", ctypes.byref(free), ctypes.byref(total))
     driver.close()
-    # Each record buffer takes a sixth of the GPU, so the second queued launch passes a quarter.
+    # Each record buffer takes a sixth of the GPU, so the second queued launch would pass a
+    # quarter if the first one kept its buffer.
     capacity = total.value // 6 // capture.RECORD_DTYPE.itemsize
     if capacity > 1 << 26:
         pytest.skip("the GPU holds more than six of the largest record buffers")
     traces, _ = record_script(tmp_path, QUEUED_LAUNCHES, capacity=capacity)
-    assert len(traces) == 1
-    assert int((traces[0].space == Space.SHARED).sum()) == 2
+    assert len(traces) == 2
+    assert all(int((trace.space == Space.SHARED).sum()) == 2 for trace in traces)
+
+
+DESTROYED_STREAM_LAUNCH = r'''
+import ctypes
+
+from lanescope.cuda import nvrtc
+from lanescope.cuda.driver import Driver, _pointers
+from lanescope.cuda.toolchain import find
+
+SOURCE = """
+extern "C" __global__ void slow_reads(unsigned* out, unsigned rounds) {
+    __shared__ unsigned tile[32];
+    tile[threadIdx.x] = threadIdx.x;
+    __syncwarp();
+    const unsigned address = static_cast<unsigned>(__cvta_generic_to_shared(tile + threadIdx.x));
+    unsigned sum = 0;
+    for (unsigned round = 0; round < rounds; ++round) {
+        unsigned value;
+        asm volatile("ld.volatile.shared.u32 %0, [%1];" : "=r"(value) : "r"(address));
+        sum += value;
+    }
+    out[threadIdx.x] = sum;
+}
+"""
+driver = Driver()
+options = [f"--gpu-architecture={driver.arch()}"]
+program = nvrtc.compile_cuda(SOURCE, "slow.cu", options, find().nvrtc)
+kernel = driver.function(driver.load(program.cubin), "slow_reads")
+out = driver.alloc(4 * 32)
+stream = ctypes.c_void_p()
+driver._call("cuStreamCreate", ctypes.byref(stream), 0)
+arguments = _pointers([ctypes.c_uint64(out), ctypes.c_uint32(20000)])
+driver._call("cuLaunchKernel", kernel, 1, 1, 1, 32, 1, 1, 0, stream, arguments, None)
+# The stream goes while its kernel still runs, and a second launch follows on another stream.
+driver._call("cuStreamDestroy_v2", stream)
+short = _pointers([ctypes.c_uint64(out), ctypes.c_uint32(1)])
+driver._call("cuLaunchKernel", kernel, 1, 1, 1, 32, 1, 1, 0, None, short, None)
+driver._call("cuCtxSynchronize")
+driver.free(out)
+driver.close()
+'''
+
+
+@needs_gpu
+def test_recorder_keeps_every_record_of_a_launch_whose_stream_goes_while_it_runs(tmp_path):
+    traces, _ = record_script(tmp_path, DESTROYED_STREAM_LAUNCH)
+    loads = [
+        int(((trace.space == Space.SHARED) & (trace.kind == Kind.LOAD)).sum()) for trace in traces
+    ]
+    assert loads == [20000, 1]
 
 
 DIVERGED_LOADS_LAUNCH = r'''
@@ -595,17 +649,19 @@ def test_patches_split_the_lanes_of_one_call_by_pc():
         program = nvrtc.compile_cuda(SPLIT_SOURCE, "two_pcs.cu", options, TOOLS.nvrtc)
         assert program.cubin is not None
         kernel = driver.function(driver.load(program.cubin), "two_pcs")
-        size = 32 + 4 * capture.RECORD_DTYPE.itemsize
+        size = 40 + 4 * capture.RECORD_DTYPE.itemsize
         buffer = driver.alloc(size)
-        # count, dropped, capacity, first CTA, CTA count, reserved, then the records.
-        driver.upload(buffer, struct.pack("<6IQ", 0, 0, 4, 0, 1, 0, buffer + 32))
+        # capacity, first CTA, CTA count, reserved, the address of the two counters, and the
+        # address of the records, then the counters, count and dropped, then the records.
+        header = struct.pack("<4I2Q", 4, 0, 1, 0, buffer + 32, buffer + 40)
+        driver.upload(buffer, header + struct.pack("<2I", 0, 0))
         driver.launch(kernel, (1, 1, 1), (32, 1, 1), [ctypes.c_uint64(buffer)])
         data = driver.download(buffer, size)
         driver.free(buffer)
     finally:
         driver.close()
-    (count,) = struct.unpack_from("<I", data)
-    records = np.frombuffer(data[32:], dtype=capture.RECORD_DTYPE)[:count]
+    (count,) = struct.unpack_from("<I", data, 32)
+    records = np.frombuffer(data[40:], dtype=capture.RECORD_DTYPE)[:count]
     assert sorted(zip(records["pc"].tolist(), records["mask"].tolist(), strict=True)) == [
         (0x1000, 0x55555555),
         (0x1010, 0xAAAAAAAA),

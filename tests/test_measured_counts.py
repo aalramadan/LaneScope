@@ -152,3 +152,25 @@ def test_model_matches_nsight_compute_on_the_global_sectors_of_cp_async(
     else:
         result = global_memory.analyze(reads, width)
     assert (result.sectors, result.ideal) == measured
+
+
+# Nsight Compute 2026.4.0.10 counts of stmatrix and of the 64-bit shared exchange and
+# compare-and-swap on an RTX 5070 Laptop GPU (sm_120), from fixed and random lane patterns.
+# The loads of the compare-and-swap loops that build the other 64-bit atomics stay out,
+# since the number of their turns changes from run to run.
+RTX_5070 = json.loads(
+    (pathlib.Path(__file__).parent / "data" / "rtx5070_instruction_counts.json").read_text()
+)
+
+
+def rtx_5070_cases():
+    for group, name, opcode, width, offsets, wavefronts, ideal, *_ in RTX_5070["cases"]:
+        yield pytest.param(opcode, width, offsets, (wavefronts, ideal), id=f"{group}/{name}")
+
+
+@pytest.mark.parametrize(("opcode", "width", "offsets", "measured"), list(rtx_5070_cases()))
+def test_model_matches_nsight_compute_on_stmatrix_and_64_bit_atomics_of_an_rtx_5070(
+    opcode, width, offsets, measured
+):
+    result = shared_memory.analyze(offsets, width, arch=RTX_5070["arch"], opcode=opcode)
+    assert (result.wavefronts, result.ideal) == measured

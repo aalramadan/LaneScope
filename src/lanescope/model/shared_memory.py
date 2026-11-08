@@ -46,6 +46,9 @@ _ASYNC_COPY_OPCODE = "LDGSTS"
 # A shared atomic writes each lane on its own, and a compare-and-swap moves two words.
 _ATOMIC_OPCODE = "ATOMS"
 _SWAP_SUFFIX = ".CAS"
+# A 64-bit shared atomic serves each half-warp in passes of its own, as measured on an
+# RTX 5070. A 32-bit one serves the whole warp together.
+_HALF_WARPS = (tuple(range(16)), tuple(range(16, 32)))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -285,10 +288,11 @@ def _rows(addresses: tuple[int | None, ...]) -> int:
 def _atomic(addresses: tuple[int | None, ...], width: int, swap: bool) -> SharedAccess:
     # Lanes that hit one word still take a turn each. A compare-and-swap takes two passes.
     lanes = _active(addresses, _ALL_LANES)
-    phase = _lane_phase(addresses, lanes, width)
+    groups = (lanes,) if width <= 4 else tuple(_active(addresses, half) for half in _HALF_WARPS)
+    phases = tuple(_lane_phase(addresses, group, width) for group in groups if group)
     passes = 2 if swap else 1
     ideal = passes * math.ceil(len(lanes) * width / WAVEFRONT_BYTES)
-    return SharedAccess(width, len(lanes), False, ideal, (phase,) * passes)
+    return SharedAccess(width, len(lanes), False, ideal, phases * passes)
 
 
 def _with_ideal(

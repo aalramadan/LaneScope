@@ -1,3 +1,4 @@
+import collections
 import dataclasses
 import json
 import math
@@ -413,6 +414,14 @@ def _summary_lines(
 ) -> list[str]:
     matched = sum(row.matches for row in rows)
     lines = [f"LaneScope matches Nsight Compute in {matched} of {len(rows)} instruction counts."]
+    unseen = {(row.launch, row.offset): row.opcode for row in rows if not row.seen}
+    if unseen:
+        opcodes = collections.Counter(unseen.values()).most_common()
+        named = ", ".join(f"{opcode} in {count}" for opcode, count in opcodes)
+        lines.append(
+            f"Nsight Compute counts {len(unseen)} instructions that the traces never hold, "
+            f"which count as misses: {named}."
+        )
     start = 0
     for label, cases in groups:
         group = [row for row in rows if start <= row.launch < start + len(cases)]

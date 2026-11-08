@@ -196,6 +196,19 @@ def test_summary_gives_the_matched_counts_of_each_group_of_launches():
     ]
 
 
+def test_summary_names_the_instructions_that_only_nsight_compute_counts():
+    unseen = compare.Row(
+        3, "k", 0x40, "ATOMS.CAST.SPIN.64 P0, [R9], R4, R6", "shared_wavefronts", 0, 4.0, seen=False
+    )
+    rows = [summary_row(0, 1.0), unseen, dataclasses.replace(unseen, launch=4)]
+    lines = validate._summary_lines(rows, [])
+    assert lines[0] == "LaneScope matches Nsight Compute in 1 of 3 instruction counts."
+    assert lines[1] == (
+        "Nsight Compute counts 2 instructions that the traces never hold, which count as misses: "
+        "ATOMS.CAST.SPIN.64 in 2."
+    )
+
+
 def test_validation_without_nsight_compute_says_how_to_get_it(tmp_path, offline_check):
     trace = tmp_path / "trace-0.npz"
     filler_trace().save(trace)

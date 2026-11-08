@@ -94,6 +94,8 @@ class Row:
     quantity: str
     lanescope: int
     nsight: float | None
+    # False for an instruction that Nsight Compute counts and the trace never holds.
+    seen: bool = True
 
     @property
     def matches(self) -> bool:
@@ -138,9 +140,14 @@ def lanescope_counts(trace: Trace) -> dict[int, dict[str, int]]:
 
 
 def compare(launch: int, trace: Trace, counters: KernelCounters) -> list[Row]:
-    """Return one row per quantity of each instruction that the trace holds."""
+    """Return one row per quantity of each instruction that the trace or Nsight Compute counts.
+
+    An instruction that Nsight Compute counts and the trace never holds, such as one that
+    Compute Sanitizer does not report, gets a LaneScope count of zero.
+    """
     ours = lanescope_counts(trace)
     aligned = align(sorted(ours), counters)
+    name = counters.mangled or counters.kernel
     rows = []
     for offset, quantities in sorted(ours.items()):
         theirs_offset = aligned[offset]
@@ -148,7 +155,7 @@ def compare(launch: int, trace: Trace, counters: KernelCounters) -> list[Row]:
             rows.append(
                 Row(
                     launch,
-                    counters.mangled or counters.kernel,
+                    name,
                     offset,
                     counters.sass.get(theirs_offset, ""),
                     quantity,
@@ -156,6 +163,14 @@ def compare(launch: int, trace: Trace, counters: KernelCounters) -> list[Row]:
                     counters.quantity(quantity)[1].get(theirs_offset),
                 )
             )
+    # Offsets on another base pair by rank, which leaves no instruction of theirs unpaired.
+    theirs = _offsets(counters)
+    if all(offset in theirs for offset in ours):
+        for quantity in QUANTITIES:
+            for offset, value in sorted(counters.quantity(quantity)[1].items()):
+                if offset not in ours and value > 0:
+                    sass = counters.sass.get(offset, "")
+                    rows.append(Row(launch, name, offset, sass, quantity, 0, value, seen=False))
     return rows
 
 
@@ -166,10 +181,14 @@ def align(offsets: list[int], counters: KernelCounters) -> dict[int, int]:
     the memory instructions of the two sides still come in the same order, so equal
     counts pair them by rank.
     """
-    theirs = sorted({o for quantity in QUANTITIES for o in counters.quantity(quantity)[1]})
+    theirs = _offsets(counters)
     if all(offset in theirs for offset in offsets) or len(offsets) != len(theirs):
         return {offset: offset for offset in offsets}
     return dict(zip(offsets, theirs, strict=True))
+
+
+def _offsets(counters: KernelCounters) -> list[int]:
+    return sorted({o for quantity in QUANTITIES for o in counters.quantity(quantity)[1]})
 
 
 def summarize(rows: Iterable[Row]) -> dict[str, dict[str, int]]:

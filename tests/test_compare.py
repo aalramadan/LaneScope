@@ -161,6 +161,42 @@ def test_a_different_count_is_a_mismatch():
     assert (row.lanescope, row.nsight, row.matches) == (4096, 2048.0, False)
 
 
+def with_unseen_instruction(counters, offset=0x200):
+    """Return the counters with a shared instruction that the trace never holds."""
+    metrics = {name: dict(values) for name, values in counters.metrics.items()}
+    metrics["memory_l1_wavefronts_shared"][offset] = 4.0
+    metrics["memory_l1_wavefronts_shared_ideal"][offset] = 4.0
+    sass = counters.sass | {offset: "ATOMS.CAST.SPIN.64 P0, [R9], R4, R6"}
+    return compare.KernelCounters(kernel=counters.kernel, metrics=metrics, sass=sass)
+
+
+def test_an_instruction_that_only_nsight_compute_counts_is_a_miss():
+    rows = compare.compare(
+        0, demos.transpose_trace(), with_unseen_instruction(counters_for_transpose())
+    )
+    unseen = [row for row in rows if not row.seen]
+    assert {(row.offset, row.quantity, row.lanescope, row.nsight) for row in unseen} == {
+        (0x200, "shared_wavefronts", 0, 4.0),
+        (0x200, "shared_wavefronts_ideal", 0, 4.0),
+    }
+    assert not any(row.matches for row in unseen)
+    assert all(row.seen for row in rows if row.offset != 0x200)
+
+
+def test_offsets_paired_by_rank_report_no_unseen_instruction():
+    shifted = counters_for_transpose()
+    moved = compare.KernelCounters(
+        kernel=shifted.kernel,
+        metrics={
+            name: {offset + 0x1000: value for offset, value in values.items()}
+            for name, values in shifted.metrics.items()
+        },
+        sass={offset + 0x1000: text for offset, text in shifted.sass.items()},
+    )
+    rows = compare.compare(0, demos.transpose_trace(), with_unseen_instruction(moved, 0x1300))
+    assert all(row.seen for row in rows)
+
+
 def test_unknown_metric_names_resolve_by_their_words():
     name, values = counters_for_transpose().quantity("global_sectors")
     assert name == "smsp__sass_sectors_mem_global_op_ld_or_st"

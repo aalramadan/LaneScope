@@ -1,6 +1,6 @@
 import numpy as np
 
-from lanescope import text_view
+from lanescope import kernel_names, text_view
 from lanescope.fixes import ranking
 from lanescope.fixes.layouts import (
     Buffer,
@@ -9,19 +9,42 @@ from lanescope.fixes.layouts import (
     XorSwizzle,
     compare,
     infer_buffer,
+    lanes_inside,
     later_shift,
 )
 from lanescope.model import global_memory, shared_memory
-from lanescope.model.counters import as_record, count, distinct_rows, measure, worst_first
+from lanescope.model.counters import (
+    InstructionCounters,
+    InstructionKey,
+    as_record,
+    count,
+    distinct_rows,
+    measure,
+    worst_first,
+)
+from lanescope.model.data_dependence import data_dependent
 from lanescope.trace import Space, Trace
 
 
 def explain(trace: Trace) -> dict:
-    """Return the counters of every instruction of a trace, worst first."""
+    """Return the counters of every instruction of a trace, worst first.
+
+    Each instruction also tells whether its bank conflicts follow the input values and
+    gives the excess of its least and its most conflicted access.
+    """
+    counters = count(trace)
+    dependent = data_dependent(trace, counters)
+    kernel = trace.metadata.get("kernel")
+    full = kernel_names.readable([kernel])[kernel] if isinstance(kernel, str) and kernel else None
     return {
-        "kernel": trace.metadata.get("kernel"),
+        "kernel": kernel,
+        "name": kernel_names.short(full) if full else None,
+        "full_name": full,
         "arch": trace.metadata.get("arch"),
-        "instructions": [as_record(trace, counter) for counter in worst_first(count(trace))],
+        "instructions": [
+            as_record(trace, counter) | _spread(counter, dependent)
+            for counter in worst_first(counters)
+        ],
     }
 
 
@@ -137,10 +160,17 @@ def suggest(
     if limit < 0:
         raise ValueError("limit must be zero or more")
     if buffer is None:
-        buffer = infer_buffer(trace, worst_shared_pc(trace) if pc is None else pc)
+        pc = worst_shared_pc(trace) if pc is None else pc
+        buffer = infer_buffer(trace, pc)
     found = ranking.suggest(trace, buffer)
+    dependent = {key[0] for key in data_dependent(trace, count(trace))}
+    # A given buffer takes the instructions whose lanes fall inside it.
+    touched = (
+        {pc} if pc is not None else set(trace.pc[lanes_inside(trace, buffer).any(axis=1)].tolist())
+    )
     return {
         "buffer": {"start": buffer.start, "size": buffer.size},
+        "data_dependent": bool(touched & dependent),
         "found": len(found),
         "changes": [
             {
@@ -165,6 +195,12 @@ def worst_shared_pc(trace: Trace) -> int:
     if not shared:
         raise ValueError("the trace has no shared access")
     return shared[0].pc
+
+
+def _spread(counter: InstructionCounters, dependent: set[InstructionKey]) -> dict:
+    """Return whether the conflicts of an instruction follow the input values, with its range."""
+    key = (counter.pc, int(counter.space), int(counter.kind), counter.width)
+    return {"data_dependent": key in dependent, "excess_range": [counter.fewest, counter.most]}
 
 
 def change_params(change: Change) -> dict:

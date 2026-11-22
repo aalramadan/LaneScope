@@ -6,7 +6,16 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 GUI = ROOT / "src" / "lanescope" / "gui"
-ASSETS = ("api.js", "app.js", "format.js", "grid.js", "style.css", "icon.svg")
+ASSETS = (
+    "api.js",
+    "app.js",
+    "dom.js",
+    "format.js",
+    "grid.js",
+    "summary.js",
+    "style.css",
+    "icon.svg",
+)
 STATUS = (
     '<p id="pyodide-status" class="banner">Loading Python and NumPy into this page. '
     "The first visit takes a few seconds.</p>"

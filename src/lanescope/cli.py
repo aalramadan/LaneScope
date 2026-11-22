@@ -6,7 +6,7 @@ import sys
 import tempfile
 from collections.abc import Sequence
 
-from lanescope import analysis, demos, html_report, text_view
+from lanescope import analysis, demos, html_report, summary, summary_text, text_view
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver, DriverError, version_text
 from lanescope.cuda.nvrtc import CompileError
@@ -18,11 +18,11 @@ from lanescope.nsight import calibration, installer
 from lanescope.nsight.validate import ValidationError, validate, validate_program
 from lanescope.recorder import capture
 from lanescope.recorder.build import BuildError, build_recorder
-from lanescope.trace import Trace
+from lanescope.trace import Trace, read_metadata
 
 TABLE_HEADER = (
     f"{'pc':8}{'line':>5}  {'space':7}{'kind':6}{'width':>5}{'requests':>10}  {'unit':11}"
-    f"{'achieved':>9}{'ideal':>7}{'excessive':>10}"
+    f"{'achieved':>9}{'ideal':>7}{'excessive':>10}{'of kernel':>11}"
 )
 ERRORS = (
     ValueError, OSError, ImportError, BuildError, CompileError, DriverError, ToolchainError,
@@ -30,6 +30,8 @@ ERRORS = (
 )  # fmt: skip
 # The recorder keeps from 1 to 2**26 records per launch and ignores any other capacity.
 MAX_CAPACITY = 1 << 26
+# A recording with more traces than this prints their count in place of their paths.
+LISTED_TRACES = 10
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -55,6 +57,22 @@ def _parser() -> argparse.ArgumentParser:
     explain.add_argument("trace", type=pathlib.Path)
     explain.add_argument("--json", action="store_true", help="print JSON for tools and agents")
     explain.set_defaults(run=_explain)
+
+    summing = commands.add_parser(
+        "summary", help="extra passes of every kernel and line of a recording, worst first"
+    )
+    summing.add_argument(
+        "paths", nargs="+", type=pathlib.Path, help="recording folders or trace files"
+    )
+    summing.add_argument(
+        "--global",
+        dest="global_memory",
+        action="store_true",
+        help="rank the extra sectors of global memory in place of the passes of shared memory",
+    )
+    summing.add_argument("--limit", type=_size, default=10, help="most kernels and lines to list")
+    summing.add_argument("--json", action="store_true", help="print JSON for tools and agents")
+    summing.set_defaults(run=_summary)
 
     lanes = commands.add_parser("lanes", help="lane-by-lane view of one access of an instruction")
     lanes.add_argument("trace", type=pathlib.Path)
@@ -218,7 +236,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     window.add_argument("--open", action="store_true", help="open the page in the browser")
     window.add_argument(
-        "--demo", action="store_true", help="add four demo kernels and two recordings of llama.cpp"
+        "--demo", action="store_true", help="add five demo kernels and two recordings of llama.cpp"
     )
     window.set_defaults(run=_gui)
     return parser
@@ -230,18 +248,65 @@ def _explain(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(data, indent=2))
         return 0
-    kernel = _printable(trace.metadata.get("kernel", "?"))
-    arch = _printable(trace.metadata.get("arch", "?"))
+    kernel = text_view.printable(data["name"] or "?")
+    arch = text_view.printable(trace.metadata.get("arch", "?"))
     print(f"kernel {kernel} ({arch}), {len(trace)} warp-level accesses")
     print()
     print(TABLE_HEADER)
+    achieved: dict[str, int] = {}
     for record in data["instructions"]:
+        achieved[record["unit"]] = achieved.get(record["unit"], 0) + record["achieved"]
+    for record in data["instructions"]:
+        share = summary_text.percent(record["excessive"], achieved[record["unit"]])
+        mark = f" {summary_text.MARK}" if record["data_dependent"] else ""
         print(
             f"{int(record['pc'], 16):#06x}  {record['line'] or '-':>5}  {record['space']:7}"
             f"{record['kind']:6}{record['width']:5d}{record['requests']:10d}  {record['unit']:11}"
-            f"{record['achieved']:9d}{record['ideal']:7d}{record['excessive']:10d}"
+            f"{record['achieved']:9d}{record['ideal']:7d}{record['excessive']:10d}{share:>11}{mark}"
         )
+    if any(record["data_dependent"] for record in data["instructions"]):
+        print()
+        print(f"{summary_text.MARK} {text_view.DATA_DEPENDENT}")
     return 0
+
+
+def _summary(args: argparse.Namespace) -> int:
+    paths: list[pathlib.Path] = []
+    for root in args.paths:
+        if not root.exists():
+            raise ValueError(f"no such file or folder: {root}")
+        paths += summary.trace_files(root, summary.MAX_TRACES - len(paths))
+    if not paths:
+        raise ValueError(f"found no trace files in {', '.join(str(root) for root in args.paths)}")
+    facts = _read_facts(paths)
+    data = summary.summarize(
+        (str(path), str(summary.run_of(path)), found)
+        for path, found in zip(paths, facts, strict=True)
+    )
+    if args.json:
+        print(json.dumps(data, indent=2))
+    else:
+        unit = "sectors" if args.global_memory else "wavefronts"
+        print(summary_text.render(data, unit, args.limit))
+    for note in summary_text.notes(data):
+        print(f"lanescope: {note}", file=sys.stderr)
+    if len(paths) == summary.MAX_TRACES:
+        limit = f"{summary.MAX_TRACES:,}"
+        print(f"lanescope: summed only the first {limit} trace files", file=sys.stderr)
+    return 0
+
+
+def _read_facts(paths: list[pathlib.Path]) -> list[summary.TraceFacts | None]:
+    """Return the facts of each trace, with the progress on a terminal for a large recording."""
+    found = []
+    shown = sys.stderr.isatty() and len(paths) > summary.PARALLEL_TRACES
+    for index, facts in enumerate(summary.read_many(paths, processes=True), 1):
+        found.append(facts)
+        if shown:
+            print(f"\rsumming launch {index:,} of {len(paths):,}", end="", file=sys.stderr)
+    if shown:
+        print("\r\033[K", end="", file=sys.stderr)
+    return found
 
 
 def _lanes(args: argparse.Namespace) -> int:
@@ -266,6 +331,10 @@ def _suggest(args: argparse.Namespace) -> int:
     print(f"buffer {data['buffer']['start']:#x}+{data['buffer']['size']}")
     if data["found"] == 0:
         print("no padding or swizzle lowers the excess wavefronts of this buffer")
+        if data["data_dependent"]:
+            print(text_view.DATA_DEPENDENT)
+    elif data["data_dependent"]:
+        print(text_view.DATA_DEPENDENT_FIX)
     for item in data["changes"]:
         before, after = item["excessive_sectors_before"], item["excessive_sectors_after"]
         sectors = f", excessive global sectors {before} -> {after}" if before != after else ""
@@ -331,25 +400,64 @@ def _record(args: argparse.Namespace) -> int:
             f"{args.out} holds no launch files. "
             "The program launched no kernel that the recorder saw"
         )
-    for path in _import_traces(args.out):
-        print(f"wrote {path}")
+    paths, disassembled = _import_traces(args.out)
+    _report_traces(args.out, paths, disassembled, args.capacity)
     return 0
 
 
-def _import_traces(folder: pathlib.Path) -> list[pathlib.Path]:
+def _import_traces(folder: pathlib.Path) -> tuple[list[pathlib.Path], bool]:
     disassemblers = find().disassemblers
     if not disassemblers:
         print(f"lanescope: {capture.NO_DISASSEMBLER}", file=sys.stderr)
-    return capture.import_recording(folder, disassemblers)
+    return capture.import_recording(folder, disassemblers), bool(disassemblers)
 
 
 def _import(args: argparse.Namespace) -> int:
-    paths = _import_traces(args.folder)
+    paths, disassembled = _import_traces(args.folder)
     if not paths:
         raise ValueError(f"{args.folder} holds no launch files")
-    for path in paths:
-        print(f"wrote {path}")
+    _report_traces(args.folder, paths, disassembled)
     return 0
+
+
+def _report_traces(
+    folder: pathlib.Path, paths: list[pathlib.Path], disassembled: bool, capacity: int = 0
+) -> None:
+    """Print the traces of a recording, what limits their counts, and the next command."""
+    if len(paths) <= LISTED_TRACES:
+        for path in paths:
+            print(f"wrote {path}")
+    else:
+        print(f"wrote {len(paths)} traces to {folder}")
+    metadata = [read_metadata(path) for path in paths]
+    launches = f"{len(paths)} launches" if len(paths) != 1 else "1 launch"
+    without = sum(not item.get("lines") for item in metadata)
+    if disassembled and without:
+        print(
+            f"lanescope: no source lines in {without} of {launches}, since their kernels were "
+            "built without line tables. Build the program with -lineinfo, such as "
+            "nvcc -lineinfo, to see the line of each instruction.",
+            file=sys.stderr,
+        )
+    lost = [int(item.get("dropped", 0)) for item in metadata if item.get("dropped")]
+    if lost:
+        larger = f", such as --capacity {min(2 * capacity, MAX_CAPACITY)}" if capacity else ""
+        print(
+            f"lanescope: the record buffer filled up in {len(lost)} of {launches} and left out "
+            f"{sum(lost):,} accesses, therefore their counts are low. Record again with a larger "
+            f"--capacity{larger}, or with fewer CTAs, such as --ctas 0:8.",
+            file=sys.stderr,
+        )
+    if len(paths) > 1:
+        print(
+            f"Next, lanescope summary {folder} ranks the conflicts of all {len(paths)} launches, "
+            f"and lanescope gui {folder} opens them in the browser."
+        )
+    elif paths:
+        print(
+            f"Next, lanescope explain {paths[0]} lists its memory instructions, worst first, "
+            f"and lanescope gui {folder} opens it in the browser."
+        )
 
 
 def _bench_list(args: argparse.Namespace) -> int:
@@ -472,7 +580,12 @@ def _gui(args: argparse.Namespace) -> int:
                 trace.save(demo / name)
             paths.append(demo)
         server.serve(
-            paths or [pathlib.Path.cwd()], args.host, args.port, args.allow_host, args.open
+            paths or [pathlib.Path.cwd()],
+            args.host,
+            args.port,
+            args.allow_host,
+            args.open,
+            processes=True,
         )
     return 0
 
@@ -561,11 +674,6 @@ def _integer(text: str, low: int, high: float, reason: str) -> int:
     if not low <= value <= high:
         raise argparse.ArgumentTypeError(reason)
     return value
-
-
-def _printable(value: object) -> str:
-    # Trace files are untrusted, and control characters would reach the terminal.
-    return "".join(char if char.isprintable() else "?" for char in str(value))
 
 
 def _buffer(text: str) -> layouts.Buffer:

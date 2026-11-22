@@ -1,4 +1,5 @@
 import { Latest, getJSON, isAbort, postJSON } from "./api.js";
+import { cell, detail, meter, stat } from "./dom.js";
 import * as format from "./format.js";
 import {
   renderBankGrid,
@@ -7,12 +8,19 @@ import {
   sectorUse,
   showBands,
 } from "./grid.js";
+import { renderProgress, renderSummary } from "./summary.js";
 
 const $ = (id) => document.getElementById(id);
 const THEMES = ["system", "light", "dark"];
 const WHATIF_DELAY = 80;
+// While the server adds up the traces, the page asks for its progress this often.
+const SUMMARY_POLL = 400;
 
 const state = {
+  view: null,
+  summary: null,
+  summaryUnit: "wavefronts",
+  summaryUnitChosen: false,
   traces: [],
   traceId: null,
   overview: null,
@@ -32,6 +40,7 @@ const state = {
 };
 
 const latest = {
+  summary: new Latest(),
   trace: new Latest(),
   patterns: new Latest(),
   access: new Latest(),
@@ -47,6 +56,8 @@ let selection = 0;
 // Trace requests count apart, since a click on the old trace may start a selection while
 // the new trace loads, and the trace answer must still win.
 let traceRequests = 0;
+// Each showing of the summary polls on its own, and a newer one ends the older loop.
+let summaryRequests = 0;
 // Counters of the requests that mark the grids and the result as busy, so an older
 // request that ends never clears the mark of a newer one.
 let accessRequests = 0;
@@ -104,9 +115,88 @@ async function loadTraces() {
     return;
   }
   renderTraceSelect(listing.truncated);
+  $("summary-button").hidden = state.traces.length < 2;
   const wanted = readHash();
-  const known = state.traces.some((trace) => trace.id === wanted.trace);
-  await openTrace(known ? wanted.trace : state.traces[0].id, known ? wanted : {});
+  let failed = false;
+  if (wanted.trace) {
+    try {
+      await openTrace(wanted.trace, wanted);
+      return;
+    } catch (error) {
+      showError(error);
+      failed = true;
+    }
+  }
+  // A page of many launches opens on their summary, and a page of one launch on that launch.
+  if (state.traces.length > 1) {
+    await showSummary({ keepError: failed });
+  } else {
+    await openTrace(state.traces[0].id);
+  }
+}
+
+// The summary ranks the lines of every trace under the page by their extra passes. A summary
+// that the user asks for from a launch gets an entry of its own in the history, and Back
+// returns to that launch.
+async function showSummary({ push = false, keepError = false } = {}) {
+  if (!keepError) {
+    hideError();
+  }
+  newSelection();
+  latest.trace.abort();
+  latest.suggest.abort();
+  traceRequests += 1;
+  searching = null;
+  state.view = "summary";
+  state.traceId = null;
+  $("layout").hidden = true;
+  $("summary-view").hidden = false;
+  $("summary-button").setAttribute("aria-pressed", "true");
+  $("trace-select").value = "";
+  $("kernel-info").replaceChildren();
+  $("totals").replaceChildren();
+  document.title = "Summary - LaneScope";
+  if (location.hash) {
+    const bare = location.pathname + location.search;
+    if (push) {
+      history.pushState(null, "", bare);
+    } else {
+      history.replaceState(null, "", bare);
+    }
+  }
+  if (state.summary) {
+    renderSummary(state.summary, state.summaryUnit, openPlace);
+  }
+  await pollSummary();
+}
+
+async function pollSummary() {
+  const request = ++summaryRequests;
+  for (;;) {
+    const answer = await latest.summary.run((signal) => getJSON("/api/summary", {}, signal));
+    if (request !== summaryRequests || state.view !== "summary") {
+      return;
+    }
+    if (answer.state === "done") {
+      // A first summary without bank conflicts but with wasted sectors opens on global memory.
+      const { wavefronts, sectors } = answer.totals;
+      if (!state.summary && !state.summaryUnitChosen && wavefronts.excessive === 0 && sectors.excessive > 0) {
+        state.summaryUnit = "sectors";
+        document.querySelector('input[name="summary-unit"][value="sectors"]').checked = true;
+      }
+      state.summary = answer;
+      renderSummary(answer, state.summaryUnit, openPlace);
+      return;
+    }
+    if (!state.summary) {
+      renderProgress(answer);
+    }
+    await new Promise((resolve) => setTimeout(resolve, SUMMARY_POLL));
+  }
+}
+
+function openPlace(place) {
+  openTrace(place.id, { pc: place.pc, space: place.space }).catch(showError);
 }
 
 async function openTrace(id, wanted = {}) {
@@ -116,19 +206,28 @@ async function openTrace(id, wanted = {}) {
   try {
     overview = await latest.trace.run((signal) => getJSON("/api/trace", { id }, signal));
   } catch (error) {
-    // The page keeps showing the trace it had, so the picker names that trace again.
-    if (request === traceRequests && state.traceId) {
-      $("trace-select").value = state.traceId;
+    // The page keeps what it showed. The picker therefore names that trace again, or the summary.
+    if (request === traceRequests) {
+      $("trace-select").value = state.traceId ?? "";
     }
     throw error;
   }
   if (request !== traceRequests) {
     return;
   }
+  // A launch opened from the summary gets an entry of its own in the history, and Back
+  // returns to the summary. A launch that Back or Forward reaches keeps its entry.
+  if (state.view === "summary" && !location.hash) {
+    history.pushState(null, "", `#${new URLSearchParams({ trace: id })}`);
+  }
   // Only a trace that loaded ends the selection of the trace on screen.
   newSelection();
   latest.suggest.abort();
+  latest.summary.abort();
   searching = null;
+  state.view = "trace";
+  $("summary-view").hidden = true;
+  $("summary-button").setAttribute("aria-pressed", "false");
   for (const section of ["result", "code", "suggestions"]) {
     $(section).hidden = true;
   }
@@ -145,7 +244,7 @@ async function openTrace(id, wanted = {}) {
     suggestions: null,
     suggestionError: null,
   });
-  $("trace-select").value = id;
+  showInPicker(id, overview);
   $("layout").hidden = false;
   renderHeader();
   renderInstructions();
@@ -276,7 +375,12 @@ function bufferHolds(buffer, access) {
 
 function renderTraceSelect(truncated) {
   const select = $("trace-select");
-  select.replaceChildren();
+  // The picker names no trace while the summary is on screen.
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Summary of every launch";
+  placeholder.hidden = true;
+  select.replaceChildren(placeholder);
   const groups = new Map();
   for (const trace of state.traces) {
     if (!groups.has(trace.folder)) {
@@ -287,7 +391,8 @@ function renderTraceSelect(truncated) {
     }
     const option = document.createElement("option");
     option.value = trace.id;
-    option.textContent = trace.kernel ? `${trace.name} (${trace.kernel})` : trace.name;
+    const kernel = trace.kernel_name || trace.kernel;
+    option.textContent = kernel ? `${trace.name} (${kernel})` : trace.name;
     groups.get(trace.folder).append(option);
   }
   if (truncated) {
@@ -299,12 +404,25 @@ function renderTraceSelect(truncated) {
   select.disabled = false;
 }
 
+// A trace opened from the summary may lie beyond the listing, and the picker then adds it.
+function showInPicker(id, overview) {
+  const select = $("trace-select");
+  if (![...select.options].some((option) => option.value === id)) {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = `${id.split("/").pop()} (${overview.name || overview.kernel || "kernel"})`;
+    select.append(option);
+  }
+  select.value = id;
+}
+
 function renderHeader() {
   const { overview } = state;
   const info = $("kernel-info");
   info.replaceChildren();
   const name = document.createElement("strong");
-  name.textContent = overview.kernel || "kernel";
+  name.textContent = overview.name || overview.kernel || "kernel";
+  name.title = overview.full_name || "";
   info.append(name, ` on ${overview.arch || "an unknown GPU"}, ${format.count(overview.rows)} accesses`);
   const totals = $("totals");
   totals.replaceChildren();
@@ -321,7 +439,7 @@ function renderHeader() {
     const { matched, total } = overview.measured;
     totals.append(stat("Nsight Compute agrees", `${matched} of ${total}`));
   }
-  document.title = `${overview.kernel || "kernel"} - LaneScope`;
+  document.title = `${overview.name || overview.kernel || "kernel"} - LaneScope`;
 }
 
 function renderInstructions() {
@@ -403,12 +521,13 @@ function measuredMark(record) {
 
 function excessCell(record, peak) {
   const element = cell(format.count(record.excessive), "num");
-  const meter = document.createElement("span");
-  meter.className = "meter";
-  const fill = document.createElement("span");
-  fill.style.width = `${(100 * record.excessive) / peak}%`;
-  meter.append(fill);
-  element.append(meter);
+  element.append(meter(record.excessive, peak));
+  if (record.excessive > 0) {
+    const all = state.overview.totals[record.unit]?.achieved ?? 0;
+    const part = detail(`${format.percent(record.excessive, all)} of all`);
+    part.title = format.TERMS.share;
+    element.append(part);
+  }
   return element;
 }
 
@@ -582,6 +701,17 @@ function fixLine(advice) {
     return line;
   }
   const { suggestions } = state;
+  if (state.selected?.data_dependent) {
+    what.textContent = format.DATA_DEPENDENT;
+    const [item] = suggestions && sameBuffer(suggestions.buffer, state.buffer) ? suggestions.changes : [];
+    if (item) {
+      const removed = format.count(item.excessive_before - item.excessive_after);
+      what.textContent +=
+        ` On this recording, the best change, ${format.fixName(item.params)}, removes ${removed} ` +
+        `of the ${format.count(item.excessive_before)} extra passes on this buffer.`;
+    }
+    return line;
+  }
   if (!suggestions || !sameBuffer(suggestions.buffer, state.buffer)) {
     what.textContent = state.suggestionError || "Looking for a padding or a swizzle that removes the conflicts...";
     return line;
@@ -1204,11 +1334,15 @@ function renderSuggestions() {
   const list = $("suggestion-list");
   list.replaceChildren();
   renderDiagnosis();
+  const caution = state.selected?.data_dependent
+    ? " These conflicts follow the values that the kernel reads, therefore a fix ranked on this recording may help less on other inputs."
+    : "";
   if (suggestions.found === 0) {
-    $("suggestions-note").textContent = "No padding or swizzle lowers the excess wavefronts of this buffer.";
+    $("suggestions-note").textContent = `No padding or swizzle lowers the excess wavefronts of this buffer.${caution}`;
     return;
   }
-  $("suggestions-note").textContent = `${suggestions.found} changes lower the excess. The best ones come first.`;
+  $("suggestions-note").textContent =
+    `${suggestions.found} changes lower the excess. The best ones come first.${caution}`;
   for (const item of suggestions.changes) {
     const entry = document.createElement("li");
     const button = document.createElement("button");
@@ -1319,9 +1453,21 @@ function hideTooltip() {
 // Events, theme, and the address bar
 
 function bindEvents() {
-  $("trace-select").addEventListener("change", (event) =>
-    openTrace(event.target.value).catch(showError),
-  );
+  $("trace-select").addEventListener("change", (event) => {
+    if (event.target.value) {
+      openTrace(event.target.value).catch(showError);
+    }
+  });
+  $("summary-button").addEventListener("click", () => showSummary({ push: true }).catch(showError));
+  for (const input of document.querySelectorAll('input[name="summary-unit"]')) {
+    input.addEventListener("change", () => {
+      state.summaryUnit = input.value;
+      state.summaryUnitChosen = true;
+      if (state.summary) {
+        renderSummary(state.summary, state.summaryUnit, openPlace);
+      }
+    });
+  }
   for (const input of document.querySelectorAll('input[name="filter"]')) {
     input.addEventListener("change", () => {
       state.filter = input.value;
@@ -1354,12 +1500,16 @@ function bindEvents() {
   });
   $("fix-form").addEventListener("submit", (event) => event.preventDefault());
   bindTooltip();
-  window.addEventListener("hashchange", () => {
+  // Back from a launch opened in the summary returns to the summary, whose address has no hash.
+  const follow = () => {
     const wanted = readHash();
     if (wanted.trace && wanted.trace !== state.traceId) {
       openTrace(wanted.trace, wanted).catch(showError);
+    } else if (!wanted.trace && state.traces.length > 1 && state.view !== "summary") {
+      showSummary().catch(showError);
     }
-  });
+  };
+  window.addEventListener("hashchange", follow);
 }
 
 function onTableKey(event) {
@@ -1443,26 +1593,6 @@ function writeHash() {
     row: String(state.row),
   });
   history.replaceState(null, "", `#${params}`);
-}
-
-// Small builders
-
-function stat(label, value, title = "") {
-  const wrapper = document.createElement("div");
-  wrapper.title = title;
-  const term = document.createElement("dt");
-  term.textContent = label;
-  const detail = document.createElement("dd");
-  detail.textContent = value;
-  wrapper.append(term, detail);
-  return wrapper;
-}
-
-function cell(content, className) {
-  const element = document.createElement("td");
-  element.className = className;
-  element.textContent = content;
-  return element;
 }
 
 function capitalize(text) {

@@ -2,6 +2,7 @@ import http.client
 import io
 import json
 import socket
+import time
 
 import pytest
 
@@ -392,3 +393,138 @@ def test_listing_leaves_out_a_file_that_vanished_after_the_walk(tmp_path, monkey
     monkeypatch.setattr(gui, "_trace_files", lambda root: [*walk(root), root / "gone.npz"])
     names = [item["name"] for item in gui.Library([tmp_path]).listing()["traces"]]
     assert names == ["kept.npz"]
+
+
+def finished_summary(library, timeout=60.0):
+    """Return the summary of a library once its thread has read every trace."""
+    deadline = time.monotonic() + timeout
+    while True:
+        answer = library.summary()
+        if answer["state"] == "done":
+            return answer
+        assert answer["state"] == "summing" and 0 <= answer["done"] < answer["total"]
+        assert time.monotonic() < deadline, "the summary did not finish"
+        time.sleep(0.02)
+
+
+def test_summary_route_ranks_every_trace_once_its_thread_has_read_them(server):
+    deadline = time.monotonic() + 60
+    while (answer := get_json(server, "/api/summary"))["state"] != "done":
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    assert answer["traces"] == 2
+    assert answer["unreadable"] == 1
+    lines = [line for line in answer["lines"] if line["unit"] == "wavefronts"]
+    assert lines[0]["worst"] == {"id": "0/transpose.npz", "pc": "0x120", "space": "shared"}
+    assert answer["runs"] == [
+        f"{server.library.roots[0].name}/transpose.npz",
+        f"{server.library.roots[0].name}/runs/wide.npz",
+    ]
+
+
+def test_a_library_without_threads_sums_every_trace_during_the_call(tmp_path):
+    demos.transpose_trace().save(tmp_path / "trace-0.npz")
+    demos.histogram_trace().save(tmp_path / "trace-1.npz")
+    answer = gui.Library([tmp_path], background=False).summary()
+    assert answer["state"] == "done"
+    assert answer["runs"] == [tmp_path.name]
+    assert {kernel["name"] for kernel in answer["kernels"]} == {"transpose", "histogram"}
+
+
+def test_a_summary_reads_a_changed_trace_again_and_forgets_a_deleted_one(tmp_path):
+    demos.transpose_trace().save(tmp_path / "trace-0.npz")
+    demos.transpose_trace().save(tmp_path / "trace-1.npz")
+    library = gui.Library([tmp_path], background=False)
+    assert library.summary()["kernels"][0]["launches"] == 2
+    (tmp_path / "trace-1.npz").unlink()
+    demos.histogram_trace().save(tmp_path / "trace-0.npz")
+    answer = library.summary()
+    assert [kernel["name"] for kernel in answer["kernels"]] == ["histogram"]
+    assert len(library._facts) == 1
+
+
+def test_a_summary_thread_that_meets_an_odd_file_goes_on_with_the_rest(tmp_path, monkeypatch):
+    demos.transpose_trace().save(tmp_path / "a.npz")
+    demos.transpose_trace().save(tmp_path / "b.npz")
+    real = gui.summary.read_facts
+
+    def odd(path):
+        if path.name == "a.npz":
+            raise RuntimeError("an odd file")
+        return real(path)
+
+    monkeypatch.setattr(gui.summary, "read_facts", odd)
+    answer = finished_summary(gui.Library([tmp_path]))
+    assert (answer["traces"], answer["unreadable"]) == (1, 1)
+
+
+def test_a_trace_beyond_the_listing_opens_by_its_id(tmp_path, monkeypatch):
+    for name in ("a", "b", "c"):
+        demos.transpose_trace(tiles_per_side=1).save(tmp_path / f"{name}.npz")
+    monkeypatch.setattr(gui, "MAX_LISTED", 1)
+    library = gui.Library([tmp_path])
+    assert [item["name"] for item in library.listing()["traces"]] == ["a.npz"]
+    trace, overview = library.load("0/c.npz")
+    assert overview["kernel"] == "transpose"
+
+
+@pytest.mark.parametrize(
+    "trace_id",
+    ["0/../outside.npz", "0/.hidden/skipped.npz", "0//etc/passwd", "1/transpose.npz", "x/a.npz"],
+)
+def test_an_id_outside_the_folders_of_the_page_opens_nothing(folder, trace_id):
+    (folder.parent / "outside.npz").write_bytes(b"")
+    with pytest.raises(gui.NotFound):
+        gui.Library([folder]).load(trace_id)
+
+
+def test_the_listing_names_each_kernel_by_its_short_name(tmp_path):
+    long_name = "ns::kernel<" + ", ".join(f"ns::T{index}<int>" for index in range(9)) + ">"
+    Trace.from_accesses([], {"kernel": long_name}).save(tmp_path / "long.npz")
+    (item,) = gui.Library([tmp_path]).listing()["traces"]
+    assert item["kernel"] == long_name
+    assert item["kernel_name"] == "kernel<…>"
+
+
+def test_a_server_reads_many_traces_in_several_processes(tmp_path, monkeypatch):
+    for index in range(3):
+        demos.transpose_trace(tiles_per_side=1).save(tmp_path / f"trace-{index}.npz")
+    monkeypatch.setattr(gui.summary, "PARALLEL_TRACES", 1)
+    answer = finished_summary(gui.Library([tmp_path], processes=True))
+    (kernel,) = answer["kernels"]
+    assert kernel["launches"] == 3
+
+
+def test_closing_a_library_stops_its_summary_thread(tmp_path, monkeypatch, slow):
+    for index in range(20):
+        demos.transpose_trace(tiles_per_side=1).save(tmp_path / f"trace-{index}.npz")
+    monkeypatch.setattr(gui.summary, "read_facts", slow(gui.summary.read_facts, 0.1))
+    library = gui.Library([tmp_path])
+    assert library.summary()["state"] == "summing"
+    library.close()
+    assert library._summing is not None and not library._summing.is_alive()
+    assert len(library._facts) < 20
+    assert library.summary()["state"] == "summing"
+    assert not library._summing.is_alive()
+
+
+def test_two_folders_of_the_same_name_stay_two_runs(tmp_path):
+    for parent in ("a", "b"):
+        (tmp_path / parent / "out").mkdir(parents=True)
+        demos.transpose_trace().save(tmp_path / parent / "out" / "trace-0.npz")
+    roots = [tmp_path / "a" / "out", tmp_path / "b" / "out"]
+    answer = gui.Library(roots, background=False).summary()
+    assert len(answer["runs"]) == 2
+    assert [kernel["launches"] for kernel in answer["kernels"]] == [1, 1]
+
+
+def test_an_id_through_a_linked_folder_outside_the_page_opens_nothing(tmp_path):
+    root, outside = tmp_path / "root", tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    demos.transpose_trace().save(outside / "secret.npz")
+    (root / "link").symlink_to(outside, target_is_directory=True)
+    library = gui.Library([root])
+    assert library.listing()["traces"] == []
+    with pytest.raises(gui.NotFound):
+        library.load("0/link/secret.npz")

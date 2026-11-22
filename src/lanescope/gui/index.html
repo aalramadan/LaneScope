@@ -14,6 +14,7 @@
         <img src="/static/icon.svg" alt="" width="22" height="22" />
         <span>LaneScope</span>
       </div>
+      <button id="summary-button" class="ghost-button" type="button" hidden>Summary</button>
       <label class="picker">
         <span class="visually-hidden">Trace file</span>
         <select id="trace-select" disabled></select>
@@ -36,6 +37,58 @@
         <code>run1</code>.
       </p>
     </div>
+
+    <main id="summary-view" class="summary-view" hidden>
+      <section class="panel" aria-labelledby="summary-title">
+        <header class="panel-head">
+          <div>
+            <h2 id="summary-title">Summary of every launch</h2>
+            <p id="summary-subtitle" class="subtitle"></p>
+          </div>
+          <div class="segmented small" role="radiogroup" aria-label="Memory to rank">
+            <label><input type="radio" name="summary-unit" value="wavefronts" checked /><span>Shared memory</span></label>
+            <label><input type="radio" name="summary-unit" value="sectors" /><span>Global memory</span></label>
+          </div>
+        </header>
+        <div class="panel-body">
+          <div id="summary-progress" class="summary-progress" hidden>
+            <p id="summary-progress-text" class="note"></p>
+            <progress id="summary-progress-bar" max="1" value="0"></progress>
+          </div>
+          <div id="summary-content" hidden>
+            <dl id="summary-stats" class="stats summary-stats"></dl>
+            <ul id="summary-notes" class="summary-notes"></ul>
+            <h3 id="summary-lines-title">Lines with the most extra passes</h3>
+            <p class="note">Each line adds up its accesses over every launch of its kernel. Select a line to open its worst launch.</p>
+            <table class="ranking" aria-labelledby="summary-lines-title">
+              <thead>
+                <tr>
+                  <th scope="col" class="num extra-col" data-term="excess">Extra</th>
+                  <th scope="col" class="num share-col" data-term="share">Of the kernel</th>
+                  <th scope="col">Line</th>
+                  <th scope="col">Kernel</th>
+                  <th scope="col" class="num launches-col">Launches</th>
+                </tr>
+              </thead>
+              <tbody id="summary-lines"></tbody>
+            </table>
+            <p id="summary-lines-note" class="note"></p>
+            <h3 id="summary-kernels-title">Kernels</h3>
+            <table class="ranking" aria-labelledby="summary-kernels-title">
+              <thead>
+                <tr>
+                  <th scope="col" class="num extra-col" data-term="excess">Extra</th>
+                  <th scope="col" class="num share-col" data-term="share">Of the kernel</th>
+                  <th scope="col">Kernel</th>
+                  <th scope="col" class="num launches-col">Launches</th>
+                </tr>
+              </thead>
+              <tbody id="summary-kernels"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
 
     <main id="layout" class="layout" hidden>
       <div class="sidebar">

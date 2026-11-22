@@ -40,7 +40,7 @@ test("offset labels count bytes from the first line in hexadecimal", () => {
 });
 
 const SHARED_LOAD = { kind: "load", unit: "wavefronts", width: 4, line: 10, achieved: 4096, ideal: 128, excessive: 3968 };
-const TOTALS = { wavefronts: { excessive: 3968 }, sectors: { excessive: 0 } };
+const TOTALS = { wavefronts: { achieved: 4096, excessive: 3968 }, sectors: { achieved: 0, excessive: 0 } };
 
 function sharedAccess(degrees, achieved, ideal) {
   return { phases: [{ degrees }], achieved, ideal, excessive: achieved - ideal };
@@ -54,9 +54,30 @@ test("a bank conflict names its threads, its cost, and its part of the kernel", 
   assert.match(verdict.cause, /up to 32 threads hit different words in the same bank/);
   assert.equal(
     verdict.cost,
-    "Over the whole run, this load takes 4,096 passes where 128 would do. This line causes all the extra passes of the kernel.",
+    "Over the whole run, this load takes 4,096 passes where 128 would do. This line causes all the extra passes of the kernel. " +
+      "Removing them would cut the shared-memory passes of the kernel by 96.9%.",
   );
   assert.equal(verdict.advice, "");
+});
+
+test("conflicts that follow the input values name their cause and the spread of their warps", () => {
+  const record = { ...SHARED_LOAD, kind: "atomic", data_dependent: true, excess_range: [1, 5] };
+  const verdict = format.diagnosis(record, sharedAccess([3, 1], 3, 1), TOTALS);
+  assert.match(verdict.cause, /hit follow the values it reads, such as the bins of a histogram\./);
+  assert.match(verdict.cause, /Its warps take from 1 to 5 extra passes each\.$/);
+  assert.match(format.DATA_DEPENDENT, /^No layout of the buffer removes these conflicts\./);
+});
+
+test("a kernel whose total is unknown leaves out the cut of a fix", () => {
+  const verdict = format.diagnosis(SHARED_LOAD, sharedAccess([32], 32, 1), { wavefronts: { excessive: 3968 } });
+  assert.doesNotMatch(verdict.cost, /Removing them/);
+});
+
+test("percentages keep one decimal and mark a sliver and a missing whole", () => {
+  assert.equal(format.percent(3968, 4096), "96.9%");
+  assert.equal(format.percent(0, 4096), "0.0%");
+  assert.equal(format.percent(1, 100000), "<0.1%");
+  assert.equal(format.percent(5, 0), "–");
 });
 
 test("a warp without a conflict points to the other warps of the instruction", () => {

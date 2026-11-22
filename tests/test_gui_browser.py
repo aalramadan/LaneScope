@@ -85,7 +85,7 @@ def test_a_clean_global_load_says_that_it_wastes_no_sector(page):
 
 
 def test_column_headers_and_counts_explain_their_terms_on_hover(page):
-    excess = page.locator('th[data-term="excess"]').get_attribute("title")
+    excess = page.locator('table.instructions th[data-term="excess"]').get_attribute("title")
     assert excess.startswith("Passes or sectors above the fewest")
     whole_run = page.locator("#access-stats div").first.get_attribute("title")
     assert whole_run.startswith("A wavefront is one pass of shared memory.")
@@ -454,4 +454,174 @@ def test_a_ranked_padding_names_the_global_sectors_it_adds_to_a_copy(browser, tm
         expect(fixes.first).not_to_contain_text("sectors")
         padding = fixes.filter(has_text="pad each 128-byte row by 16 bytes")
         expect(padding).to_contain_text("adds 1,024 B, 256 more excess sectors")
+        context.close()
+
+
+@pytest.fixture(scope="module")
+def summary_url(tmp_path_factory, serve):
+    """Return the address of a page over one recording of four launches."""
+    folder = tmp_path_factory.mktemp("summary")
+    run = folder / "run1"
+    run.mkdir()
+    demos.transpose_trace().save(run / "trace-0.npz")
+    demos.transpose_trace(tiles_per_side=1).save(run / "trace-1.npz")
+    demos.histogram_trace().save(run / "trace-2.npz")
+    demos.column_sums_trace().save(run / "trace-3.npz")
+    with serve([folder]) as server:
+        yield f"http://localhost:{server.server_address[1]}/"
+
+
+@pytest.fixture
+def summary_page(browser, summary_url):
+    """Return the page on the summary, and fail the test on any error of its scripts."""
+    context = browser.new_context(viewport={"width": 1600, "height": 1000})
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.goto(summary_url)
+    page.wait_for_selector("#summary-lines tr")
+    yield page
+    context.close()
+    assert errors == []
+
+
+def test_a_page_of_many_launches_opens_on_their_summary_worst_line_first(summary_page):
+    expect(summary_page.locator("#summary-view")).to_be_visible()
+    expect(summary_page.locator("#layout")).to_be_hidden()
+    expect(summary_page.locator("#summary-subtitle")).to_have_text(
+        re.compile(r"/run1: 4 launches of 3 kernels$")
+    )
+    first = summary_page.locator("#summary-lines tr").first
+    expect(first).to_contain_text("Line 10")
+    expect(first).to_contain_text("shared load, 4 B")
+    expect(first).to_contain_text("transpose")
+    expect(first.locator("td").nth(4)).to_have_text("2")
+    assert summary_page.locator("#trace-select").input_value() == ""
+
+
+def test_a_line_of_the_summary_opens_its_worst_launch_and_back_returns(summary_page):
+    summary_page.locator("#summary-lines tr").first.click()
+    summary_page.wait_for_selector("figure.grid svg")
+    expect(summary_page.locator("#summary-view")).to_be_hidden()
+    selected = summary_page.locator('#instruction-rows tr[aria-selected="true"]')
+    expect(selected).to_have_attribute("data-key", "0x120/shared")
+    assert summary_page.locator("#trace-select").input_value() == "0/run1/trace-0.npz"
+    summary_page.go_back()
+    expect(summary_page.locator("#summary-view")).to_be_visible()
+    expect(summary_page.locator("#layout")).to_be_hidden()
+
+
+def test_the_summary_button_returns_from_a_launch_to_the_summary(summary_page):
+    summary_page.locator("#summary-lines tr").first.press("Enter")
+    summary_page.wait_for_selector("figure.grid svg")
+    button = summary_page.locator("#summary-button")
+    expect(button).to_have_attribute("aria-pressed", "false")
+    button.click()
+    expect(summary_page.locator("#summary-view")).to_be_visible()
+    expect(button).to_have_attribute("aria-pressed", "true")
+    assert summary_page.evaluate("location.hash") == ""
+
+
+def test_the_summary_ranks_global_memory_on_request(summary_page):
+    summary_page.locator('input[name="summary-unit"][value="sectors"]').check(force=True)
+    expect(summary_page.locator("#summary-lines-title")).to_have_text(
+        "Lines with the most extra sectors"
+    )
+    expect(summary_page.locator("#summary-lines tr").first).to_contain_text("column_sums")
+
+
+def test_a_line_that_follows_the_input_values_says_so_and_offers_no_fix(summary_page):
+    row = summary_page.locator("#summary-lines tr", has_text="follows the input")
+    expect(row).to_contain_text("histogram")
+    row.click()
+    summary_page.wait_for_selector("figure.grid svg")
+    card = summary_page.locator("#diagnosis")
+    expect(card).to_contain_text("follow the values it reads, such as the bins of a histogram")
+    expect(card.locator(".fix-line")).to_contain_text(
+        "No layout of the buffer removes these conflicts."
+    )
+    expect(card.locator(".primary-button")).to_have_count(0)
+
+
+def test_each_excess_names_its_part_of_all_the_passes_of_the_kernel(page):
+    selected = page.locator('#instruction-rows tr[aria-selected="true"] td').nth(3)
+    expect(selected).to_contain_text("% of all")
+    expect(page.locator("#diagnosis")).to_contain_text(
+        "Removing them would cut the shared-memory passes of the kernel by"
+    )
+
+
+def test_a_page_of_one_launch_opens_on_it_without_a_summary_button(browser, tmp_path, serve):
+    demos.transpose_trace().save(tmp_path / "only.npz")
+    with serve([tmp_path]) as server:
+        context = browser.new_context()
+        page = context.new_page()
+        page.goto(f"http://localhost:{server.server_address[1]}/")
+        page.wait_for_selector("figure.grid svg")
+        expect(page.locator("#summary-button")).to_be_hidden()
+        expect(page.locator("#summary-view")).to_be_hidden()
+        context.close()
+
+
+def test_the_summary_shows_its_progress_while_the_server_reads_the_launches(
+    browser, tmp_path, serve, monkeypatch, slow
+):
+    for index in range(3):
+        demos.transpose_trace(tiles_per_side=1).save(tmp_path / f"trace-{index}.npz")
+    monkeypatch.setattr(gui.summary, "read_facts", slow(gui.summary.read_facts, 0.4))
+    with serve([tmp_path]) as server:
+        context = browser.new_context()
+        page = context.new_page()
+        page.goto(f"http://localhost:{server.server_address[1]}/")
+        expect(page.locator("#summary-progress-text")).to_contain_text("of 3 launches done")
+        page.wait_for_selector("#summary-lines tr", timeout=20000)
+        expect(page.locator("#summary-progress")).to_be_hidden()
+        context.close()
+
+
+def test_a_summary_of_wasted_sectors_alone_opens_on_global_memory(browser, tmp_path, serve):
+    demos.column_sums_trace().save(tmp_path / "trace-0.npz")
+    demos.column_sums_trace(blocks=1).save(tmp_path / "trace-1.npz")
+    with serve([tmp_path]) as server:
+        context = browser.new_context()
+        page = context.new_page()
+        page.goto(f"http://localhost:{server.server_address[1]}/")
+        page.wait_for_selector("#summary-lines tr")
+        expect(page.locator('input[name="summary-unit"][value="sectors"]')).to_be_checked()
+        expect(page.locator("#summary-lines tr").first).to_contain_text("column_sums")
+        context.close()
+
+
+def test_back_from_a_launch_picked_on_the_summary_returns_to_the_summary(summary_page):
+    summary_page.select_option("#trace-select", "0/run1/trace-2.npz")
+    summary_page.wait_for_selector("figure.grid svg")
+    expect(summary_page.locator("#summary-view")).to_be_hidden()
+    summary_page.go_back()
+    expect(summary_page.locator("#summary-view")).to_be_visible()
+
+
+def test_back_from_the_summary_button_returns_to_the_launch(summary_page):
+    summary_page.locator("#summary-lines tr").first.click()
+    summary_page.wait_for_selector("figure.grid svg")
+    summary_page.locator("#summary-button").click()
+    expect(summary_page.locator("#summary-view")).to_be_visible()
+    summary_page.go_back()
+    expect(summary_page.locator("#layout")).to_be_visible()
+    selected = summary_page.locator('#instruction-rows tr[aria-selected="true"]')
+    expect(selected).to_have_attribute("data-key", "0x120/shared")
+
+
+def test_a_launch_that_fails_to_open_leaves_the_picker_on_the_summary(browser, tmp_path, serve):
+    for index in range(2):
+        demos.transpose_trace(tiles_per_side=1).save(tmp_path / f"trace-{index}.npz")
+    with serve([tmp_path]) as server:
+        context = browser.new_context()
+        page = context.new_page()
+        page.goto(f"http://localhost:{server.server_address[1]}/")
+        page.wait_for_selector("#summary-lines tr")
+        (tmp_path / "trace-1.npz").unlink()
+        page.select_option("#trace-select", "0/trace-1.npz")
+        expect(page.locator("#banner")).to_be_visible()
+        expect(page.locator("#summary-view")).to_be_visible()
+        assert page.locator("#trace-select").input_value() == ""
         context.close()

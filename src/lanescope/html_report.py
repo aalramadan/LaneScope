@@ -164,7 +164,10 @@ def _section(trace: Trace, counter: InstructionCounters) -> str:
 def _suggestions(trace: Trace, pc: int, limit: int = 3) -> str:
     data = analysis.suggest(trace, pc=pc, limit=limit)
     if not data["changes"]:
-        return "<p>No padding or swizzle lowers the excess wavefronts of this buffer.</p>"
+        none = "<p>No padding or swizzle lowers the excess wavefronts of this buffer.</p>"
+        if data["data_dependent"]:
+            none += f"<p>{html.escape(text_view.DATA_DEPENDENT)}</p>"
+        return none
     # The global sectors of the copies into the buffer get a column only when a change
     # moves them.
     sectors = any(
@@ -186,9 +189,12 @@ def _suggestions(trace: Trace, pc: int, limit: int = 3) -> str:
     )
     buffer = data["buffer"]
     sector_header = '<th class="num">Excess sectors</th>' if sectors else ""
+    caution = (
+        f"<p>{html.escape(text_view.DATA_DEPENDENT_FIX)}</p>" if data["data_dependent"] else ""
+    )
     return (
         f"<p>Predicted changes for the buffer at {buffer['start']:#x} of {buffer['size']} bytes, "
-        "from the recorded addresses of its accesses.</p>"
+        f"from the recorded addresses of its accesses.</p>{caution}"
         '<div class="scroll"><table><tr><th>Change</th><th class="num">Excess before</th>'
         f'<th class="num">Excess after</th>{sector_header}<th class="num">Extra bytes</th></tr>'
         f"{rows}</table></div>"

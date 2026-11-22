@@ -5,6 +5,23 @@ from lanescope.trace import Space, Trace
 
 WORD_SYMBOLS = string.ascii_uppercase + string.ascii_lowercase + string.digits
 EMPTY = "."
+# What the tools say about conflicts that follow the values a kernel reads.
+DATA_DEPENDENT = (
+    "The conflicts of this instruction follow the values that the kernel reads, such as the "
+    "bins of a histogram. No layout of the buffer removes them. They fall only when each "
+    "lane, or each group of lanes, updates a copy of the buffer of its own in other banks, "
+    "at the cost of more shared memory and a merge of the copies."
+)
+DATA_DEPENDENT_FIX = (
+    "These conflicts follow the values that the kernel reads, therefore a fix ranked on "
+    "this recording may help less on other inputs."
+)
+
+
+def printable(value: object) -> str:
+    """Return text with each control character replaced by a question mark."""
+    # Trace files are untrusted, and control characters would reach the terminal.
+    return "".join(char if char.isprintable() else "?" for char in str(value))
 
 
 def describe_row(trace: Trace, row: int) -> str:

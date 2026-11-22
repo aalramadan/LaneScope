@@ -13,7 +13,8 @@ class BrowserApi:
         root.mkdir(parents=True, exist_ok=True)
         for name, trace in demos.gallery_traces().items():
             trace.save(root / name)
-        self.library = Library([root])
+        # Pyodide runs no threads, therefore the summary reads every trace during its call.
+        self.library = Library([root], background=False)
 
     def request(self, method: str, path: str, payload: str) -> str:
         """Return the status and the answer of one request of the page, as JSON text.

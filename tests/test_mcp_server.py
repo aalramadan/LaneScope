@@ -34,11 +34,30 @@ def call(name, arguments):
     return asyncio.run(run())
 
 
-def test_server_lists_the_four_tools(tmp_path):
+def test_server_lists_the_five_tools(tmp_path):
     path = tmp_path / "t.npz"
     demos.transpose_trace().save(path)
     names, _ = call("explain", {"trace_path": str(path)})
-    assert sorted(names) == ["explain", "lanes", "suggest", "whatif"]
+    assert sorted(names) == ["explain", "lanes", "suggest", "summary", "whatif"]
+
+
+def test_summary_tool_ranks_the_lines_of_a_recording_and_names_their_trace(tmp_path):
+    demos.transpose_trace().save(tmp_path / "trace-0.npz")
+    demos.row_sums_trace().save(tmp_path / "trace-1.npz")
+    _, result = call("summary", {"recording_path": str(tmp_path), "limit": 1})
+    content = result.content[0]
+    assert TextContent is not None and isinstance(content, TextContent)
+    data = json.loads(content.text)
+    assert data["traces"] == 2
+    shared = [line for line in data["lines"] if line["unit"] == "wavefronts"]
+    assert len(shared) == 1
+    assert shared[0]["worst"]["id"] == str(tmp_path / "trace-0.npz")
+    assert shared[0]["excessive"] == 3968
+
+
+def test_summary_tool_names_a_missing_folder():
+    with pytest.raises(ValueError, match="no such file or folder"):
+        mcp_server.summary("/no/such/recording")
 
 
 def test_explain_tool_returns_the_counters(tmp_path):
@@ -154,5 +173,6 @@ def test_lanescope_mcp_serves_the_tools_over_standard_input_and_output():
         "explain",
         "lanes",
         "suggest",
+        "summary",
         "whatif",
     ]

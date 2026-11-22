@@ -274,6 +274,8 @@ def test_record_imports_each_launch_of_a_program_that_succeeds(tmp_path, monkeyp
     assert capsys.readouterr().out.splitlines() == [
         f"wrote {tmp_path / 'trace-0.npz'}",
         f"wrote {tmp_path / 'trace-1.npz'}",
+        f"Next, lanescope summary {tmp_path} ranks the conflicts of all 2 launches, "
+        f"and lanescope gui {tmp_path} opens them in the browser.",
     ]
 
 
@@ -337,9 +339,10 @@ def test_suggest_with_limit_zero_lists_no_change_without_a_false_note(trace_path
 def test_gui_demo_serves_the_demo_traces_and_the_llama_cpp_recordings(monkeypatch):
     served = {}
 
-    def fake_serve(paths, host, port, allowed_hosts, open_browser):
+    def fake_serve(paths, host, port, allowed_hosts, open_browser, processes):
         served["files"] = sorted(path.name for path in paths[0].iterdir())
         served["address"] = (host, port, allowed_hosts, open_browser)
+        served["processes"] = processes
 
     monkeypatch.setattr(gui, "serve", fake_serve)
     assert main(["gui", "--demo", "--host", "0.0.0.0", "--allow-host", "box"]) == 0
@@ -348,15 +351,17 @@ def test_gui_demo_serves_the_demo_traces_and_the_llama_cpp_recordings(monkeypatc
         "2_row_sums.npz",
         "3_column_sums.npz",
         "4_matmul_tile.npz",
-        "5_llama_cpp_indexer.npz",
-        "6_llama_cpp_indexer_fixed.npz",
+        "5_histogram.npz",
+        "6_llama_cpp_indexer.npz",
+        "7_llama_cpp_indexer_fixed.npz",
     ]
     assert served["address"] == ("0.0.0.0", gui.DEFAULT_PORT, ["box"], False)
+    assert served["processes"] is True
 
 
 def test_gui_serves_this_folder_by_default(monkeypatch, tmp_path):
     served = []
-    monkeypatch.setattr(gui, "serve", lambda paths, *rest: served.extend(paths))
+    monkeypatch.setattr(gui, "serve", lambda paths, *rest, **options: served.extend(paths))
     monkeypatch.chdir(tmp_path)
     assert main(["gui"]) == 0
     assert served == [tmp_path]
@@ -399,8 +404,9 @@ def test_gui_demo_stopped_by_a_signal_removes_its_demo_folder(stop):
                 "2_row_sums.npz",
                 "3_column_sums.npz",
                 "4_matmul_tile.npz",
-                "5_llama_cpp_indexer.npz",
-                "6_llama_cpp_indexer_fixed.npz",
+                "5_histogram.npz",
+                "6_llama_cpp_indexer.npz",
+                "7_llama_cpp_indexer_fixed.npz",
             ]
             process.send_signal(stop)
             assert process.wait(timeout=10) == 0
@@ -513,3 +519,146 @@ def test_the_command_line_starts_without_the_mcp_sdk():
         [sys.executable, "-c", code], env=environment, capture_output=True, text=True, check=True
     )
     assert result.stdout.strip() == "[]"
+
+
+@pytest.fixture
+def recording(tmp_path):
+    """Return a recording folder with two launches of the transpose and one of the histogram."""
+    folder = tmp_path / "run1"
+    folder.mkdir()
+    demos.transpose_trace().save(folder / "trace-0.npz")
+    demos.transpose_trace(tiles_per_side=1).save(folder / "trace-1.npz")
+    demos.histogram_trace().save(folder / "trace-2.npz")
+    return folder
+
+
+def test_summary_ranks_the_kernels_and_lines_of_a_recording(recording, capsys):
+    assert main(["summary", str(recording)]) == 0
+    out = capsys.readouterr().out
+    assert f"{recording}: 3 launches of 2 kernels" in out
+    kernels = out.split("Kernels by extra passes")[1].split("Lines by extra passes")[0]
+    assert kernels.index("transpose") < kernels.index("histogram")
+    assert "line 10 load" in out
+    assert "line 6 atomic *" in out
+    assert f"lanescope suggest {recording / 'trace-0.npz'} --pc 0x120 ranks its fixes" in out
+
+
+def test_summary_json_gives_the_whole_summary_for_tools(recording, capsys):
+    assert main(["summary", str(recording), "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["traces"] == 3
+    assert {kernel["name"]: kernel["launches"] for kernel in data["kernels"]} == {
+        "transpose": 2,
+        "histogram": 1,
+    }
+
+
+def test_summary_of_global_memory_ranks_extra_sectors(tmp_path, capsys):
+    demos.column_sums_trace().save(tmp_path / "trace-0.npz")
+    assert main(["summary", str(tmp_path), "--global"]) == 0
+    out = capsys.readouterr().out
+    assert "Global memory:" in out
+    assert "Lines by extra sectors" in out
+
+
+def test_summary_limits_the_rows_it_lists(recording, capsys):
+    assert main(["summary", str(recording), "--limit", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "and 1 more kernel" in out
+
+
+@pytest.mark.parametrize(
+    ("make", "reason"),
+    [
+        (lambda path: path / "missing", "no such file or folder"),
+        (lambda path: path, "found no trace files"),
+    ],
+)
+def test_summary_names_a_path_without_traces(tmp_path, capsys, make, reason):
+    assert main(["summary", str(make(tmp_path))]) == 2
+    assert reason in capsys.readouterr().err
+
+
+def test_summary_skips_files_without_a_trace_and_says_so(recording, capsys):
+    (recording / "notes.npz").write_bytes(b"not a trace")
+    assert main(["summary", str(recording)]) == 0
+    assert "skipped 1 file without a trace" in capsys.readouterr().err
+
+
+def test_summary_reads_a_large_recording_in_several_processes(recording, monkeypatch, capsys):
+    assert main(["summary", str(recording), "--json"]) == 0
+    serial = json.loads(capsys.readouterr().out)
+    monkeypatch.setattr(cli_module.summary, "PARALLEL_TRACES", 1)
+    assert main(["summary", str(recording), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == serial
+
+
+def test_explain_gives_each_excess_as_a_part_of_the_kernel_and_marks_input_values(tmp_path, capsys):
+    path = tmp_path / "histogram.npz"
+    demos.histogram_trace().save(path)
+    assert main(["explain", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "of kernel" in out.splitlines()[2]
+    atomic = next(line for line in out.splitlines() if line.startswith("0x0170"))
+    assert atomic.endswith("% *")
+    assert "No layout of the buffer removes them." in out
+
+
+def test_suggest_warns_that_a_fix_for_input_values_may_help_less_on_other_inputs(tmp_path, capsys):
+    path = tmp_path / "histogram.npz"
+    demos.histogram_trace().save(path)
+    assert main(["suggest", str(path)]) == 0
+    assert "may help less on other inputs" in capsys.readouterr().out
+
+
+def test_suggest_explains_input_values_when_no_layout_lowers_them(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "histogram.npz"
+    demos.histogram_trace().save(path)
+    monkeypatch.setattr(cli_module.analysis.ranking, "suggest", lambda trace, buffer: [])
+    assert main(["suggest", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "no padding or swizzle lowers the excess wavefronts of this buffer" in out
+    assert "They fall only when each lane, or each group of lanes" in out
+
+
+def test_record_of_many_launches_counts_its_traces_and_points_to_the_summary(
+    tmp_path, monkeypatch, capsys
+):
+    fake_recorder(monkeypatch, status=0, launches=12)
+    assert run_record(tmp_path) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == f"wrote 12 traces to {tmp_path}"
+    assert out[1].startswith(f"Next, lanescope summary {tmp_path} ranks the conflicts of all 12")
+
+
+def test_record_of_one_launch_points_to_its_instructions(tmp_path, monkeypatch, capsys):
+    fake_recorder(monkeypatch, status=0, launches=1)
+    assert run_record(tmp_path) == 0
+    out = capsys.readouterr().out
+    assert (
+        f"Next, lanescope explain {tmp_path / 'trace-0.npz'} lists its memory instructions" in out
+    )
+
+
+def test_record_with_lost_records_advises_a_larger_capacity(tmp_path, monkeypatch, capsys):
+    fake_recorder(monkeypatch, status=0, launches=2)
+    original = capture.to_trace
+    monkeypatch.setattr(
+        capture, "to_trace", lambda info, records: original(info | {"dropped": 7}, records)
+    )
+    assert run_record(tmp_path, "--capacity", "1000") == 0
+    err = capsys.readouterr().err
+    assert "the record buffer filled up in 2 of 2 launches and left out 14 accesses" in err
+    assert "such as --capacity 2000" in err
+
+
+def test_record_with_a_disassembler_but_no_line_tables_advises_lineinfo(
+    tmp_path, monkeypatch, capsys
+):
+    fake_recorder(monkeypatch, status=0, launches=1)
+    tools = toolchain.Toolchain(*[None] * 9, disassemblers=(pathlib.Path("nvdisasm"),))
+    monkeypatch.setattr(cli_module, "find", lambda: tools)
+    assert run_record(tmp_path) == 0
+    err = capsys.readouterr().err
+    assert "no source lines in 1 of 1 launch, since their kernels were built without" in err
+    assert "nvcc -lineinfo" in err

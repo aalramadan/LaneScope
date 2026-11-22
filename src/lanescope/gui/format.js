@@ -101,6 +101,8 @@ export const TERMS = {
   achieved:
     "Passes of shared memory, or 32-byte sectors of global memory, that the instruction took over the whole run.",
   excess: "Passes or sectors above the fewest that the same accesses could take.",
+  share:
+    "The extra passes or sectors as a part of all the passes or sectors of the kernel over the run. A fix cuts the count of the kernel by this much.",
   wavefronts: "A wavefront is one pass of shared memory. In one pass, each of the 32 banks hands out one 4-byte word.",
   sectors: "A sector is a 32-byte piece of global memory. The GPU always reads whole sectors.",
 };
@@ -118,6 +120,15 @@ export function share(fraction) {
     return "all";
   }
   return fraction < 0.01 ? "less than 1%" : `${Math.round(fraction * 100)}%`;
+}
+
+// A part of a whole with one decimal, such as 96.9%, for the tables of counts.
+export function percent(part, whole) {
+  if (!whole) {
+    return "–";
+  }
+  const value = (100 * part) / whole;
+  return value > 0 && value < 0.1 ? "<0.1%" : `${value.toFixed(1)}%`;
 }
 
 // The verdict on one instruction in plain words. The title names the problem, the cause
@@ -146,21 +157,36 @@ export function diagnosis(record, access, totals) {
   const kernelExcess = totals[record.unit]?.excessive ?? 0;
   const part = share(kernelExcess > 0 ? record.excessive / kernelExcess : 0);
   const where = record.line ? "This line" : "This instruction";
+  const memory = shared ? "shared-memory passes" : "global-memory sectors";
+  const all = totals[record.unit]?.achieved ?? 0;
+  const cut = all ? ` Removing them would cut the ${memory} of the kernel by ${percent(record.excessive, all)}.` : "";
   return {
     tone: "warn",
     title: shared ? "Bank conflicts" : "Wasted sectors",
     badge: record.ideal > 0 ? `${multiple(record.achieved / record.ideal)} the ${noun} it needs` : "",
-    cause: shared ? sharedCause(access, kind) : globalCause(access, kind),
+    cause: shared ? sharedCause(record, access, kind) : globalCause(access, kind),
     cost:
       `Over the whole run, this ${kind} ${verb} ${count(record.achieved)} ${noun} where ${count(record.ideal)} would do. ` +
-      `${where} causes ${part === "all" ? "all the" : `${part} of the`} extra ${noun} of the kernel.`,
+      `${where} causes ${part === "all" ? "all the" : `${part} of the`} extra ${noun} of the kernel.${cut}`,
     advice: shared
       ? ""
       : `Fix by letting neighboring threads touch neighboring addresses. A warp then fills each sector it ${verb}.`,
   };
 }
 
-function sharedCause(access, kind) {
+// What the page says in place of a fix for conflicts that follow the values a kernel reads.
+export const DATA_DEPENDENT =
+  "No layout of the buffer removes these conflicts. They fall only when each lane, or each group of lanes, " +
+  "updates a copy of the buffer of its own in other banks, at the cost of more shared memory and a merge of the copies.";
+
+function sharedCause(record, access, kind) {
+  if (record.data_dependent) {
+    const [fewest, most] = record.excess_range;
+    return (
+      `The banks that the threads of this ${kind} hit follow the values it reads, such as the bins of a histogram. ` +
+      `Its warps take from ${count(fewest)} to ${extraPasses(most)} each.`
+    );
+  }
   if (access.excessive === 0) {
     return `The warp shown has no conflict, but other warps of this ${kind} do. The access patterns list them worst first.`;
   }
@@ -172,6 +198,10 @@ function sharedCause(access, kind) {
     `In the warp shown, up to ${words} threads hit different words in the same bank. ` +
     "A bank hands out one word per pass, therefore these threads take turns."
   );
+}
+
+function extraPasses(value) {
+  return `${count(value)} extra ${value === 1 ? "pass" : "passes"}`;
 }
 
 function globalCause(access, kind) {

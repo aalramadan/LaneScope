@@ -1,6 +1,8 @@
 import importlib.resources
 from collections.abc import Callable
 
+import numpy as np
+
 from lanescope.trace import WARP_SIZE, Access, Kind, Space, Trace
 
 TILE = 32
@@ -301,6 +303,124 @@ def matmul_tile_trace(blocks: int = 2) -> Trace:
     )
 
 
+HISTOGRAM_SOURCE = (
+    "__global__ void histogram(const unsigned *values, unsigned *counts, int n) {",
+    "  __shared__ unsigned bins[1024];",
+    "  for (int b = threadIdx.x; b < 1024; b += blockDim.x) bins[b] = 0;",
+    "  __syncthreads();",
+    "  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += gridDim.x * blockDim.x)",
+    "    atomicAdd(&bins[values[i] % 1024], 1u);",
+    "  __syncthreads();",
+    "  for (int b = threadIdx.x; b < 1024; b += blockDim.x) atomicAdd(&counts[b], bins[b]);",
+    "}",
+)
+PC_CLEAR_BINS = 0x090
+PC_LOAD_VALUE = 0x150
+PC_ADD_BIN = 0x170
+PC_READ_BINS = 0x220
+PC_ADD_COUNTS = 0x240
+HISTOGRAM_LINES = {
+    PC_CLEAR_BINS: 3,
+    PC_LOAD_VALUE: 6,
+    PC_ADD_BIN: 6,
+    PC_READ_BINS: 8,
+    PC_ADD_COUNTS: 8,
+}
+HISTOGRAM_OPCODES = {PC_ADD_BIN: "ATOMS.POPC.INC.32"}
+HISTOGRAM_BINS = 1024
+HISTOGRAM_WARPS = 4
+HISTOGRAM_STEPS = 8
+# A fixed seed keeps the random values, and with them the conflicts, the same on each run.
+HISTOGRAM_SEED = 2026
+
+
+def histogram_trace(blocks: int = 2) -> Trace:
+    """Return the trace of a histogram whose shared bins follow the values that it reads.
+
+    Each warp adds its values to bins that the values pick, therefore its conflicts
+    change from warp to warp and no layout of the bins removes them.
+    """
+    threads = HISTOGRAM_WARPS * WARP_SIZE
+    count = blocks * threads * HISTOGRAM_STEPS
+    values = np.random.default_rng(HISTOGRAM_SEED).integers(0, 1 << 20, count).tolist()
+    accesses = []
+    for block in range(blocks):
+        for warp in range(HISTOGRAM_WARPS):
+
+            def thread(lane: int, warp: int = warp) -> int:
+                return WARP_SIZE * warp + lane
+
+            for step in range(HISTOGRAM_BINS // threads):
+                accesses.append(
+                    warp_access(
+                        PC_CLEAR_BINS,
+                        Space.SHARED,
+                        Kind.STORE,
+                        FLOAT_BYTES,
+                        lambda lane, step=step: FLOAT_BYTES * (thread(lane) + threads * step),
+                        block,
+                        warp,
+                    )
+                )
+            for step in range(HISTOGRAM_STEPS):
+
+                def index(lane: int, block: int = block, step: int = step) -> int:
+                    return block * threads + thread(lane) + step * blocks * threads
+
+                accesses.append(
+                    warp_access(
+                        PC_LOAD_VALUE,
+                        Space.GLOBAL,
+                        Kind.LOAD,
+                        FLOAT_BYTES,
+                        lambda lane, index=index: INPUT_BASE + FLOAT_BYTES * index(lane),
+                        block,
+                        warp,
+                    )
+                )
+                accesses.append(
+                    warp_access(
+                        PC_ADD_BIN,
+                        Space.SHARED,
+                        Kind.ATOMIC,
+                        FLOAT_BYTES,
+                        lambda lane, index=index: (
+                            FLOAT_BYTES * (values[index(lane)] % HISTOGRAM_BINS)
+                        ),
+                        block,
+                        warp,
+                    )
+                )
+            for step in range(HISTOGRAM_BINS // threads):
+
+                def bin_of(lane: int, step: int = step) -> int:
+                    return thread(lane) + threads * step
+
+                accesses.append(
+                    warp_access(
+                        PC_READ_BINS,
+                        Space.SHARED,
+                        Kind.LOAD,
+                        FLOAT_BYTES,
+                        lambda lane, bin_of=bin_of: FLOAT_BYTES * bin_of(lane),
+                        block,
+                        warp,
+                    )
+                )
+                accesses.append(
+                    warp_access(
+                        PC_ADD_COUNTS,
+                        Space.GLOBAL,
+                        Kind.ATOMIC,
+                        FLOAT_BYTES,
+                        lambda lane, bin_of=bin_of: OUTPUT_BASE + FLOAT_BYTES * bin_of(lane),
+                        block,
+                        warp,
+                    )
+                )
+    return _with_source(accesses, "histogram", HISTOGRAM_SOURCE, HISTOGRAM_LINES, HISTOGRAM_OPCODES)
+
+
 def demo_traces() -> dict[str, Trace]:
     """Return every demo trace by the file name it takes.
 
@@ -312,6 +432,7 @@ def demo_traces() -> dict[str, Trace]:
         "2_row_sums.npz": row_sums_trace(),
         "3_column_sums.npz": column_sums_trace(),
         "4_matmul_tile.npz": matmul_tile_trace(),
+        "5_histogram.npz": histogram_trace(),
     }
 
 
@@ -319,8 +440,8 @@ def demo_traces() -> dict[str, Trace]:
 # 4b77dee0524c64b8471869232e2958bd9589607d, recorded on an RTX 5070 before and after the fix
 # of examples/llama.cpp.
 RECORDINGS = {
-    "5_llama_cpp_indexer.npz": "llama_cpp_indexer.npz",
-    "6_llama_cpp_indexer_fixed.npz": "llama_cpp_indexer_fixed.npz",
+    "6_llama_cpp_indexer.npz": "llama_cpp_indexer.npz",
+    "7_llama_cpp_indexer_fixed.npz": "llama_cpp_indexer_fixed.npz",
 }
 
 

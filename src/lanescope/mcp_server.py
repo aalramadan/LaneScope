@@ -1,8 +1,10 @@
 import functools
+import pathlib
 from collections.abc import Callable
 
 from lanescope import __version__, analysis
 from lanescope.fixes.layouts import Buffer, Change, Padding, XorSwizzle
+from lanescope.summary import MAX_TRACES, UNITS, read_many, run_of, summarize, trace_files
 from lanescope.trace import Trace
 
 try:
@@ -70,7 +72,30 @@ def suggest(
     return analysis.suggest(Trace.load(trace_path), buffer, int(pc, 0) if pc else None, limit)
 
 
-TOOLS = (explain, lanes, whatif, suggest)
+def summary(recording_path: str, limit: int = 20) -> dict:
+    """Rank the kernels and source lines of a recording by their extra wavefronts and sectors.
+
+    Give the folder of a recording or a trace file. The answer keeps the worst lines of
+    each unit up to the limit. Each line names the trace and the PC that the other tools
+    take, and says whether its conflicts follow the input values, which no layout removes.
+    """
+    root = pathlib.Path(recording_path)
+    if not root.exists():
+        raise ValueError(f"no such file or folder: {recording_path}")
+    paths = trace_files(root, MAX_TRACES)
+    if not paths:
+        raise ValueError(f"found no trace files in {recording_path}")
+    found = read_many(paths)
+    data = summarize(
+        (str(path), str(run_of(path)), facts) for path, facts in zip(paths, found, strict=True)
+    )
+    kept = [
+        line for unit in UNITS for line in [x for x in data["lines"] if x["unit"] == unit][:limit]
+    ]
+    return data | {"lines": kept}
+
+
+TOOLS = (explain, lanes, whatif, suggest, summary)
 
 
 def server():

@@ -27,8 +27,9 @@ def test_browser_api_lists_the_demo_traces_and_the_llama_cpp_recordings(api):
         "2_row_sums.npz",
         "3_column_sums.npz",
         "4_matmul_tile.npz",
-        "5_llama_cpp_indexer.npz",
-        "6_llama_cpp_indexer_fixed.npz",
+        "5_histogram.npz",
+        "6_llama_cpp_indexer.npz",
+        "7_llama_cpp_indexer_fixed.npz",
     ]
 
 
@@ -69,3 +70,15 @@ def test_built_page_runs_the_api_in_the_browser_with_relative_paths(tmp_path):
     assert 'id="pyodide-status"' in page
     assert "/static/" not in page
     assert all((tmp_path / name).is_file() for name in build_site["ASSETS"] + (".nojekyll",))
+
+
+def test_browser_api_sums_the_demo_in_one_call_without_threads(api):
+    answer = ask(api, "GET", "/api/summary", {})
+    assert answer["status"] == 200
+    data = answer["data"]
+    assert data["state"] == "done"
+    assert data["traces"] == 7
+    runs = {line["run"] for line in data["lines"]}
+    assert "demo/5_histogram.npz" in runs
+    histogram = next(line for line in data["lines"] if line["run"] == "demo/5_histogram.npz")
+    assert histogram["data_dependent"] is True

@@ -1,0 +1,199 @@
+import * as format from "./format.js";
+import { cell, detail, meter, stat } from "./dom.js";
+
+const $ = (id) => document.getElementById(id);
+
+// The rows that the table of lines shows, worst first. The summary keeps more.
+export const SHOWN_LINES = 50;
+
+const UNITS = {
+  wavefronts: { noun: "passes", memory: "Shared-memory passes" },
+  sectors: { noun: "sectors", memory: "Global-memory sectors" },
+};
+
+const DATA_DEPENDENT_TITLE =
+  "The banks of this line follow the values that the kernel reads, such as the bins of a histogram. " +
+  "No padding or swizzle removes these conflicts.";
+
+export function renderProgress(answer) {
+  $("summary-content").hidden = true;
+  $("summary-progress").hidden = false;
+  $("summary-progress-text").textContent =
+    `Adding up the accesses of each launch, ${format.count(answer.done)} of ${launches(answer.total)} done.`;
+  const bar = $("summary-progress-bar");
+  bar.max = Math.max(answer.total, 1);
+  bar.value = answer.done;
+}
+
+// Fill the view with a summary in one unit. Choosing a line or a kernel calls `open` with
+// the place of its worst access: the id of the trace, the PC, and the space.
+export function renderSummary(data, unit, open) {
+  $("summary-progress").hidden = true;
+  $("summary-content").hidden = false;
+  const { noun, memory } = UNITS[unit];
+  const runs = data.runs;
+  const where = runs.length === 1 ? runs[0] : `${format.count(runs.length)} runs`;
+  $("summary-subtitle").textContent =
+    `${where}: ${launches(data.traces)} of ${format.plural(data.kernels.length, "kernel")}`;
+  const total = data.totals[unit];
+  $("summary-stats").replaceChildren(
+    stat(`${memory}, whole run`, `${format.count(total.achieved)} / ${format.count(total.ideal)}`,
+      "The second number is the fewest that the same accesses could take."),
+    stat(`Extra ${noun}`, `${format.count(total.excessive)} (${format.percent(total.excessive, total.achieved)})`),
+    stat("Launches", format.count(data.traces)),
+    stat("Kernels", format.count(data.kernels.length)),
+  );
+  renderNotes(data);
+  renderLines(data, unit, open);
+  renderKernels(data, unit, open);
+}
+
+function renderNotes(data) {
+  const notes = [];
+  if (data.without_lines) {
+    notes.push(
+      `No source lines in ${format.count(data.without_lines)} of ${launches(data.traces)}. ` +
+        "Build the program with -lineinfo, such as nvcc -lineinfo, to see the line of each instruction.",
+    );
+  }
+  if (data.dropped.traces) {
+    notes.push(
+      `The record buffer filled up in ${format.count(data.dropped.traces)} of ${launches(data.traces)} and left out ` +
+        `${format.count(data.dropped.records)} accesses, therefore their counts are low. Record again with a larger ` +
+        "--capacity or with fewer CTAs, such as --ctas 0:8.",
+    );
+  }
+  if (data.unreadable) {
+    notes.push(`The page skipped ${format.plural(data.unreadable, "file")} without a trace.`);
+  }
+  if (data.truncated) {
+    notes.push(`The summary adds up only the first ${format.count(data.traces + data.unreadable)} trace files.`);
+  }
+  $("summary-notes").replaceChildren(
+    ...notes.map((text) => {
+      const item = document.createElement("li");
+      item.textContent = text;
+      return item;
+    }),
+  );
+}
+
+function renderLines(data, unit, open) {
+  const { noun } = UNITS[unit];
+  const lines = data.lines.filter((line) => line.unit === unit);
+  const shown = lines.slice(0, SHOWN_LINES);
+  $("summary-lines-title").textContent = `Lines with the most extra ${noun}`;
+  const peak = Math.max(1, ...shown.map((line) => line.excessive));
+  $("summary-lines").replaceChildren(
+    ...shown.map((line) => {
+      const row = openingRow(line.worst, open);
+      row.append(
+        extraCell(line, peak),
+        cell(format.percent(line.excessive, line.kernel_achieved), "num"),
+        lineCell(line),
+        kernelCell(line, data.runs.length > 1),
+        cell(format.count(line.launches), "num"),
+      );
+      return row;
+    }),
+  );
+  $("summary-lines-note").textContent =
+    lines.length === 0
+      ? `No line takes extra ${noun}.`
+      : lines.length > shown.length
+        ? `The table shows the ${shown.length} worst of ${format.count(lines.length)} lines.`
+        : "";
+}
+
+function renderKernels(data, unit, open) {
+  const kernels = data.kernels.filter((kernel) => kernel.totals[unit].achieved > 0);
+  kernels.sort((a, b) => b.totals[unit].excessive - a.totals[unit].excessive);
+  const peak = Math.max(1, ...kernels.map((kernel) => kernel.totals[unit].excessive));
+  $("summary-kernels").replaceChildren(
+    ...kernels.map((kernel) => {
+      const counts = kernel.totals[unit];
+      const row = openingRow(kernel.worst[unit], open);
+      const extra = cell(format.count(counts.excessive), "num");
+      extra.append(meter(counts.excessive, peak));
+      row.append(
+        extra,
+        cell(format.percent(counts.excessive, counts.achieved), "num"),
+        kernelCell(kernel, data.runs.length > 1),
+        cell(format.count(kernel.launches), "num"),
+      );
+      return row;
+    }),
+  );
+}
+
+// A row that opens its place on a click or on Enter, or a plain row without a place.
+function openingRow(place, open) {
+  const row = document.createElement("tr");
+  if (!place) {
+    row.className = "clean";
+    return row;
+  }
+  row.tabIndex = 0;
+  row.addEventListener("click", () => open(place));
+  row.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      open(place);
+    }
+  });
+  return row;
+}
+
+function extraCell(line, peak) {
+  const element = cell(format.count(line.excessive), "num");
+  element.append(meter(line.excessive, peak));
+  if (line.ideal > 0) {
+    element.append(detail(`${format.multiple(line.achieved / line.ideal)} the ideal`));
+  }
+  return element;
+}
+
+function lineCell(line) {
+  const element = document.createElement("td");
+  const what = document.createElement("span");
+  what.className = "what";
+  const file = line.file.split("/").pop();
+  what.textContent = line.line === null ? `PC ${line.pc}` : file ? `${file}:${line.line}` : `Line ${line.line}`;
+  const kind = document.createElement("span");
+  kind.className = "kind";
+  kind.textContent = ` ${line.space} ${line.kind}, ${line.width} B`;
+  what.append(kind);
+  if (line.data_dependent) {
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = "follows the input";
+    tag.title = DATA_DEPENDENT_TITLE;
+    what.append(tag);
+  }
+  element.append(what);
+  if (line.source) {
+    const code = detail(line.source, "where mono");
+    code.title = line.source;
+    element.append(code);
+  } else if (line.line === null) {
+    element.append(detail("no source line"));
+  }
+  return element;
+}
+
+function kernelCell(entry, withRun) {
+  const element = document.createElement("td");
+  const name = document.createElement("span");
+  name.className = "what mono";
+  name.textContent = entry.name || "kernel";
+  name.title = entry.full_name || entry.name || "";
+  element.append(name);
+  if (withRun) {
+    element.append(detail(entry.run));
+  }
+  return element;
+}
+
+function launches(value) {
+  return `${format.count(value)} ${value === 1 ? "launch" : "launches"}`;
+}

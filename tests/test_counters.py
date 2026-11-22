@@ -165,7 +165,7 @@ def test_count_keeps_two_copies_apart_when_only_their_global_addresses_differ():
 def test_distinct_rows_stay_exact_when_every_row_hash_collides(monkeypatch):
     trace = random_trace(0)
     expected = counters.distinct_rows(trace)
-    monkeypatch.setattr(counters, "_row_hashes", lambda keys: np.zeros(len(keys), np.uint64))
+    monkeypatch.setattr(counters, "row_hashes", lambda keys: np.zeros(len(keys), np.uint64))
     found = counters.distinct_rows(trace)
     assert all(np.array_equal(a, b) for a, b in zip(found, expected, strict=True))
     assert len(found[0]) > 1

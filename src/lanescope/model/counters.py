@@ -26,6 +26,11 @@ class InstructionCounters:
     excessive: int
     conflicts: int
     worst_row: int
+    # The excess of the access with the fewest and of the one with the most, and the
+    # number of distinct excess counts among all accesses of the instruction.
+    fewest: int = 0
+    most: int = 0
+    levels: int = 1
 
     @property
     def unit(self) -> str:
@@ -46,9 +51,11 @@ def count(trace: Trace) -> list[InstructionCounters]:
     # distinct row once and weighting it by its repeats keeps large traces fast.
     first, repeats = distinct_rows(trace)
     totals: dict[InstructionKey, list[int]] = {}
+    excesses: dict[InstructionKey, set[int]] = {}
     for row, weight in zip(first.tolist(), repeats.tolist(), strict=True):
         achieved, ideal, excessive, conflicts = measure(trace, row)
-        total = totals.setdefault(instruction_key(trace, row), [0, 0, 0, 0, 0, row, excessive])
+        key = instruction_key(trace, row)
+        total = totals.setdefault(key, [0, 0, 0, 0, 0, row, excessive])
         total[0] += weight
         total[1] += weight * achieved
         total[2] += weight * ideal
@@ -57,6 +64,7 @@ def count(trace: Trace) -> list[InstructionCounters]:
         # The earliest access with the largest excess is the one worth showing lane by lane.
         if excessive > total[6]:
             total[5], total[6] = row, excessive
+        excesses.setdefault(key, set()).add(excessive)
     return [
         InstructionCounters(
             pc=pc,
@@ -69,6 +77,9 @@ def count(trace: Trace) -> list[InstructionCounters]:
             excessive=total[3],
             conflicts=total[4],
             worst_row=total[5],
+            fewest=min(excesses[(pc, space, kind, width)]),
+            most=max(excesses[(pc, space, kind, width)]),
+            levels=len(excesses[(pc, space, kind, width)]),
         )
         for (pc, space, kind, width), total in sorted(totals.items())
     ]
@@ -111,7 +122,7 @@ def distinct_rows(trace: Trace) -> tuple[np.ndarray, np.ndarray]:
     # Sorting one hash per row is far faster than sorting whole rows. Comparing every row
     # with the first row of its hash keeps the result exact.
     _, first, inverse, repeats = np.unique(
-        _row_hashes(keys), return_index=True, return_inverse=True, return_counts=True
+        row_hashes(keys), return_index=True, return_inverse=True, return_counts=True
     )
     if not np.array_equal(keys, keys[first[inverse]]):
         _, first, repeats = np.unique(keys, axis=0, return_index=True, return_counts=True)
@@ -119,7 +130,8 @@ def distinct_rows(trace: Trace) -> tuple[np.ndarray, np.ndarray]:
     return first[order], repeats[order]
 
 
-def _row_hashes(keys: np.ndarray) -> np.ndarray:
+def row_hashes(keys: np.ndarray) -> np.ndarray:
+    """Return one 64-bit hash per row of a matrix of unsigned integers."""
     # Unsigned integers wrap, which makes this a hash modulo 2**64.
     hashes = np.zeros(len(keys), dtype=np.uint64)
     for column in keys.T:

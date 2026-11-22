@@ -1,8 +1,8 @@
 import collections
+import contextlib
 import dataclasses
 import http.server
 import json
-import os
 import pathlib
 import re
 import signal
@@ -17,7 +17,7 @@ from typing import TypeVar
 
 import numpy as np
 
-from lanescope import __version__, analysis
+from lanescope import __version__, analysis, kernel_names, summary
 from lanescope.fixes import codegen
 from lanescope.fixes.layouts import Buffer, apply, infer_buffer, lanes_inside
 from lanescope.fixes.ranking import divisors
@@ -46,7 +46,6 @@ STOP_SIGNALS = tuple(
 )
 MEASURED_QUANTITY = {"wavefronts": "shared_wavefronts", "sectors": "global_sectors"}
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-SKIPPED = frozenset({"__pycache__", "node_modules"})
 Field = TypeVar("Field", str, int, dict)
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
@@ -72,14 +71,37 @@ class Listed:
     folder: str
 
 
-class Library:
-    """The trace files under the given paths, with the most recently used traces in memory."""
+@dataclasses.dataclass(frozen=True)
+class Summed:
+    """One trace file of a summary, with its run and the stamp that its facts belong to."""
 
-    def __init__(self, paths: Sequence[pathlib.Path]) -> None:
+    id: str
+    path: pathlib.Path
+    run: str
+    stamp: tuple[str, int, int]
+
+
+class Library:
+    """The trace files under the given paths, with the most recently used traces in memory.
+
+    The summary of every trace reads each file once. A server reads them in a thread of
+    its own and answers with the progress meanwhile, while a library without threads, as
+    in the browser, reads them during the call. The lanescope command also lets the
+    thread read many files in several processes.
+    """
+
+    def __init__(
+        self, paths: Sequence[pathlib.Path], background: bool = True, processes: bool = False
+    ) -> None:
         self.roots = [path.resolve() for path in paths]
         self._listed: dict[str, Listed] = {}
         self._cache: collections.OrderedDict[tuple, tuple[Trace, dict]] = collections.OrderedDict()
         self._lock = threading.Lock()
+        self._background = background
+        self._processes = processes
+        self._facts: dict[tuple[str, int, int], summary.TraceFacts | None] = {}
+        self._summing: threading.Thread | None = None
+        self._closed = threading.Event()
 
     def listing(self) -> dict:
         """Return every trace file under the roots, at most MAX_LISTED of them."""
@@ -104,6 +126,11 @@ class Library:
                 found[item.id] = (item, facts)
         with self._lock:
             self._listed = {key: item for key, (item, _) in found.items()}
+        kernels = [facts["kernel"] for _, facts in found.values() if facts["kernel"]]
+        names = kernel_names.readable(kernels)
+        for _, facts in found.values():
+            kernel = facts["kernel"]
+            facts["kernel_name"] = kernel_names.short(names[kernel]) if kernel else None
         return {
             "traces": [
                 {"id": item.id, "name": item.name, "folder": item.folder} | facts
@@ -111,6 +138,105 @@ class Library:
             ],
             "truncated": truncated,
         }
+
+    def summary(self) -> dict:
+        """Return the summary of every trace under the roots, or its progress while it runs."""
+        files = self._summed_files()
+        if not self._background:
+            self._sum(files)
+        with self._lock:
+            missing = [file for file in files if file.stamp not in self._facts]
+            if missing:
+                idle = self._summing is None or not self._summing.is_alive()
+                if idle and not self._closed.is_set():
+                    self._summing = threading.Thread(target=self._sum, args=(missing,), daemon=True)
+                    self._summing.start()
+                return {"state": "summing", "done": len(files) - len(missing), "total": len(files)}
+            items = [(file.id, file.run, self._facts[file.stamp]) for file in files]
+            # The facts of files that changed or went leave the memory.
+            current = {file.stamp for file in files}
+            for stamp in [stamp for stamp in self._facts if stamp not in current]:
+                del self._facts[stamp]
+        data = summary.summarize(items)
+        return {"state": "done", "truncated": len(files) == summary.MAX_TRACES} | data
+
+    def close(self, timeout: float = 5.0) -> None:
+        """Stop the summary thread before its next trace and wait for it, as a stopping server does.
+
+        The wait lets a pool of processes shut down and free its semaphores before the
+        program ends, which would otherwise report them as leaked.
+        """
+        self._closed.set()
+        thread = self._summing
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+
+    def _summed_files(self) -> list[Summed]:
+        found: list[Summed] = []
+        bases = [root.parent if root.is_file() else root for root in self.roots]
+        names = [base.name for base in bases]
+        for index, (root, base) in enumerate(zip(self.roots, bases, strict=True)):
+            # Two folders of the same name, such as a/out and b/out, keep apart by their paths.
+            name = str(base) if names.count(base.name) > 1 else base.name
+            for path in summary.trace_files(root, summary.MAX_TRACES - len(found)):
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                run = _run_label(base, name, summary.run_of(path))
+                stamp = (str(path), stat.st_mtime_ns, stat.st_size)
+                found.append(
+                    Summed(f"{index}/{path.relative_to(base).as_posix()}", path, run, stamp)
+                )
+        return found
+
+    def _sum(self, files: Sequence[Summed]) -> None:
+        with self._lock:
+            pending = [file for file in files if file.stamp not in self._facts]
+        if self._background and self._processes:
+            try:
+                paths = [file.path for file in pending]
+                with contextlib.closing(summary.read_many(paths, processes=True)) as found:
+                    for file, facts in zip(pending, found, strict=True):
+                        if self._closed.is_set():
+                            return
+                        with self._lock:
+                            self._facts[file.stamp] = facts
+            except Exception:  # noqa: BLE001 - the files left over are read one by one below
+                traceback.print_exc(file=sys.stderr)
+        for file in pending:
+            if self._closed.is_set():
+                return
+            with self._lock:
+                if file.stamp in self._facts:
+                    continue
+            try:
+                facts = summary.read_facts(file.path)
+            except Exception:  # noqa: BLE001 - one odd file must not stop the summary of the rest
+                traceback.print_exc(file=sys.stderr)
+                facts = None
+            with self._lock:
+                self._facts[file.stamp] = facts
+
+    def _resolve(self, trace_id: str) -> Listed | None:
+        """Return the trace file that an id names under the roots, also beyond the listing."""
+        index, _, relative = trace_id.partition("/")
+        parts = pathlib.PurePosixPath(relative).parts
+        if not index.isdigit() or int(index) >= len(self.roots) or not parts:
+            return None
+        if relative.startswith("/") or any(part.startswith(".") for part in parts):
+            return None
+        root = self.roots[int(index)]
+        base = root.parent if root.is_file() else root
+        path = base.joinpath(*parts)
+        if root.is_file() and path != root:
+            return None
+        # The listing walks no linked folder, therefore no id leads through one either.
+        if any(folder.is_symlink() for folder in [*path.parents][: len(parts) - 1]):
+            return None
+        if path.suffix != ".npz" or not path.is_file() or set(parts) & summary.SKIPPED_FOLDERS:
+            return None
+        return Listed(trace_id, path, path.name, _folder(base, path))
 
     def load(self, trace_id: str) -> tuple[Trace, dict]:
         """Return a listed trace with its overview, from memory while the file is unchanged."""
@@ -121,11 +247,13 @@ class Library:
             with self._lock:
                 item = self._listed.get(trace_id)
         if item is None:
+            item = self._resolve(trace_id)
+        if item is None:
             raise NotFound(f"no listed trace has the id {trace_id}")
-        # The counts of a GPU check join the overview, so a new summary renews the entry too.
-        summary = validate.summary_path(item.path)
+        # The counts of a GPU check join the overview, therefore a new check renews the entry too.
+        checked = validate.summary_path(item.path)
         try:
-            key = (item.path, _stamp(item.path), _stamp(summary))
+            key = (item.path, _stamp(item.path), _stamp(checked))
             with self._lock:
                 if key in self._cache:
                     self._cache.move_to_end(key)
@@ -279,6 +407,8 @@ def answer_get(library: Library, path: str, query: dict[str, str]) -> dict:
         return {"version": __version__, "roots": [str(root) for root in library.roots]}
     if path == "/api/traces":
         return library.listing()
+    if path == "/api/summary":
+        return library.summary()
     route = TRACE_ROUTES.get(path)
     if route is None:
         raise NotFound(f"no route {path}")
@@ -339,12 +469,13 @@ def serve(
     port: int = DEFAULT_PORT,
     allowed_hosts: Sequence[str] = (),
     open_browser: bool = False,
+    processes: bool = False,
 ) -> None:
     """Serve the GUI for the traces under `paths` until the process is stopped."""
     missing = [str(path) for path in paths if not path.exists()]
     if missing:
         raise ValueError(f"no such file or folder: {', '.join(missing)}")
-    server = GuiServer((host, port), Library(paths), allowed_hosts)
+    server = GuiServer((host, port), Library(paths, processes=processes), allowed_hosts)
     print(f"LaneScope GUI on {server.url} (stop with Ctrl+C)", flush=True)
     if open_browser:
         webbrowser.open(server.url)
@@ -360,6 +491,7 @@ def serve(
     except KeyboardInterrupt:
         pass
     finally:
+        server.library.close()
         server.server_close()
 
 
@@ -501,16 +633,13 @@ def _field(body: dict, name: str, kind: type[Field]) -> Field:
 
 
 def _trace_files(root: pathlib.Path) -> list[pathlib.Path]:
-    """Return the .npz files under a folder, skipping hidden and cache folders."""
-    found = []
-    for folder, names, files in os.walk(root):
-        names[:] = sorted(
-            name for name in names if not name.startswith(".") and name not in SKIPPED
-        )
-        found.extend(pathlib.Path(folder) / name for name in sorted(files) if name.endswith(".npz"))
-        if len(found) > MAX_LISTED:
-            break
-    return found
+    """Return the .npz files under a folder that the picker may list, one past its limit."""
+    return summary.trace_files(root, MAX_LISTED + 1)
+
+
+def _run_label(base: pathlib.Path, name: str, run: pathlib.Path) -> str:
+    """Return the name of a run below a folder of the page, such as run1 or demo/a.npz."""
+    return name if run == base else f"{name}/{run.relative_to(base).as_posix()}"
 
 
 def _folder(base: pathlib.Path, path: pathlib.Path) -> str:

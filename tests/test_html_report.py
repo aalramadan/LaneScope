@@ -123,9 +123,25 @@ def test_suggestions_name_the_global_sectors_of_a_change_that_alters_them(monkey
         "excessive_sectors_after": 256,
         "extra_bytes": 1024,
     }
-    found = {"buffer": {"start": 0, "size": 8192}, "found": 1, "changes": [padding]}
+    found = {
+        "buffer": {"start": 0, "size": 8192},
+        "data_dependent": False,
+        "found": 1,
+        "changes": [padding],
+    }
     assert "Excess sectors" not in html_report.render(demos.matmul_tile_trace())
     monkeypatch.setattr(html_report.analysis, "suggest", lambda *args, **kwargs: found)
     page = html_report.render(demos.matmul_tile_trace())
     assert "Excess sectors" in page
     assert "0 → 256" in page
+
+
+def test_a_conflict_that_follows_the_input_values_says_that_fixes_may_help_less():
+    page = html_report.render(demos.histogram_trace())
+    assert "may help less on other inputs" in page
+
+
+def test_a_conflict_that_follows_the_input_values_without_a_fix_says_why(monkeypatch):
+    monkeypatch.setattr(html_report.analysis.ranking, "suggest", lambda trace, buffer: [])
+    page = html_report.render(demos.histogram_trace())
+    assert "No layout of the buffer removes them." in page

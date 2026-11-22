@@ -9,7 +9,7 @@
 [![License GPL v3](https://img.shields.io/badge/license-GPL%20v3-blue)](LICENSE)
 [![Live demo](https://img.shields.io/badge/demo-live-orange)](https://aalramadan.github.io/LaneScope/)
 
-![LaneScope explaining the bank conflict of a matrix transpose, showing its fix, and removing the conflicts of a matrix multiply tile with a swizzle](docs/demo.gif)
+![LaneScope ranking the conflicts of the demo, explaining the bank conflict of a matrix transpose, showing its fix, and removing the conflicts of a matrix multiply tile with a swizzle](docs/demo.gif)
 
 </div>
 
@@ -21,7 +21,7 @@ Try LaneScope in your browser, with no install.
 
 ### 👉 [aalramadan.github.io/LaneScope](https://aalramadan.github.io/LaneScope/)
 
-The demo opens the recordings below.
+The demo opens on a summary that ranks the conflicts of the recordings below, largest first.
 
 | Example | What it shows |
 |---|---|
@@ -29,6 +29,7 @@ The demo opens the recordings below.
 | Row sums | Threads that each read one 256-byte row of a shared tile, a conflict of the same kind |
 | Column sums | Threads that each read one column of a column-major matrix in global memory, one sector per thread |
 | Matmul tile | A tile copied with `cp.async` and read with `ldmatrix`, which needs the swizzle of CuTe |
+| Histogram | Bins of a shared histogram that the input values pick, a conflict that no padding or swizzle removes |
 | llama.cpp indexer | The conflicts LaneScope found in llama.cpp, before and after the fix that llama.cpp merged in [pull request #31803](https://github.com/ggml-org/llama.cpp/pull/31803) ([details](examples/llama.cpp)) |
 
 > [!NOTE]
@@ -38,9 +39,10 @@ The demo opens the recordings below.
 
 | Feature | Description |
 |---|---|
+| 📊 Run summary | Every kernel and source line of a recording, ranked by the extra passes it causes |
 | 🔬 Thread view | Every shared and global memory access, thread by thread, beside its source line, with its cost and its best fix in plain words |
 | 📊 Nsight-matching counts | The wavefronts and sectors that Nsight Compute reports, computed from the recorded addresses |
-| 🛠️ Fix search | Paddings and swizzles ranked by the conflicts each removes, written as code |
+| 🛠️ Fix search | Paddings and swizzles ranked by the conflicts each removes, written as code, with a warning where the input values decide the conflicts |
 | 🔌 No rebuild | Any CUDA program, including the Triton kernels that PyTorch compiles |
 | 🖥️ Three interfaces | A browser GUI, a command line, and a Model Context Protocol (MCP) server for coding agents |
 | 🎮 Tested GPUs | Counts checked against Nsight Compute on an RTX 4060 and an RTX 5070 Laptop GPU |
@@ -62,6 +64,7 @@ pip install ".[gpu-cuda13]"  # recording with the CUDA 13 tools, as on RTX 50 GP
 ```bash
 lanescope gui --demo                          # opens http://localhost:8765 with the demo kernels
 lanescope record --out run1 -- ./my_app       # record a CUDA program
+lanescope summary run1                        # rank the lines of every launch by their conflicts
 lanescope gui run1                            # explore the recording
 lanescope suggest run1/trace-0.npz            # rank the fixes in the terminal
 ```
@@ -118,6 +121,38 @@ lanescope gui run1
 > [!TIP]
 > `--kernel` records only the kernels whose names contain the given text. `--ctas` records a range of thread blocks. Compiling with `-lineinfo` adds source lines and is optional. A program that queues many launches without synchronizing gets every launch recorded, since each launch saves its records once its threads finish.
 
+### 📊 Rank Every Launch
+
+A real program launches many kernels. `lanescope summary` adds up the conflicts of every launch by kernel and by source line. The program `examples/conflict_kinds.py` runs a transpose, a histogram, a tree sum, and a scale, each with a different kind of conflict.
+
+```console
+$ lanescope record --out run1 -- python examples/conflict_kinds.py
+...
+$ lanescope summary run1
+run1: 8 launches of 4 kernels
+Shared memory: 59,563 passes where 10,576 would do. Bank conflicts add 48,987 of them (82.2%).
+
+Kernels by extra passes
+  extra passes  of kernel  launches  kernel
+        31,744      93.9%         2  transpose
+        15,563      67.0%         3  histogram
+         1,680      70.0%         2  tree_sum
+             0       0.0%         1  scale
+
+Lines by extra passes
+  extra passes   ratio  of kernel  launches  line                              kernel
+        31,744   32.0x      93.9%         2  conflict_kinds.cu:23 load         transpose
+        15,563    3.5x      67.0%         3  conflict_kinds.cu:8 atomic *      histogram
+         1,120    4.2x      46.7%         2  conflict_kinds.cu:35 load         tree_sum
+           560    4.2x      23.3%         2  conflict_kinds.cu:35 store        tree_sum
+
+* The conflicts of this line follow the values that the kernel reads, such as the bins of a histogram. No padding or swizzle removes them.
+
+Worst line: lanescope suggest run1/trace-3.npz --pc 0x1b0 ranks its fixes, and lanescope gui run1 opens it in the browser.
+```
+
+The column `of kernel` gives the extra passes of a line as a part of all the passes of its kernel. A fix of the line cuts the passes of the kernel by this part. A star marks a line whose banks follow the values that the kernel reads, such as the bins of a histogram. No padding or swizzle removes such conflicts. `lanescope gui run1` opens on the same ranking. A click on a line opens the launch where the line wastes the most passes.
+
 ### 🤖 Use with Coding Agents
 
 ```bash
@@ -133,6 +168,7 @@ An MCP client adds the server with the command `lanescope` and the argument `mcp
 |---|---|
 | `record` | Records the memory accesses of a CUDA or Python program |
 | `gui` | Opens the browser GUI |
+| `summary` | Ranks the kernels and source lines of a recording by their extra passes |
 | `explain` | Lists the memory instructions of a trace, worst first |
 | `lanes` | Shows where each thread of a warp lands |
 | `suggest` | Ranks the paddings and swizzles of each buffer |
@@ -168,10 +204,11 @@ On the RTX 4060, the swizzle that LaneScope ranks first makes its built-in trans
 | Step | Module | Description |
 |---|---|---|
 | 1 | `recorder/` | Records the address of each thread at every memory access, through Compute Sanitizer |
-| 2 | `model/` | Counts wavefronts and sectors from the addresses |
-| 3 | `fixes/` | Tries paddings and swizzles on the recorded addresses and ranks them |
-| 4 | `gui/`, `cli.py`, `mcp_server.py` | Show the results |
-| 5 | `nsight/` | Checks the counts against Nsight Compute |
+| 2 | `model/` | Counts wavefronts and sectors from the addresses and marks the conflicts that the input values decide |
+| 3 | `summary.py` | Adds up the counts of every launch by kernel and by source line |
+| 4 | `fixes/` | Tries paddings and swizzles on the recorded addresses and ranks them |
+| 5 | `gui/`, `cli.py`, `mcp_server.py` | Show the results |
+| 6 | `nsight/` | Checks the counts against Nsight Compute |
 
 ## 🧑‍💻 Development
 

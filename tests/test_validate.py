@@ -407,6 +407,13 @@ def test_measured_counts_skip_a_summary_with_a_number_of_too_many_digits(tmp_pat
     assert validate.measured_counts(record / "trace-0.npz", "transpose") is None
 
 
+def test_measured_counts_skip_a_summary_without_a_list_of_rows(tmp_path):
+    record = write_check(tmp_path, [])
+    for summary in ("[]", '{"rows": 3}', "{}"):
+        (tmp_path / "validation.json").write_text(summary)
+        assert validate.measured_counts(record / "trace-0.npz", "transpose") is None
+
+
 def test_measured_counts_skip_a_summary_nested_too_deep_to_read(tmp_path):
     record = write_check(tmp_path, [])
     (tmp_path / "validation.json").write_text("[" * 100_000 + "]" * 100_000)

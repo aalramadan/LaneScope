@@ -282,8 +282,8 @@ def measured_counts(
     """Return the Nsight Compute counts of a checked trace by offset and quantity, with its SASS.
 
     The check numbers its launches in the order of its trace files, and each row
-    names its kernel, which must be the kernel of the trace. A trace of no check
-    gives None.
+    names its kernel, which must be the kernel of the trace. A trace of no check,
+    or of a summary without a list of rows, gives None.
     """
     summary = summary_path(trace_path)
     if summary is None:
@@ -302,8 +302,10 @@ def measured_counts(
         # RecursionError a summary nested deeper than the JSON reader goes.
         return None
     rows = data.get("rows") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return None
     found: dict[tuple[int, str], tuple[float | None, str]] = {}
-    for row in rows if isinstance(rows, list) else []:
+    for row in rows:
         if not isinstance(row, dict) or row.get("launch") != launch:
             continue
         offset, quantity, nsight = row.get("offset"), row.get("quantity"), row.get("nsight")

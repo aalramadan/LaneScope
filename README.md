@@ -5,7 +5,7 @@
 **Find and fix shared-memory bank conflicts in CUDA kernels.**
 
 [![Tests](https://github.com/aalramadan/LaneScope/actions/workflows/tests.yml/badge.svg)](https://github.com/aalramadan/LaneScope/actions/workflows/tests.yml)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
 [![License GPL v3](https://img.shields.io/badge/license-GPL%20v3-blue)](LICENSE)
 [![Live demo](https://img.shields.io/badge/demo-live-orange)](https://aalramadan.github.io/LaneScope/)
 
@@ -195,7 +195,7 @@ On the RTX 4060, the swizzle that LaneScope ranks first makes its built-in trans
 
 ## 📋 Requirements
 
-- Linux or WSL2 with Python 3.10 or later
+- Linux or WSL2 with Python 3.11 or later
 - For recording, `g++` and an NVIDIA GPU with a driver for CUDA 12.4 or later
 - Counts validated on an RTX 4060 and an RTX 5070 Laptop GPU. `lanescope validate` checks them on any other GPU.
 

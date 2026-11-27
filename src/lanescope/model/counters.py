@@ -2,7 +2,7 @@ import dataclasses
 
 import numpy as np
 
-from lanescope.model import global_memory, shared_memory
+from lanescope.model import batch_counts, global_memory, shared_memory
 from lanescope.model.global_memory import LINE_BYTES
 from lanescope.trace import Kind, Space, Trace
 
@@ -50,21 +50,24 @@ def count(trace: Trace) -> list[InstructionCounters]:
     # Recordings repeat the same access in many CTAs and loop iterations. Measuring each
     # distinct row once and weighting it by its repeats keeps large traces fast.
     first, repeats = distinct_rows(trace)
-    totals: dict[InstructionKey, list[int]] = {}
-    excesses: dict[InstructionKey, set[int]] = {}
-    for row, weight in zip(first.tolist(), repeats.tolist(), strict=True):
-        achieved, ideal, excessive, conflicts = measure(trace, row)
-        key = instruction_key(trace, row)
-        total = totals.setdefault(key, [0, 0, 0, 0, 0, row, excessive])
-        total[0] += weight
-        total[1] += weight * achieved
-        total[2] += weight * ideal
-        total[3] += weight * excessive
-        total[4] += weight * conflicts
-        # The earliest access with the largest excess is the one worth showing lane by lane.
-        if excessive > total[6]:
-            total[5], total[6] = row, excessive
-        excesses.setdefault(key, set()).add(excessive)
+    measured = batch_counts.row_counts(trace, first)
+    columns = [trace.pc, trace.space, trace.kind, trace.width]
+    keys = np.column_stack([column[first] for column in columns]).astype(np.uint64)
+    instructions, group = np.unique(keys, axis=0, return_inverse=True)
+    group = group.reshape(-1)
+    totals = np.zeros((len(instructions), 5), dtype=np.int64)
+    for column, values in enumerate(
+        (1, measured.achieved, measured.ideal, measured.excessive, measured.conflicts)
+    ):
+        np.add.at(totals[:, column], group, repeats * values)
+    excess = measured.excessive
+    # The earliest access with the largest excess is the one worth showing lane by lane.
+    order = np.lexsort((first, -excess, group))
+    worst = first[order][np.unique(group[order], return_index=True)[1]]
+    # Each instruction with each of its distinct excess counts, sorted, once.
+    levels = np.unique(np.column_stack([group, excess]), axis=0)
+    starts = np.unique(levels[:, 0], return_index=True)[1]
+    ends = np.append(starts[1:], len(levels)) - 1
     return [
         InstructionCounters(
             pc=pc,
@@ -76,12 +79,20 @@ def count(trace: Trace) -> list[InstructionCounters]:
             ideal=total[2],
             excessive=total[3],
             conflicts=total[4],
-            worst_row=total[5],
-            fewest=min(excesses[(pc, space, kind, width)]),
-            most=max(excesses[(pc, space, kind, width)]),
-            levels=len(excesses[(pc, space, kind, width)]),
+            worst_row=worst_row,
+            fewest=fewest,
+            most=most,
+            levels=level_count,
         )
-        for (pc, space, kind, width), total in sorted(totals.items())
+        for (pc, space, kind, width), total, worst_row, fewest, most, level_count in zip(
+            instructions.tolist(),
+            totals.tolist(),
+            worst.tolist(),
+            levels[starts, 1].tolist(),
+            levels[ends, 1].tolist(),
+            (ends - starts + 1).tolist(),
+            strict=True,
+        )
     ]
 
 

@@ -169,3 +169,35 @@ def test_distinct_rows_stay_exact_when_every_row_hash_collides(monkeypatch):
     found = counters.distinct_rows(trace)
     assert all(np.array_equal(a, b) for a, b in zip(found, expected, strict=True))
     assert len(found[0]) > 1
+
+
+def test_count_gives_the_counters_of_a_row_by_row_sum_on_every_gallery_trace():
+    for name, trace in demos.gallery_traces().items():
+        expected = {}
+        for row in range(len(trace)):
+            achieved, ideal, excessive, conflicts = measure(trace, row)
+            total = expected.setdefault(instruction_key(trace, row), [0, 0, 0, 0, 0, row, set()])
+            for column, value in enumerate((1, achieved, ideal, excessive, conflicts)):
+                total[column] += value
+            if excessive > max(total[6], default=-1):
+                total[5] = row
+            total[6].add(excessive)
+        found = {
+            (c.pc, int(c.space), int(c.kind), c.width): (
+                c.requests,
+                c.achieved,
+                c.ideal,
+                c.excessive,
+                c.conflicts,
+                c.worst_row,
+                c.fewest,
+                c.most,
+                c.levels,
+            )
+            for c in count(trace)
+        }
+        assert found == {
+            key: (*total[:6], min(total[6]), max(total[6]), len(total[6]))
+            for key, total in expected.items()
+        }, name
+        assert list(found) == sorted(found)

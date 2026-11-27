@@ -12,8 +12,8 @@ from lanescope.fixes.layouts import (
     apply,
     lanes_inside,
 )
-from lanescope.model import global_memory
-from lanescope.model.counters import distinct_rows, measure
+from lanescope.model import batch_counts
+from lanescope.model.counters import distinct_rows
 from lanescope.trace import Trace
 
 PADS = (4, 8, 16)
@@ -103,14 +103,13 @@ def suggest(trace: Trace, buffer: Buffer) -> list[Suggestion]:
 def _totals(accesses: Trace, repeats: np.ndarray) -> tuple[int, int, int]:
     # Every row of the accesses is a shared access, as only those fall inside a buffer. The
     # shared row of a copy also gives the reads of its global side.
-    wavefronts = excessive = sectors = 0
-    for row, weight in enumerate(repeats.tolist()):
-        achieved, _, excess, _ = measure(accesses, row)
-        wavefronts += weight * achieved
-        excessive += weight * excess
-        if (reads := global_memory.copy_reads(accesses, row)) is not None:
-            sectors += weight * reads.excessive
-    return wavefronts, excessive, sectors
+    measured = batch_counts.row_counts(accesses)
+    reads = batch_counts.copy_read_excess(accesses)
+    return (
+        int(repeats @ measured.achieved),
+        int(repeats @ measured.excessive),
+        int(repeats @ reads),
+    )
 
 
 def _rank(suggestion: Suggestion) -> tuple[int, int, int, int, int]:

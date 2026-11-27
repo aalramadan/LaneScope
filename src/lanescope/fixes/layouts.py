@@ -197,12 +197,15 @@ def apply(trace: Trace, buffer: Buffer, change: Change) -> Trace:
     inside = lanes_inside(trace, buffer)
     shared = (trace.space == Space.SHARED)[:, None] & trace.active()
     width = trace.width[:, None].astype(np.uint64)
-    for row in np.flatnonzero(inside.any(axis=1)):
-        if not change.keeps_whole(int(trace.width[row])):
-            raise ValueError(
-                f"{change.describe()} splits the {int(trace.width[row])}-byte accesses "
-                f"of pc {int(trace.pc[row]):#x}"
-            )
+    on_buffer = inside.any(axis=1)
+    widths = np.unique(trace.width[on_buffer]).tolist()
+    split = [size for size in widths if not change.keeps_whole(size)]
+    if split:
+        row = _first_row(on_buffer & np.isin(trace.width, split))
+        raise ValueError(
+            f"{change.describe()} splits the {int(trace.width[row])}-byte accesses "
+            f"of pc {int(trace.pc[row]):#x}"
+        )
     addresses = trace.addr.copy()
     start = np.uint64(buffer.start)
     addresses[inside] = start + change.move(addresses[inside] - start)

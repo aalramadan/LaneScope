@@ -19,6 +19,7 @@ gpu = [
     "nvidia-cuda-nvcc-cu12>=12.4",
     "nvidia-cuda-sanitizer-api-cu12>=12.4",
     "nvidia-cuda-runtime-cu12>=12.4",
+    "nvidia-cuda-cupti-cu12>=12.4",
     "nvidia-cuda-nvdisasm>=13.0",
     "ncu-report>=2025.1",
 ]
@@ -28,6 +29,7 @@ gpu-cuda13 = [
     "nvidia-cuda-crt>=13.0",
     "nvidia-cuda-sanitizer-api>=13.0",
     "nvidia-cuda-runtime>=13.0",
+    "nvidia-cuda-cupti>=13.0",
     "nvidia-cuda-nvdisasm>=13.0",
     "ncu-report>=2025.1",
 ]

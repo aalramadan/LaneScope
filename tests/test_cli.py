@@ -277,8 +277,21 @@ def test_record_imports_each_launch_of_a_program_that_succeeds(tmp_path, monkeyp
         f"wrote {tmp_path / 'trace-0.npz'}",
         f"wrote {tmp_path / 'trace-1.npz'}",
         f"Next, lanescope summary {tmp_path} ranks the conflicts of all 2 launches, "
+        f"lanescope time {tmp_path} times its kernels without the recorder, "
         f"and lanescope gui {tmp_path} opens them in the browser.",
     ]
+
+
+def test_record_stores_its_command_for_the_timing_and_drops_earlier_times(tmp_path, monkeypatch):
+    fake_recorder(monkeypatch, status=0, launches=1)
+    (tmp_path / "kernel-times.json").write_text("{}")
+    assert run_record(tmp_path) == 0
+    assert json.loads((tmp_path / "run.json").read_text()) == {
+        "format": 1,
+        "command": ["./app"],
+        "cwd": os.getcwd(),
+    }
+    assert not (tmp_path / "kernel-times.json").exists()
 
 
 @pytest.mark.parametrize("capacity", ["0", str((1 << 26) + 1), "many"])

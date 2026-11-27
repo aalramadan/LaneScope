@@ -29,6 +29,8 @@ class Toolchain:
     nvdisasm: Path | None
     compiler: Path | None
     disassemblers: tuple[Path, ...] = ()
+    cupti_include: Path | None = None
+    cupti_lib: Path | None = None
 
     def require(self, *names: str) -> None:
         """Raise ToolchainError naming every listed tool that is missing.
@@ -86,6 +88,7 @@ def find(environ: Mapping[str, str] | None = None) -> Toolchain:
     # The CUDA 13 wheels share one folder laid out like a toolkit.
     root = root or next((d for d in _wheel_dirs("nvidia.cu13") if _complete(d)), None)
     if root is not None:
+        cupti_include, cupti_lib = _cupti([root, root / "extras" / "CUPTI"])
         return Toolchain(
             sanitizer_include=root / "compute-sanitizer" / "include",
             sanitizer_lib=root / "compute-sanitizer",
@@ -103,8 +106,11 @@ def find(environ: Mapping[str, str] | None = None) -> Toolchain:
             nvdisasm=nvdisasm,
             compiler=compiler,
             disassemblers=disassemblers,
+            cupti_include=cupti_include,
+            cupti_lib=cupti_lib,
         )
     sanitizer = _wheel_dirs("nvidia.cuda_sanitizer_api")
+    cupti_include, cupti_lib = _cupti(_wheel_dirs("nvidia.cuda_cupti"))
     return Toolchain(
         sanitizer_include=_first_dir(
             [d / "include" for d in sanitizer]
@@ -131,6 +137,8 @@ def find(environ: Mapping[str, str] | None = None) -> Toolchain:
         nvdisasm=nvdisasm,
         compiler=compiler,
         disassemblers=disassemblers,
+        cupti_include=cupti_include,
+        cupti_lib=cupti_lib,
     )
 
 
@@ -155,6 +163,18 @@ def _complete(root: Path) -> bool:
             "compute-sanitizer/libsanitizer-public.so",
         )
     )
+
+
+def _cupti(folders: Sequence[Path]) -> tuple[Path | None, Path | None]:
+    for folder in folders:
+        libraries = [
+            Path(p)
+            for lib in ("lib64", "lib")
+            for p in sorted(glob.glob(str(folder / lib / "libcupti.so*")))
+        ]
+        if (folder / "include" / "cupti.h").is_file() and libraries:
+            return folder / "include", libraries[0]
+    return None, None
 
 
 def _toolkit_roots(env: Mapping[str, str]) -> list[Path]:

@@ -81,6 +81,7 @@ def _gpu_info(args: argparse.Namespace) -> int:
         "ptxas",
         "sanitizer_lib",
         "cuda_include",
+        "cupti_lib",
         "ncu",
         "nvdisasm",
     )

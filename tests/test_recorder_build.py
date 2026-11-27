@@ -13,6 +13,9 @@ needs_tools = pytest.mark.skipif(
     TOOLS.sanitizer_include is None or TOOLS.compiler is None or TOOLS.nvrtc is None,
     reason="the Sanitizer API, a C++ compiler, and NVRTC are needed",
 )
+needs_cupti = pytest.mark.skipif(
+    TOOLS.cupti_lib is None or TOOLS.compiler is None, reason="CUPTI and a C++ compiler are needed"
+)
 
 
 @needs_tools
@@ -79,6 +82,61 @@ def stand_in_compile(text, fails_under=None):
         return build.RecorderBuild(library, patches, tools.sanitizer_lib / build.SANITIZER_LIBRARY)
 
     return compile_files
+
+
+@needs_cupti
+def test_the_kernel_timer_builds_with_the_injection_entry_point(tmp_path):
+    library = build.build_kernel_timer(tmp_path, TOOLS)
+    assert library == tmp_path / "liblanescope_kernel_timer.so"
+    assert b"InitializeInjection" in library.read_bytes()
+
+
+@needs_cupti
+def test_a_cached_kernel_timer_serves_a_new_folder_without_a_compile(tmp_path, monkeypatch):
+    first = build.build_kernel_timer(tmp_path / "first", TOOLS, cache=tmp_path / "cache")
+    monkeypatch.setattr(build, "_run", lambda command: pytest.fail("the build ran again"))
+    second = build.build_kernel_timer(tmp_path / "second", TOOLS, cache=tmp_path / "cache")
+    assert second == tmp_path / "second" / build.TIMER_LIBRARY
+    assert second.read_bytes() == first.read_bytes()
+    entry = build._timer_key(TOOLS)
+    assert [path.name for path in (tmp_path / "cache" / "recorder" / entry).iterdir()] == [
+        build.TIMER_LIBRARY
+    ]
+
+
+def test_the_kernel_timer_key_changes_with_its_source_and_its_cupti(tmp_path, monkeypatch):
+    for name in build.TIMER_SOURCES:
+        shutil.copy(build.RECORDER_DIR / name, tmp_path / name)
+    monkeypatch.setattr(build, "RECORDER_DIR", tmp_path)
+    cupti = tmp_path / "libcupti.so.13"
+    cupti.write_text("one CUPTI")
+    tools = dataclasses.replace(stand_in_tools(tmp_path), cupti_include=tmp_path, cupti_lib=cupti)
+    key = build._timer_key(tools)
+    (tmp_path / "kernel_timer.cpp").write_text("// another timer")
+    assert build._timer_key(tools) != key
+    key = build._timer_key(tools)
+    cupti.write_text("another CUPTI")
+    assert build._timer_key(tools) != key
+
+
+def test_a_kernel_timer_compile_that_fails_in_the_cache_falls_back_to_the_folder(
+    tmp_path, monkeypatch
+):
+    cupti = tmp_path / "libcupti.so.13"
+    cupti.write_text("")
+    tools = dataclasses.replace(stand_in_tools(tmp_path), cupti_include=tmp_path, cupti_lib=cupti)
+    cache = tmp_path / "cache"
+
+    def compile_timer(library, tools):
+        if cache in library.parents:
+            raise build.BuildError("g++ failed:\nNo space left on device")
+        library.write_text("local")
+        return library
+
+    monkeypatch.setattr(build, "_compile_timer", compile_timer)
+    library = build.build_kernel_timer(tmp_path / "out", tools, cache=cache)
+    assert library.read_text() == "local"
+    assert [path for path in cache.rglob("*") if path.is_file()] == []
 
 
 def test_the_build_key_changes_with_the_architecture_and_the_tools(tmp_path):
@@ -299,6 +357,61 @@ def test_find_skips_an_incomplete_toolkit_and_an_nvcc_on_the_path(tmp_path, monk
     stray.chmod(0o755)
     found = toolchain.find({"CUDA_HOME": str(tmp_path / "toolkit"), "PATH": str(tmp_path / "path")})
     assert found.nvcc is None
+
+
+def test_find_takes_cupti_from_the_cuda_13_wheel(tmp_path, monkeypatch):
+    wheel = tmp_path / "cu13"
+    for part in (
+        "bin/nvcc",
+        "include/cuda.h",
+        "include/cupti.h",
+        "compute-sanitizer/include/sanitizer.h",
+        "compute-sanitizer/libsanitizer-public.so",
+        "lib/libcupti.so.13",
+    ):
+        (wheel / part).parent.mkdir(parents=True, exist_ok=True)
+        (wheel / part).write_text("")
+    monkeypatch.setattr(
+        toolchain, "_wheel_dirs", lambda package: [wheel] if package == "nvidia.cu13" else []
+    )
+    found = toolchain.find({"PATH": ""})
+    assert found.cupti_include == wheel / "include"
+    assert found.cupti_lib == wheel / "lib" / "libcupti.so.13"
+
+
+def test_find_takes_cupti_from_the_extras_of_a_toolkit(tmp_path, monkeypatch):
+    monkeypatch.setattr(toolchain, "_wheel_dirs", lambda package: [])
+    make_toolkit(tmp_path)
+    for part in ("extras/CUPTI/include/cupti.h", "extras/CUPTI/lib64/libcupti.so.12"):
+        (tmp_path / part).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / part).write_text("")
+    found = toolchain.find({"CUDA_HOME": str(tmp_path), "PATH": ""})
+    assert found.cupti_include == tmp_path / "extras" / "CUPTI" / "include"
+    assert found.cupti_lib == tmp_path / "extras" / "CUPTI" / "lib64" / "libcupti.so.12"
+
+
+def test_find_takes_cupti_from_the_cuda_12_wheel_beside_the_other_wheels(tmp_path, monkeypatch):
+    wheels = make_wheels(tmp_path)
+    cupti = tmp_path / "cupti"
+    for part in ("include/cupti.h", "lib/libcupti.so.12"):
+        (cupti / part).parent.mkdir(parents=True, exist_ok=True)
+        (cupti / part).write_text("")
+    wheels["nvidia.cuda_cupti"] = cupti
+    monkeypatch.setattr(
+        toolchain, "_wheel_dirs", lambda package: [wheels[package]] if package in wheels else []
+    )
+    found = toolchain.find({"PATH": ""})
+    assert found.cupti_include == cupti / "include"
+    assert found.cupti_lib == cupti / "lib" / "libcupti.so.12"
+
+
+def test_find_leaves_cupti_out_when_its_headers_or_its_library_are_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(toolchain, "_wheel_dirs", lambda package: [])
+    make_toolkit(tmp_path)
+    (tmp_path / "extras" / "CUPTI" / "include").mkdir(parents=True)
+    (tmp_path / "extras" / "CUPTI" / "include" / "cupti.h").write_text("")
+    found = toolchain.find({"CUDA_HOME": str(tmp_path), "PATH": ""})
+    assert (found.cupti_include, found.cupti_lib) == (None, None)
 
 
 def test_find_takes_nvdisasm_from_the_wheel_before_a_toolkit(tmp_path, monkeypatch):

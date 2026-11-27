@@ -16,6 +16,8 @@ LIBRARY_NAME = "liblanescope_recorder.so"
 SANITIZER_LIBRARY = "libsanitizer-public.so"
 # A change to one of these files makes a cached build stale. This file holds the options.
 SOURCES = ("recorder.cpp", "record.h", "cubin.h", "patches.cu", "build.py")
+TIMER_LIBRARY = "liblanescope_kernel_timer.so"
+TIMER_SOURCES = ("kernel_timer.cpp", "build.py")
 
 
 class BuildError(RuntimeError):
@@ -73,6 +75,71 @@ def build_recorder(
     return RecorderBuild(out_dir / LIBRARY_NAME, patches, tools.sanitizer_lib / SANITIZER_LIBRARY)
 
 
+def build_kernel_timer(
+    out_dir: pathlib.Path, tools: Toolchain | None = None, cache: pathlib.Path | None = None
+) -> pathlib.Path:
+    """Build the library that times every kernel launch through CUPTI and return its path.
+
+    With a cache folder, a library from the same sources and tools is copied in place of a
+    new compile, as for the recorder.
+    """
+    tools = tools or find()
+    tools.require("cupti_include", "cupti_lib", "cuda_include", "compiler")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    library = out_dir / TIMER_LIBRARY
+    if cache is None:
+        return _compile_timer(library, tools)
+    cached = cache / "recorder" / _timer_key(tools) / TIMER_LIBRARY
+    try:
+        if not (cached.is_file() and cached.stat().st_size > 0):
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            # Each build compiles to a name of its own, so no timing loads half a library.
+            _publish(_compile_timer(cached.with_name(f".{os.getpid()}.part"), tools), cached)
+        staged = out_dir / f".{TIMER_LIBRARY}.part"
+        shutil.copy2(cached, staged)
+        os.replace(staged, library)
+    except (OSError, BuildError):
+        return _compile_timer(library, tools)
+    return library
+
+
+def _timer_key(tools: Toolchain) -> str:
+    digest = hashlib.sha256(b"kernel timer")
+    for name in TIMER_SOURCES:
+        digest.update((RECORDER_DIR / name).read_bytes())
+    assert tools.cupti_include and tools.cuda_include
+    used = (
+        tools.compiler, tools.cupti_lib, tools.cupti_include / "cupti.h",
+        tools.cuda_include / "cuda.h",
+    )  # fmt: skip
+    _add_files(digest, used)
+    return digest.hexdigest()[:20]
+
+
+def _publish(staged: pathlib.Path, path: pathlib.Path) -> None:
+    try:
+        descriptor = os.open(staged, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(staged, path)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+def _compile_timer(library: pathlib.Path, tools: Toolchain) -> pathlib.Path:
+    assert tools.cupti_include and tools.cupti_lib and tools.cuda_include and tools.compiler
+    _run([
+        str(tools.compiler), "-std=c++17", "-O2", "-fPIC", "-shared",
+        f"-I{tools.cupti_include}", f"-I{tools.cuda_include}",
+        str(RECORDER_DIR / "kernel_timer.cpp"),
+        str(tools.cupti_lib), f"-Wl,-rpath,{tools.cupti_lib.parent}",
+        "-o", str(library),
+    ])  # fmt: skip
+    return library
+
+
 def _build_key(arch: str, tools: Toolchain) -> str:
     digest = hashlib.sha256(arch.encode())
     for name in SOURCES:
@@ -84,11 +151,15 @@ def _build_key(arch: str, tools: Toolchain) -> str:
         tools.sanitizer_include / "sanitizer.h",
         tools.cuda_include / "cuda.h",
     )  # fmt: skip
-    for path in used:
+    _add_files(digest, used)
+    return digest.hexdigest()[:20]
+
+
+def _add_files(digest, paths: Sequence[pathlib.Path | None]) -> None:
+    for path in paths:
         if path is not None and path.exists():
             info = path.stat()
             digest.update(f"{path.resolve()} {info.st_size} {info.st_mtime_ns}".encode())
-    return digest.hexdigest()[:20]
 
 
 def _fill(entry: pathlib.Path, arch: str, number: str, tools: Toolchain) -> None:

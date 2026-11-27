@@ -2,6 +2,7 @@ import argparse
 import pathlib
 import sys
 
+from lanescope import kernel_times
 from lanescope.commands import argument_types
 from lanescope.cuda.driver import Driver
 from lanescope.cuda.toolchain import cache_folder, find
@@ -58,6 +59,7 @@ def _record(args: argparse.Namespace) -> int:
     if not command:
         raise ValueError("give the program to record after --")
     built = build_recorder(args.out / "build", args.arch or _local_arch(), cache=cache_folder())
+    kernel_times.write_run(args.out, command)
     status = capture.record(
         command, built, args.out, capacity=args.capacity, ctas=args.ctas, kernel=args.kernel
     )
@@ -130,15 +132,20 @@ def _report_traces(
             f"--capacity{larger}, or with fewer CTAs, such as --ctas 0:8.",
             file=sys.stderr,
         )
+    timing = (
+        f"lanescope time {folder} times its kernels without the recorder, "
+        if (folder / kernel_times.RUN_FILE).is_file()
+        else ""
+    )
     if len(paths) > 1:
         print(
             f"Next, lanescope summary {folder} ranks the conflicts of all {len(paths)} launches, "
-            f"and lanescope gui {folder} opens them in the browser."
+            f"{timing}and lanescope gui {folder} opens them in the browser."
         )
     elif paths:
         print(
             f"Next, lanescope explain {paths[0]} lists its memory instructions, worst first, "
-            f"and lanescope gui {folder} opens it in the browser."
+            f"{timing}and lanescope gui {folder} opens it in the browser."
         )
 
 

@@ -1,0 +1,295 @@
+import json
+import shutil
+import sys
+
+import pytest
+
+from lanescope import kernel_times
+from lanescope.cuda import toolchain
+from lanescope.cuda.driver import Driver, DriverError
+from lanescope.nsight import calibration
+from lanescope.recorder import capture
+from lanescope.recorder.build import build_kernel_timer, build_recorder
+from lanescope.trace import read_metadata
+
+# A stand-in for a timed program. It writes the file of the kernel timer itself, with the
+# times that its argument names for each run, and logs each run to the file of LOG.
+FAKE_PROGRAM = r"""
+import json
+import os
+import pathlib
+import sys
+
+plan = json.loads(pathlib.Path(sys.argv[1]).read_text())
+log = pathlib.Path(plan["log"])
+runs = log.read_text().splitlines() if log.exists() else []
+mine = [run for run in runs if run.startswith(plan["name"] + " ")]
+with log.open("a") as file:
+    file.write(f"{plan['name']} {os.getcwd()}\n")
+kernels = plan["rounds"][len(mine) % len(plan["rounds"])]
+if kernels is not None:
+    path = f"{os.environ['LANESCOPE_KERNEL_TIMES']}.{os.getpid()}"
+    written = {"format": 1, "pid": os.getpid(), "skipped": plan.get("skipped", 0),
+               "dropped": 0, "kernels": kernels}
+    pathlib.Path(path).write_text(json.dumps(written))
+sys.stderr.write(plan.get("stderr", ""))
+sys.exit(plan.get("status", 0))
+"""
+
+
+def times(launches, nanoseconds, shortest=None, longest=None):
+    return {
+        "launches": launches,
+        "nanoseconds": nanoseconds,
+        "shortest": shortest if shortest is not None else nanoseconds // max(launches, 1),
+        "longest": longest if longest is not None else nanoseconds // max(launches, 1),
+    }
+
+
+def fake_folder(tmp_path, name, rounds, **plan):
+    """Return a folder whose stored command is the fake program with these rounds of times."""
+    script = tmp_path / "fake_program.py"
+    script.write_text(FAKE_PROGRAM)
+    folder = tmp_path / name
+    folder.mkdir()
+    plan_path = tmp_path / f"{name}-plan.json"
+    plan_path.write_text(
+        json.dumps({"name": name, "log": str(tmp_path / "log.txt"), "rounds": rounds} | plan)
+    )
+    kernel_times.write_run(folder, [sys.executable, str(script), str(plan_path)], tmp_path)
+    return folder
+
+
+def logged_runs(tmp_path):
+    return [line.split(" ")[0] for line in (tmp_path / "log.txt").read_text().splitlines()]
+
+
+def test_write_run_stores_the_command_and_its_folder(tmp_path):
+    kernel_times.write_run(tmp_path / "run1", ["./app", "--size", "64"], tmp_path)
+    assert json.loads((tmp_path / "run1" / "run.json").read_text()) == {
+        "format": 1,
+        "command": ["./app", "--size", "64"],
+        "cwd": str(tmp_path),
+    }
+    assert kernel_times.read_run(tmp_path / "run1") == (["./app", "--size", "64"], tmp_path)
+
+
+def test_write_run_removes_the_times_of_an_earlier_command(tmp_path):
+    (tmp_path / "kernel-times.json").write_text("{}")
+    kernel_times.write_run(tmp_path, ["./app"])
+    assert not (tmp_path / "kernel-times.json").exists()
+
+
+def test_read_run_of_a_folder_without_a_stored_command_names_both_remedies(tmp_path):
+    with pytest.raises(ValueError, match="holds no run.json") as error:
+        kernel_times.read_run(tmp_path)
+    assert "lanescope record" in str(error.value)
+    assert f"lanescope time {tmp_path} -- ./my_app" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "not json",
+        "[]",
+        '{"format": 2, "command": ["./app"], "cwd": "/"}',
+        '{"format": 1, "command": [], "cwd": "/"}',
+        '{"format": 1, "command": "./app", "cwd": "/"}',
+        '{"format": 1, "command": ["./app", 3], "cwd": "/"}',
+        '{"format": 1, "command": ["./app"]}',
+    ],
+)
+def test_read_run_rejects_a_stored_command_of_another_shape(tmp_path, text):
+    (tmp_path / "run.json").write_text(text)
+    with pytest.raises(ValueError, match="is no stored command"):
+        kernel_times.read_run(tmp_path)
+
+
+def test_timing_runs_the_folders_in_turns_once_per_round(tmp_path):
+    rounds = [{"k": times(1, 100)}]
+    first = fake_folder(tmp_path, "first", rounds)
+    second = fake_folder(tmp_path, "second", rounds)
+    seen = []
+    kernel_times.time_folders(
+        [first, second], tmp_path / "timer.so", 3, lambda index, folder, _: seen.append(index)
+    )
+    assert logged_runs(tmp_path) == ["first", "second"] * 3
+    assert seen == [0, 0, 1, 1, 2, 2]
+
+
+def test_timing_writes_the_launches_and_nanoseconds_of_each_round(tmp_path):
+    rounds = [
+        {"k": times(2, 300, 100, 200), "j": times(1, 50)},
+        {"k": times(2, 280, 120, 160), "j": times(1, 60)},
+    ]
+    folder = fake_folder(tmp_path, "run", rounds)
+    (result,) = kernel_times.time_folders([folder], tmp_path / "timer.so", 2)
+    written = json.loads((folder / "kernel-times.json").read_text())
+    assert written == result
+    assert written["format"] == 1
+    assert written["rounds"] == 2
+    assert len(written["wall_seconds"]) == 2
+    assert all(seconds > 0 for seconds in written["wall_seconds"])
+    assert written["untimed_launches"] == [0, 0]
+    assert written["kernels"] == {
+        "j": {"launches": [1, 1], "nanoseconds": [50, 60], "shortest": 50, "longest": 60},
+        "k": {"launches": [2, 2], "nanoseconds": [300, 280], "shortest": 100, "longest": 200},
+    }
+
+
+def test_timing_runs_each_command_in_its_stored_folder(tmp_path):
+    folder = fake_folder(tmp_path, "run", [{"k": times(1, 10)}])
+    command, _ = kernel_times.read_run(folder)
+    kernel_times.write_run(folder, command, folder)
+    kernel_times.time_folders([folder], tmp_path / "timer.so", 1)
+    assert (tmp_path / "log.txt").read_text() == f"run {folder}\n"
+
+
+def test_a_kernel_missing_from_a_round_counts_no_launch_there(tmp_path):
+    rounds = [{"k": times(1, 10), "j": times(1, 5)}, {"k": times(1, 12)}]
+    folder = fake_folder(tmp_path, "run", rounds)
+    (result,) = kernel_times.time_folders([folder], tmp_path / "timer.so", 2)
+    assert result["kernels"]["j"]["launches"] == [1, 0]
+    assert result["kernels"]["j"]["nanoseconds"] == [5, 0]
+
+
+def test_the_times_of_every_process_of_a_run_add_up(tmp_path):
+    folder = tmp_path / "run"
+    script = tmp_path / "two_processes.py"
+    script.write_text(
+        "import json, os, sys\n"
+        "base = os.environ['LANESCOPE_KERNEL_TIMES']\n"
+        "for pid, ns in ((101, 300), (102, 100)):\n"
+        "    kernels = {'k': {'launches': 1, 'nanoseconds': ns, 'shortest': ns, 'longest': ns}}\n"
+        "    with open(f'{base}.{pid}', 'w') as file:\n"
+        "        json.dump({'format': 1, 'skipped': 1, 'dropped': 2, 'kernels': kernels}, file)\n"
+        "open(f'{base}.103.part', 'w').write('half written')\n"
+    )
+    kernel_times.write_run(folder, [sys.executable, str(script)])
+    (result,) = kernel_times.time_folders([folder], tmp_path / "timer.so", 1)
+    assert result["kernels"]["k"] == {
+        "launches": [2],
+        "nanoseconds": [400],
+        "shortest": 100,
+        "longest": 300,
+    }
+    assert result["untimed_launches"] == [6]
+
+
+@pytest.mark.parametrize(("status", "ending"), [(3, "exited with status 3"), (-9, "signal 9")])
+def test_a_failing_command_names_its_folder_and_status_and_writes_no_times(
+    tmp_path, status, ending
+):
+    first = fake_folder(tmp_path, "first", [{"k": times(1, 10)}])
+    failing = fake_folder(tmp_path, "failing", [{"k": times(1, 10)}], stderr="out of memory\n")
+    if status < 0:
+        kernel_times.write_run(failing, ["sh", "-c", f"kill -{-status} $$"], tmp_path)
+    else:
+        plan = json.loads((tmp_path / "failing-plan.json").read_text())
+        (tmp_path / "failing-plan.json").write_text(json.dumps(plan | {"status": status}))
+    with pytest.raises(ValueError) as error:
+        kernel_times.time_folders([first, failing], tmp_path / "timer.so", 2)
+    assert f"the command of {failing} in round 1 " in str(error.value)
+    assert ending in str(error.value)
+    if status > 0:
+        assert str(error.value).endswith(":\nout of memory")
+    assert not (first / "kernel-times.json").exists()
+    assert not (failing / "kernel-times.json").exists()
+
+
+def test_a_command_that_leaves_no_times_stops_the_timing(tmp_path):
+    folder = fake_folder(tmp_path, "run", [{"k": times(1, 10)}, None])
+    with pytest.raises(ValueError, match="in round 2 exited with status 0 and left no kernel"):
+        kernel_times.time_folders([folder], tmp_path / "timer.so", 3)
+    assert logged_runs(tmp_path) == ["run", "run"]
+    assert not (folder / "kernel-times.json").exists()
+
+
+def test_a_command_that_cannot_start_names_its_folder(tmp_path):
+    kernel_times.write_run(tmp_path, [str(tmp_path / "missing-program")])
+    with pytest.raises(ValueError, match=f"the command of {tmp_path} cannot start"):
+        kernel_times.time_folders([tmp_path], tmp_path / "timer.so", 1)
+
+
+def test_a_timer_file_that_is_no_json_stops_the_timing(tmp_path):
+    script = tmp_path / "broken.py"
+    script.write_text(
+        "import os\nopen(os.environ['LANESCOPE_KERNEL_TIMES'] + '.7', 'w').write('{')\n"
+    )
+    kernel_times.write_run(tmp_path, [sys.executable, str(script)])
+    with pytest.raises(ValueError, match="unreadable file"):
+        kernel_times.time_folders([tmp_path], tmp_path / "timer.so", 1)
+
+
+def test_the_timed_program_gets_the_timer_and_the_file_for_its_times(tmp_path):
+    script = tmp_path / "environment.py"
+    script.write_text(
+        "import json, os\n"
+        "base = os.environ['LANESCOPE_KERNEL_TIMES']\n"
+        "kernel = os.environ['CUDA_INJECTION64_PATH']\n"
+        "times = {'launches': 1, 'nanoseconds': 1, 'shortest': 1, 'longest': 1}\n"
+        "open(f'{base}.1', 'w').write(json.dumps({'kernels': {kernel: times}}))\n"
+    )
+    kernel_times.write_run(tmp_path, [sys.executable, str(script)])
+    (result,) = kernel_times.time_folders([tmp_path], tmp_path / "timer.so", 1)
+    assert list(result["kernels"]) == [str(tmp_path / "timer.so")]
+
+
+def test_ranked_orders_the_kernels_by_their_median_time_over_the_rounds():
+    result = {
+        "rounds": 3,
+        "kernels": {
+            "short": times_over_rounds([1, 1, 1], [10, 30, 20]),
+            "long": times_over_rounds([2, 2, 3], [100, 50, 60]),
+        },
+    }
+    long, short = kernel_times.ranked(result)
+    assert (long.name, long.median_ns, long.launches) == ("long", 60, 2)
+    assert (long.fastest_round_ns, long.slowest_round_ns) == (50, 100)
+    assert not long.even_launches
+    assert (short.name, short.median_ns) == ("short", 20)
+    assert short.even_launches
+
+
+def times_over_rounds(launches, nanoseconds):
+    return {"launches": launches, "nanoseconds": nanoseconds, "shortest": 1, "longest": 1}
+
+
+def _has_gpu() -> bool:
+    try:
+        Driver().close()
+    except DriverError:
+        return False
+    return True
+
+
+TOOLS = toolchain.find()
+needs_gpu = pytest.mark.skipif(
+    TOOLS.nvrtc is None or TOOLS.cupti_lib is None or shutil.which("g++") is None or not _has_gpu(),
+    reason="NVRTC, CUPTI, g++, and a GPU are needed",
+)
+
+
+@needs_gpu
+def test_the_timer_times_every_kernel_that_a_recording_of_the_bench_traces(tmp_path):
+    driver = Driver()
+    arch = driver.arch()
+    driver.close()
+    cubin = tmp_path / "bench.cubin"
+    cubin.write_bytes(calibration.compile_kernels(arch, TOOLS))
+    command = [sys.executable, "-m", "lanescope", "bench", "run", "--cubin", str(cubin)]
+    recording = tmp_path / "recording"
+    built = build_recorder(tmp_path / "build", arch, TOOLS)
+    assert capture.record(command, built, recording) == 0
+    traced: dict[str, int] = {}
+    for path in capture.import_recording(recording, TOOLS.disassemblers):
+        kernel = read_metadata(path)["kernel"]
+        traced[kernel] = traced.get(kernel, 0) + 1
+    kernel_times.write_run(recording, command)
+    timer = build_kernel_timer(tmp_path / "build", TOOLS)
+    (result,) = kernel_times.time_folders([recording], timer, 2)
+    assert set(result["kernels"]) == set(traced)
+    for name, launches in traced.items():
+        assert result["kernels"][name]["launches"] == [launches, launches], name
+        assert all(nanoseconds > 0 for nanoseconds in result["kernels"][name]["nanoseconds"])
+    assert result["untimed_launches"] == [0, 0]

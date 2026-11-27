@@ -8,6 +8,7 @@ from lanescope.commands import (
     nsight_check,
     record_program,
     servers,
+    time_program,
     trace_views,
     transpose_demo,
     write_html_report,
@@ -46,6 +47,7 @@ def _parser() -> argparse.ArgumentParser:
     write_html_report.add_parsers(commands)
     transpose_demo.add_parsers(commands)
     record_program.add_parsers(commands)
+    time_program.add_parsers(commands)
     calibration_bench.add_parsers(commands)
     nsight_check.add_parsers(commands)
     servers.add_parsers(commands)

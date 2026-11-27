@@ -1289,6 +1289,10 @@ table.ranking {
   width: 84px;
 }
 
+.ranking .time-col {
+  width: 96px;
+}
+
 .ranking th {
   color: var(--muted);
   font-weight: 500;

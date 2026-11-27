@@ -34,11 +34,11 @@ def call(name, arguments):
     return asyncio.run(run())
 
 
-def test_server_lists_the_five_tools(tmp_path):
+def test_server_lists_the_six_tools(tmp_path):
     path = tmp_path / "t.npz"
     demos.transpose_trace().save(path)
     names, _ = call("explain", {"trace_path": str(path)})
-    assert sorted(names) == ["explain", "lanes", "suggest", "summary", "whatif"]
+    assert sorted(names) == ["compare", "explain", "lanes", "suggest", "summary", "whatif"]
 
 
 def test_summary_tool_ranks_the_lines_of_a_recording_and_names_their_trace(tmp_path):
@@ -63,6 +63,34 @@ def test_summary_tool_gives_one_entry_per_template_with_its_instances(tmp_path):
     (entry,) = mcp_server.summary(str(tmp_path))["kernels"]
     assert entry["template"] == "ns::tile"
     assert sorted(found["name"] for found in entry["instances"]) == ["tile<4>", "tile<8>"]
+
+
+def test_summary_tool_gives_the_kernel_times_stored_with_the_recording(tmp_path):
+    demos.transpose_trace().save(tmp_path / "trace-0.npz")
+    times = {"launches": [1, 1], "nanoseconds": [800, 1_000], "shortest": 800, "longest": 1_000}
+    result = {"format": 1, "rounds": 2, "kernels": {"transpose": times}}
+    (tmp_path / "kernel-times.json").write_text(json.dumps(result))
+    data = mcp_server.summary(str(tmp_path))
+    assert data["kernels"][0]["time_ns"] == 900
+    assert data["times"][0]["total_ns"] == 900
+
+
+def test_compare_tool_gives_the_counts_of_each_template_before_and_after(tmp_path):
+    for name in ("before", "after"):
+        (tmp_path / name).mkdir()
+        demos.transpose_trace().save(tmp_path / name / "trace-0.npz")
+    demos.histogram_trace().save(tmp_path / "after" / "trace-1.npz")
+    _, result = call(
+        "compare",
+        {"before_path": str(tmp_path / "before"), "after_path": str(tmp_path / "after")},
+    )
+    content = result.content[0]
+    assert TextContent is not None and isinstance(content, TextContent)
+    data = json.loads(content.text)
+    (row,) = data["kernels"]
+    assert row["before"]["wavefronts"] == row["after"]["wavefronts"]
+    assert [entry["name"] for entry in data["only_after"]] == ["histogram"]
+    assert data["timed"] == {"before": None, "after": None}
 
 
 def test_summary_tool_names_a_missing_folder():
@@ -180,6 +208,7 @@ def test_lanescope_mcp_serves_the_tools_over_standard_input_and_output():
     assert process.returncode == 0
     assert replies[1]["serverInfo"]["name"] == "lanescope"
     assert sorted(tool["name"] for tool in replies[2]["tools"]) == [
+        "compare",
         "explain",
         "lanes",
         "suggest",

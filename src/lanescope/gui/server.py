@@ -157,7 +157,8 @@ class Library:
             current = {file.stamp for file in files}
             for stamp in [stamp for stamp in self._facts if stamp not in current]:
                 del self._facts[stamp]
-        data = summary.summarize(items)
+        runs = {file.run: summary.run_of(file.path) for file in files}
+        data = summary.summarize(items, times=summary.run_times(runs))
         return {"state": "done", "truncated": len(files) == summary.MAX_TRACES} | data
 
     def close(self, timeout: float = 5.0) -> None:

@@ -6,10 +6,11 @@ import multiprocessing
 import os
 import pathlib
 import re
+import statistics
 import sys
-from collections.abc import Generator, Iterable, Sequence
+from collections.abc import Generator, Iterable, Mapping, Sequence
 
-from lanescope import kernel_names
+from lanescope import kernel_names, kernel_times
 from lanescope.model import data_dependence
 from lanescope.model.counters import count
 from lanescope.trace import Trace
@@ -54,6 +55,9 @@ class Instruction:
     # a shared instruction with excess, which judge its line over all launches.
     patterns: frozenset[int] | None = frozenset()
     excess_counts: frozenset[int] = frozenset()
+    # The file, line, and text that an inlined instruction comes from, such as a line of a
+    # header that the kernel calls.
+    origin: tuple[str, int, str] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -87,6 +91,19 @@ def trace_files(root: pathlib.Path, limit: int) -> list[pathlib.Path]:
 def run_of(path: pathlib.Path) -> pathlib.Path:
     """Return the run of a trace file: the folder of a recorded trace, or the file itself."""
     return path.parent if RECORDED_NAME.fullmatch(path.name) else path
+
+
+def run_times(runs: Mapping[str, pathlib.Path]) -> dict[str, dict]:
+    """Return the kernel times of each run that has them, by its name.
+
+    The times of a recording lie in its folder, and those of a trace file beside it.
+    """
+    found = {}
+    for name, run in runs.items():
+        result = kernel_times.read_times(run if run.is_dir() else run.parent)
+        if result is not None:
+            found[name] = result
+    return found
 
 
 def read_facts(path: pathlib.Path) -> TraceFacts | None:
@@ -163,6 +180,7 @@ def trace_facts(trace: Trace) -> TraceFacts:
                 most=counter.most,
                 patterns=found.patterns if found else frozenset(),
                 excess_counts=found.excess_counts if found else frozenset(),
+                origin=trace.origin(counter.pc),
             )
         )
     metadata = trace.metadata
@@ -176,15 +194,19 @@ def trace_facts(trace: Trace) -> TraceFacts:
 
 
 def summarize(
-    items: Iterable[tuple[str, str, TraceFacts | None]], by_template: bool = True
+    items: Iterable[tuple[str, str, TraceFacts | None]],
+    by_template: bool = True,
+    times: Mapping[str, dict] | None = None,
 ) -> dict:
     """Return the counts of many traces by kernel template and by source line, worst first.
 
     Each item names a trace by the id that opens it and by its run, with its facts, or
     with None for a file that holds no trace. Each entry of a template lists its kernel
     instances, and without `by_template` each instance stands alone. The lines keep only
-    instructions with extra passes or sectors.
+    instructions with extra passes or sectors. `times` holds the kernel times of the runs
+    that lanescope time timed, by run.
     """
+    times = times or {}
     traces = unreadable = without_lines = dropped_traces = dropped = 0
     runs: dict[str, None] = {}
     kernels: dict[tuple[str, str], dict] = {}
@@ -208,8 +230,7 @@ def summarize(
                 kernel["worst"][item.unit] = _place(trace_id, item)
             if item.excessive == 0:
                 continue
-            where = item.line if item.line is not None else f"{item.pc:#x}"
-            key = (run, facts.kernel, facts.source_file, where, item.instruction, item.space)
+            key = (run, facts.kernel, *_line_place(facts, item), item.instruction, item.space)
             entry = lines.setdefault(key, _line_entry(run, facts, item))
             _add_to_line(entry, trace_id, item)
     names = kernel_names.readable(kernel for _, kernel in kernels)
@@ -217,6 +238,7 @@ def summarize(
     for kernel in kernels.values():
         full = names[kernel["kernel"]]
         kernel |= {"name": kernel_names.short(full), "full_name": full}
+        kernel |= _instance_time(times.get(kernel["run"]), kernel["kernel"])
         for unit in UNITS:
             for name, value in kernel["totals"][unit].items():
                 totals[unit][name] += value
@@ -228,7 +250,7 @@ def summarize(
         found.sort(
             key=lambda entry: (
                 -entry["excessive"], entry["run"], entry["template"], entry["kernel"],
-                entry["file"], entry["line"] or 0, entry["instruction"],
+                *_shown_place(entry), entry["instruction"],
             )
         )  # fmt: skip
         for entry in found[:MAX_LINES]:
@@ -246,9 +268,32 @@ def summarize(
         "totals": totals,
         "without_lines": without_lines,
         "dropped": {"traces": dropped_traces, "records": dropped},
+        "times": [_run_time(run, times[run]) for run in runs if run in times],
         "kernels": sorted(templates.values(), key=_kernel_order),
         "lines": ranked_lines,
     }
+
+
+def summarize_files(
+    paths: Sequence[pathlib.Path],
+    facts: Iterable[TraceFacts | None],
+    by_template: bool = True,
+    run: pathlib.Path | None = None,
+) -> dict:
+    """Return the summary of trace files with the kernel times of their runs.
+
+    Each recorded trace belongs to the run of its folder, unless `run` names one folder or
+    trace file for all of them.
+    """
+    runs = [run or run_of(path) for path in paths]
+    return summarize(
+        (
+            (str(path), str(found_run), found)
+            for path, found_run, found in zip(paths, runs, facts, strict=True)
+        ),
+        by_template=by_template,
+        times=run_times({str(found_run): found_run for found_run in runs}),
+    )
 
 
 def _group_templates(
@@ -277,7 +322,48 @@ def _group_templates(
             entry |= {"name": instances[0]["name"], "full_name": instances[0]["full_name"]}
         else:
             entry |= {"name": kernel_names.short(entry["template"]), "full_name": entry["template"]}
+        entry |= _template_time(instances)
     return templates, owners
+
+
+def _instance_time(result: dict | None, kernel: str) -> dict:
+    """Return the median time of a kernel over the rounds of its run, with each round."""
+    found = result["kernels"].get(kernel) if result else None
+    if found is None:
+        return {"time_ns": None, "timed_launches": None, "round_ns": None}
+    return {
+        "time_ns": round(statistics.median(found["nanoseconds"])),
+        "timed_launches": round(statistics.median(found["launches"])),
+        "round_ns": list(found["nanoseconds"]),
+    }
+
+
+def _template_time(instances: Sequence[dict]) -> dict:
+    """Return the time of the timed instances of a template, round by round.
+
+    The median of the rounds of the sum stays within the range of the rounds, which a sum
+    of the medians of the instances can leave.
+    """
+    timed = [instance for instance in instances if instance["round_ns"] is not None]
+    if not timed:
+        return {"time_ns": None, "timed_launches": None, "round_ns": None}
+    rounds = [sum(values) for values in zip(*(item["round_ns"] for item in timed), strict=True)]
+    return {
+        "time_ns": round(statistics.median(rounds)),
+        "timed_launches": sum(instance["timed_launches"] for instance in timed),
+        "round_ns": rounds,
+    }
+
+
+def _run_time(run: str, result: dict) -> dict:
+    """Return the kernel time of a run over every kernel it launched, also those without a trace."""
+    rounds = kernel_times.round_totals(result)
+    return {
+        "run": run,
+        "rounds": result["rounds"],
+        "total_ns": round(statistics.median(rounds)),
+        "round_ns": rounds,
+    }
 
 
 def _merge_lines(
@@ -308,9 +394,27 @@ def _merge_lines(
         entry["most"] = max(entry["most"], line["most"])
         _add_evidence(entry, line["patterns"], line["excess_counts"])
         if line["worst"]["excessive"] > entry["worst"]["excessive"]:
-            entry["worst"] = line["worst"]
-            entry["kernel"] = line["kernel"]
+            for name in ("worst", "kernel", "file", "line", "source"):
+                entry[name] = line[name]
     return merged
+
+
+def _line_place(facts: TraceFacts, item: Instruction) -> tuple[str, int | str]:
+    """Return the file and the line that a line of a summary keys on, or its PC without a line.
+
+    An inlined instruction keys on the line it comes from, therefore the instructions of a
+    header that one call line inlines stay apart.
+    """
+    if item.origin is not None:
+        return item.origin[0], item.origin[1]
+    return facts.source_file, item.line if item.line is not None else f"{item.pc:#x}"
+
+
+def _shown_place(entry: dict) -> tuple[str, int]:
+    origin = entry["origin"]
+    if origin is not None:
+        return origin["file"], origin["line"]
+    return entry["file"], entry["line"] or 0
 
 
 def _finished_line(entry: dict, template: dict) -> dict:
@@ -376,6 +480,11 @@ def _line_entry(run: str, facts: TraceFacts, item: Instruction) -> dict:
         "width": item.width,
         "unit": item.unit,
         "instruction": item.instruction,
+        "origin": (
+            None
+            if item.origin is None
+            else dict(zip(("file", "line", "text"), item.origin, strict=True))
+        ),
         "traces": set(),
         "data_dependent": False,
         "fewest": item.fewest,
@@ -396,6 +505,8 @@ def _add_to_line(entry: dict, trace_id: str, item: Instruction) -> None:
     _add_evidence(entry, item.patterns, item.excess_counts)
     if item.excessive > entry["worst"]["excessive"]:
         entry["worst"] = _place(trace_id, item)
+        # The call lines that inline one origin can differ, and the line names the worst.
+        entry["line"], entry["source"] = item.line, item.source
 
 
 def _add_evidence(

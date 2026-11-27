@@ -48,6 +48,12 @@ export function renderSummary(data, unit, open) {
     stat("Launches", format.count(data.traces)),
     stat("Kernels", format.count(instances)),
   );
+  if (data.times.length === 1) {
+    const [timed] = data.times;
+    $("summary-stats").append(
+      stat("Kernel time", format.duration(timed.total_ns), `The median of ${format.plural(timed.rounds, "round")} of lanescope time.`),
+    );
+  }
   renderNotes(data);
   renderLines(data, unit, open);
   renderKernels(data, unit, open);
@@ -114,9 +120,14 @@ function renderKernels(data, unit, open) {
   const withRun = data.runs.length > 1;
   const kernels = byExcess(data.kernels, unit);
   const peak = Math.max(1, ...kernels.map((kernel) => kernel.totals[unit].excessive));
+  // The kernel time of each timed run, which the column of each row takes its part of.
+  const runTimes = data.times.length ? new Map(data.times.map((timed) => [timed.run, timed.total_ns])) : null;
+  for (const header of document.querySelectorAll("[data-time-column]")) {
+    header.hidden = !runTimes;
+  }
   $("summary-kernels").replaceChildren(
     ...kernels.flatMap((kernel) => {
-      const row = kernelRow(kernel, unit, peak, open, kernelCell(kernel, withRun));
+      const row = kernelRow(kernel, unit, peak, open, kernelCell(kernel, withRun), runTimes);
       if (kernel.instances.length < 2) {
         return [row];
       }
@@ -124,7 +135,7 @@ function renderKernels(data, unit, open) {
       const rows = byExcess(kernel.instances, unit).map((instance) => {
         const name = kernelCell(instance, false);
         name.classList.add("instance-name");
-        const shown = kernelRow(instance, unit, peak, open, name);
+        const shown = kernelRow(instance, unit, peak, open, name, runTimes);
         shown.classList.add("instance");
         shown.hidden = !openTemplates.has(key);
         return shown;
@@ -140,7 +151,7 @@ function byExcess(entries, unit) {
   return found.sort((a, b) => b.totals[unit].excessive - a.totals[unit].excessive);
 }
 
-function kernelRow(entry, unit, peak, open, name) {
+function kernelRow(entry, unit, peak, open, name, runTimes) {
   const counts = entry.totals[unit];
   const row = openingRow(entry.worst[unit], open);
   const extra = cell(format.count(counts.excessive), "num");
@@ -151,6 +162,13 @@ function kernelRow(entry, unit, peak, open, name) {
     name,
     cell(format.count(entry.launches), "num"),
   );
+  if (runTimes) {
+    const timed = entry.time_ns !== null;
+    row.append(
+      cell(timed ? format.duration(entry.time_ns) : "–", "num"),
+      cell(timed ? format.percent(entry.time_ns, runTimes.get(entry.run) ?? 0) : "–", "num"),
+    );
+  }
   return row;
 }
 
@@ -213,8 +231,14 @@ function lineCell(line) {
   const element = document.createElement("td");
   const what = document.createElement("span");
   what.className = "what";
-  const file = line.file.split("/").pop();
-  what.textContent = line.line === null ? `PC ${line.pc}` : file ? `${file}:${line.line}` : `Line ${line.line}`;
+  const file = baseName(line.file);
+  const call = file ? `${file}:${line.line}` : `line ${line.line}`;
+  if (line.origin) {
+    what.textContent = `${baseName(line.origin.file)}:${line.origin.line}`;
+    what.title = line.origin.file;
+  } else {
+    what.textContent = line.line === null ? `PC ${line.pc}` : file ? call : `Line ${line.line}`;
+  }
   const kind = document.createElement("span");
   kind.className = "kind";
   kind.textContent = ` ${line.space} ${line.kind}, ${line.width} B`;
@@ -227,14 +251,24 @@ function lineCell(line) {
     what.append(tag);
   }
   element.append(what);
-  if (line.source) {
-    const code = detail(line.source, "where mono");
-    code.title = line.source;
+  const text = line.origin ? line.origin.text : line.source;
+  if (text) {
+    const code = detail(text, "where mono");
+    code.title = text;
     element.append(code);
   } else if (line.line === null) {
     element.append(detail("no source line"));
   }
+  if (line.origin) {
+    const inlined = detail(`inlined at ${call}`);
+    inlined.title = line.source ? `${call}: ${line.source}` : call;
+    element.append(inlined);
+  }
   return element;
+}
+
+function baseName(path) {
+  return path.split(/[\\/]/).pop();
 }
 
 function kernelCell(entry, withRun, instances = 1) {

@@ -438,6 +438,23 @@ def test_a_library_without_threads_sums_every_trace_during_the_call(tmp_path):
     assert {kernel["name"] for kernel in answer["kernels"]} == {"transpose", "histogram"}
 
 
+def test_a_summary_gives_the_kernel_times_of_each_run_folder_that_has_them(tmp_path):
+    for name in ("timed", "untimed"):
+        (tmp_path / name).mkdir()
+        demos.transpose_trace().save(tmp_path / name / "trace-0.npz")
+    times = {"launches": [1], "nanoseconds": [2_000], "shortest": 2_000, "longest": 2_000}
+    result = {"format": 1, "rounds": 1, "kernels": {"transpose": times}}
+    (tmp_path / "timed" / "kernel-times.json").write_text(json.dumps(result))
+    answer = gui.Library([tmp_path], background=False).summary()
+    assert answer["times"] == [
+        {"run": f"{tmp_path.name}/timed", "rounds": 1, "total_ns": 2_000, "round_ns": [2_000]}
+    ]
+    assert {kernel["run"]: kernel["time_ns"] for kernel in answer["kernels"]} == {
+        f"{tmp_path.name}/timed": 2_000,
+        f"{tmp_path.name}/untimed": None,
+    }
+
+
 def test_a_summary_reads_a_changed_trace_again_and_forgets_a_deleted_one(tmp_path):
     demos.transpose_trace().save(tmp_path / "trace-0.npz")
     demos.transpose_trace().save(tmp_path / "trace-1.npz")

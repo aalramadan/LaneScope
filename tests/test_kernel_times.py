@@ -255,6 +255,43 @@ def times_over_rounds(launches, nanoseconds):
     return {"launches": launches, "nanoseconds": nanoseconds, "shortest": 1, "longest": 1}
 
 
+def test_read_times_gives_the_times_that_time_folders_wrote(tmp_path):
+    folder = fake_folder(tmp_path, "a", [{"k": times(2, 40)}, {"k": times(2, 60)}])
+    (written,) = kernel_times.time_folders([folder], tmp_path / "timer.so", 2)
+    assert kernel_times.read_times(folder) == written
+
+
+def test_read_times_of_a_folder_without_times_gives_none(tmp_path):
+    assert kernel_times.read_times(tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "not json",
+        json.dumps({"format": 2, "rounds": 1, "kernels": {}}),
+        json.dumps({"format": 1, "rounds": 2, "kernels": {"k": times_over_rounds([1], [5])}}),
+        json.dumps({"format": 1, "rounds": 1, "kernels": {"k": times_over_rounds([1], ["5"])}}),
+    ],
+)
+def test_read_times_names_a_file_that_holds_no_kernel_times(tmp_path, text):
+    (tmp_path / "kernel-times.json").write_text(text)
+    with pytest.raises(ValueError, match="kernel-times.json holds no kernel times"):
+        kernel_times.read_times(tmp_path)
+
+
+def test_round_totals_add_up_the_named_kernels_or_every_kernel_in_each_round():
+    result = {
+        "rounds": 2,
+        "kernels": {
+            "a": times_over_rounds([1, 1], [10, 20]),
+            "b": times_over_rounds([1, 1], [1, 2]),
+        },
+    }
+    assert kernel_times.round_totals(result) == [11, 22]
+    assert kernel_times.round_totals(result, ["b", "missing"]) == [1, 2]
+
+
 def _has_gpu() -> bool:
     try:
         Driver().close()

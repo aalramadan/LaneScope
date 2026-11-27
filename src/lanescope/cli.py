@@ -4,6 +4,7 @@ from collections.abc import Sequence
 
 from lanescope.commands import (
     calibration_bench,
+    compare_recordings,
     layout_changes,
     nsight_check,
     record_program,
@@ -48,6 +49,7 @@ def _parser() -> argparse.ArgumentParser:
     transpose_demo.add_parsers(commands)
     record_program.add_parsers(commands)
     time_program.add_parsers(commands)
+    compare_recordings.add_parsers(commands)
     calibration_bench.add_parsers(commands)
     nsight_check.add_parsers(commands)
     servers.add_parsers(commands)

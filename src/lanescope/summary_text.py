@@ -9,11 +9,19 @@ UNITS = {
 }
 MARK = "*"
 KERNEL_HEADER = "{:>14}  {:>9}  {:>8}  kernel"
+TIMED_KERNEL_HEADER = "{:>14}  {:>9}  {:>8}  {:>10}  {:>6}  kernel"
 LINE_HEADER = "{:>14}  {:>6}  {:>9}  {:>8}  {:32}  kernel"
+# How the table of kernels can be ordered: by the extra units or by the kernel time.
+ORDERS = ("extra", "time")
+DURATION_UNITS = ((1e9, "s"), (1e6, "ms"), (1e3, "us"))
 
 
-def render(data: dict, unit: str = "wavefronts", limit: int = 10) -> str:
-    """Return a summary as text: the totals, the worst kernels, the worst lines, and a next step."""
+def render(data: dict, unit: str = "wavefronts", limit: int = 10, order: str = "extra") -> str:
+    """Return a summary as text: the totals, the worst kernels, the worst lines, and a next step.
+
+    With kernel times, the table of kernels gives the time of each and its part of the
+    kernel time of its run, and `order` "time" ranks the kernels by their time.
+    """
     memory, noun, cause = UNITS[unit]
     kernels = data["kernels"]
     runs = ", ".join(printable(run) for run in data["runs"]) or "no run"
@@ -23,25 +31,51 @@ def render(data: dict, unit: str = "wavefronts", limit: int = 10) -> str:
     out = [
         f"{runs}: {_plural(data['traces'], 'launch')} of {_plural(instances, 'kernel')}{grouped}"
     ]
+    run_totals = {timed["run"]: timed["total_ns"] for timed in data["times"]}
+    for timed in data["times"]:
+        of_run = f" of {printable(timed['run'])}" if len(data["runs"]) > 1 else ""
+        out.append(
+            f"Kernel time{of_run}: {duration(timed['total_ns'])}, the median of "
+            f"{_plural(timed['rounds'], 'round')} without the recorder."
+        )
     total = data["totals"][unit]
     if total["achieved"] == 0:
         out.append(f"{memory}: no accesses")
-        return "\n".join(out)
-    share = percent(total["excessive"], total["achieved"])
-    out.append(
-        f"{memory}: {total['achieved']:,} {noun} where {total['ideal']:,} would do. "
-        f"{cause} add {total['excessive']:,} of them ({share})."
-    )
-    ranked = [kernel for kernel in kernels if kernel["totals"][unit]["achieved"]]
-    header = KERNEL_HEADER.format(f"extra {noun}", "of kernel", "launches")
-    out += ["", f"Kernels by extra {noun}", header]
+        # A table of kernels by time still says where the time goes.
+        if order != "time":
+            return "\n".join(out)
+    else:
+        share = percent(total["excessive"], total["achieved"])
+        out.append(
+            f"{memory}: {total['achieved']:,} {noun} where {total['ideal']:,} would do. "
+            f"{cause} add {total['excessive']:,} of them ({share})."
+        )
+    if order == "time":
+        ranked = sorted(kernels, key=lambda kernel: -(kernel["time_ns"] or -1))
+        title = "Kernels by time"
+    else:
+        ranked = [kernel for kernel in kernels if kernel["totals"][unit]["achieved"]]
+        title = f"Kernels by extra {noun}"
+    if run_totals:
+        header = TIMED_KERNEL_HEADER.format(
+            f"extra {noun}", "of kernel", "launches", "time", "of run"
+        )
+    else:
+        header = KERNEL_HEADER.format(f"extra {noun}", "of kernel", "launches")
+    out += ["", title, header]
     for kernel in ranked[:limit]:
         counts = kernel["totals"][unit]
         several = len(kernel["instances"])
         count = f" ({several:,} instances)" if several > 1 else ""
+        timed = ""
+        if run_totals:
+            time_ns = kernel["time_ns"]
+            spent = "-" if time_ns is None else duration(time_ns)
+            part = "-" if time_ns is None else percent(time_ns, run_totals.get(kernel["run"], 0))
+            timed = f"{spent:>10}  {part:>6}  "
         out.append(
             f"{counts['excessive']:>14,}  {percent(counts['excessive'], counts['achieved']):>9}  "
-            f"{kernel['launches']:>8,}  {printable(kernel['name'])}{count}"
+            f"{kernel['launches']:>8,}  {timed}{printable(kernel['name'])}{count}"
         )
     if len(ranked) > limit:
         out.append(f"{'':>14}  and {_plural(len(ranked) - limit, 'more kernel')}")
@@ -101,7 +135,13 @@ def notes(data: dict) -> list[str]:
 
 
 def _place(line: dict) -> str:
-    """Return where a line is, such as kernel.cu:25 load, or its PC without a line table."""
+    """Return where a line is, such as kernel.cu:25 load, or its PC without a line table.
+
+    A line inlined from another file, such as a header, is where it comes from.
+    """
+    if line["origin"] is not None:
+        origin = line["origin"]
+        return f"{pathlib.PurePath(printable(origin['file'])).name}:{origin['line']} {line['kind']}"
     if line["line"] is None:
         return f"pc {line['pc']} {line['kind']}"
     name = pathlib.PurePath(printable(line["file"])).name
@@ -115,6 +155,25 @@ def percent(part: int, whole: int) -> str:
         return "-"
     share = 100 * part / whole
     return "<0.1%" if 0 < share < 0.1 else f"{share:.1f}%"
+
+
+def duration(nanoseconds: float) -> str:
+    """Return a time in the largest unit that keeps a whole number, such as 2.3 ms."""
+    scale, name = _time_unit(nanoseconds)
+    return f"{nanoseconds / scale:,.1f} {name}" if scale > 1 else f"{nanoseconds:,.0f} ns"
+
+
+def duration_range(fastest: float, slowest: float) -> str:
+    """Return a range of times in the unit of its slowest end, such as 0.9-1.2 us."""
+    scale, name = _time_unit(slowest)
+    digits = 1 if scale > 1 else 0
+    return f"{fastest / scale:,.{digits}f}-{slowest / scale:,.{digits}f} {name}"
+
+
+def _time_unit(nanoseconds: float) -> tuple[float, str]:
+    return next(
+        ((scale, name) for scale, name in DURATION_UNITS if nanoseconds >= scale), (1.0, "ns")
+    )
 
 
 def _plural(value: int, noun: str) -> str:

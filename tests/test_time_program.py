@@ -138,15 +138,3 @@ def test_time_without_cupti_names_the_missing_tools(tmp_path, monkeypatch, capsy
     err = capsys.readouterr().err
     assert "missing CUDA tools: cupti_include, cupti_lib, cuda_include" in err
     assert "pip install 'lanescope[gpu]'" in err
-
-
-@pytest.mark.parametrize(
-    ("nanoseconds", "text"),
-    [(512, "512 ns"), (1_500, "1.5 us"), (2_340_000, "2.3 ms"), (3_100_000_000, "3.1 s")],
-)
-def test_durations_take_the_largest_unit_that_keeps_a_whole_number(nanoseconds, text):
-    assert time_program._duration(nanoseconds) == text
-
-
-def test_a_range_takes_the_unit_of_its_slowest_round():
-    assert time_program._range(900, 1_200) == "0.9-1.2 us"

@@ -1,5 +1,6 @@
 import concurrent.futures
 import dataclasses
+import json
 
 import numpy as np
 import pytest
@@ -376,3 +377,199 @@ def test_a_line_that_one_trace_marks_stays_marked_over_all_launches():
     ]
     (line,) = shared_lines(summary.summarize(items))
     assert line["data_dependent"] is True
+
+
+def column_loads(origins):
+    """Return the facts of two conflicted loads on call line 7, with the origins they are given."""
+    rows = [
+        Access(pc, Space.SHARED, Kind.LOAD, 4, tuple(128 * lane for lane in range(WARP_SIZE)))
+        for pc in (0x10, 0x20)
+    ]
+    metadata = {
+        "kernel": "sort",
+        "source_file": "/src/sort.cu",
+        "source": [""] * 6 + ["    block_sort(keys);"],
+        "lines": {"0x10": 7, "0x20": 7},
+        "opcodes": {"0x10": "LDS", "0x20": "LDS"},
+    }
+    if origins:
+        metadata |= {
+            "origin_files": ["/src/include/block_sort.cuh"],
+            "origins": {pc: [0, line] for pc, line in origins.items()},
+            "origin_text": [{"41": "  a = keys[i];", "58": "  b = keys[j];"}],
+        }
+    return facts(Trace.from_accesses(rows, metadata))
+
+
+def test_instructions_inlined_from_two_lines_of_a_header_stay_apart_under_their_origins():
+    data = summary.summarize([("s.npz", "s.npz", column_loads({"0x10": 41, "0x20": 58}))])
+    lines = shared_lines(data)
+    assert [line["origin"] for line in lines] == [
+        {"file": "/src/include/block_sort.cuh", "line": 41, "text": "a = keys[i];"},
+        {"file": "/src/include/block_sort.cuh", "line": 58, "text": "b = keys[j];"},
+    ]
+    assert all(
+        (line["file"], line["line"], line["source"]) == ("/src/sort.cu", 7, "block_sort(keys);")
+        for line in lines
+    )
+
+
+def test_instructions_inlined_from_one_line_of_a_header_add_up_in_one_line():
+    data = summary.summarize([("s.npz", "s.npz", column_loads({"0x10": 41, "0x20": 41}))])
+    (line,) = shared_lines(data)
+    assert line["origin"]["line"] == 41
+    assert line["excessive"] == 2 * 31
+
+
+def test_instructions_of_one_call_line_without_origins_add_up_in_the_call_line():
+    data = summary.summarize([("s.npz", "s.npz", column_loads({}))])
+    (line,) = shared_lines(data)
+    assert (line["file"], line["line"], line["origin"]) == ("/src/sort.cu", 7, None)
+    assert line["excessive"] == 2 * 31
+
+
+def test_an_inlined_line_of_one_template_adds_up_over_its_instances():
+    loads = column_loads({"0x10": 41, "0x20": 58})
+    items = [
+        ("r/trace-0.npz", "r", dataclasses.replace(loads, kernel=TILE_4)),
+        ("r/trace-1.npz", "r", dataclasses.replace(loads, kernel=TILE_8)),
+    ]
+    lines = shared_lines(summary.summarize(items))
+    assert [(line["origin"]["line"], line["instances"]) for line in lines] == [(41, 2), (58, 2)]
+
+
+def test_the_text_names_the_header_line_that_an_inlined_line_comes_from():
+    text = summary_text.render(
+        summary.summarize([("s.npz", "s.npz", column_loads({"0x10": 41, "0x20": 58}))])
+    )
+    lines = text.splitlines()
+    rows = lines[lines.index("Lines by extra passes") + 2 :][:2]
+    assert [row.split()[4:6] for row in rows] == [
+        ["block_sort.cuh:41", "load"],
+        ["block_sort.cuh:58", "load"],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("nanoseconds", "text"),
+    [(512, "512 ns"), (1_500, "1.5 us"), (2_340_000, "2.3 ms"), (3_100_000_000, "3.1 s")],
+)
+def test_durations_take_the_largest_unit_that_keeps_a_whole_number(nanoseconds, text):
+    assert summary_text.duration(nanoseconds) == text
+
+
+def test_a_range_takes_the_unit_of_its_slowest_round():
+    assert summary_text.duration_range(900, 1_200) == "0.9-1.2 us"
+
+
+def timing(**kernels):
+    """Return the kernel times of lanescope time, with the nanoseconds of each kernel per round."""
+    rounds = len(next(iter(kernels.values())))
+    return {
+        "format": 1,
+        "rounds": rounds,
+        "kernels": {
+            name: {
+                "launches": [1] * rounds,
+                "nanoseconds": list(values),
+                "shortest": 1,
+                "longest": 9,
+            }
+            for name, values in kernels.items()
+        },
+    }
+
+
+def test_each_kernel_of_a_timed_run_takes_its_median_time_over_the_rounds():
+    items = [("r/trace-0.npz", "r", facts(demos.transpose_trace()))]
+    times = {"r": timing(transpose=[400, 500, 460], copy=[100, 100, 100])}
+    data = summary.summarize(items, times=times)
+    (kernel,) = data["kernels"]
+    assert (kernel["time_ns"], kernel["timed_launches"], kernel["round_ns"]) == (
+        460,
+        1,
+        [400, 500, 460],
+    )
+    assert kernel["instances"][0]["time_ns"] == 460
+    assert data["times"] == [
+        {"run": "r", "rounds": 3, "total_ns": 560, "round_ns": [500, 600, 560]}
+    ]
+
+
+def test_a_template_takes_the_median_of_the_rounds_of_its_instances_added_up():
+    times = {"r": timing(**{TILE_4: [10, 30, 20], TILE_8: [300, 100, 200]})}
+    (entry,) = summary.summarize(two_instances(), times=times)["kernels"]
+    assert entry["round_ns"] == [310, 130, 220]
+    assert (entry["time_ns"], entry["timed_launches"]) == (220, 2)
+    assert [found["time_ns"] for found in entry["instances"]] == [200, 20]
+
+
+def test_a_kernel_without_a_time_and_a_run_without_times_give_none():
+    items = [
+        ("a/trace-0.npz", "a", facts(demos.transpose_trace())),
+        ("b/trace-0.npz", "b", facts(demos.histogram_trace())),
+    ]
+    data = summary.summarize(items, times={"a": timing(other=[5])})
+    assert all(kernel["time_ns"] is None for kernel in data["kernels"])
+    assert [timed["run"] for timed in data["times"]] == ["a"]
+    assert summary.summarize(items)["times"] == []
+
+
+def test_the_text_of_a_timed_run_gives_the_time_of_each_kernel_and_its_part_of_the_run():
+    items = [
+        ("r/trace-0.npz", "r", facts(demos.transpose_trace())),
+        ("r/trace-1.npz", "r", facts(demos.histogram_trace())),
+    ]
+    times = {"r": timing(transpose=[1_500_000], histogram=[2_500_000], scale=[1_000_000])}
+    lines = summary_text.render(summary.summarize(items, times=times)).splitlines()
+    assert lines[1] == "Kernel time: 5.0 ms, the median of 1 round without the recorder."
+    table = lines[lines.index("Kernels by extra passes") + 1 :]
+    assert table[0].split() == "extra passes of kernel launches time of run kernel".split()
+    assert table[1].split()[-4:] == ["1.5", "ms", "30.0%", "transpose"]
+    assert table[2].split()[-4:] == ["2.5", "ms", "50.0%", "histogram"]
+
+
+def test_the_text_orders_the_kernels_by_time_on_request():
+    items = [
+        ("r/trace-0.npz", "r", facts(demos.transpose_trace())),
+        ("r/trace-1.npz", "r", facts(demos.histogram_trace())),
+        ("r/trace-2.npz", "r", facts(demos.column_sums_trace())),
+    ]
+    times = {"r": timing(transpose=[1_000], histogram=[3_000])}
+    lines = summary_text.render(summary.summarize(items, times=times), order="time").splitlines()
+    table = lines[lines.index("Kernels by time") + 2 :][:3]
+    assert [row.split()[-1] for row in table] == ["histogram", "transpose", "column_sums"]
+    assert table[2].split()[-3:] == ["-", "-", "column_sums"]
+
+
+def test_the_text_of_an_untimed_run_has_no_time_column():
+    data = summary.summarize([("t.npz", "t.npz", facts(demos.transpose_trace()))])
+    text = summary_text.render(data)
+    assert "Kernel time" not in text
+    assert "of run" not in text
+
+
+def test_the_times_of_a_recording_lie_in_its_folder_and_those_of_a_trace_file_beside_it(tmp_path):
+    (tmp_path / "run").mkdir()
+    (tmp_path / "run" / "kernel-times.json").write_text(json.dumps(timing(k=[7])))
+    found = summary.run_times(
+        {"run": tmp_path / "run", "demo": tmp_path / "run" / "demo.npz", "bare": tmp_path}
+    )
+    assert sorted(found) == ["demo", "run"]
+    assert found["run"]["kernels"]["k"]["nanoseconds"] == [7]
+
+
+def test_a_summary_of_files_takes_one_run_for_all_on_request(tmp_path):
+    folder = tmp_path / "side"
+    (folder / "nested").mkdir(parents=True)
+    demos.transpose_trace().save(folder / "trace-0.npz")
+    demos.transpose_trace().save(folder / "nested" / "trace-0.npz")
+    (folder / "kernel-times.json").write_text(json.dumps(timing(transpose=[9])))
+    paths = summary.trace_files(folder, 10)
+    found = [summary.read_facts(path) for path in paths]
+    apart = summary.summarize_files(paths, found)
+    assert apart["runs"] == [str(folder), str(folder / "nested")]
+    together = summary.summarize_files(paths, found, run=folder)
+    assert together["runs"] == [str(folder)]
+    assert together["kernels"][0]["launches"] == 2
+    assert together["kernels"][0]["time_ns"] == 9

@@ -584,6 +584,45 @@ def test_a_template_row_lists_its_instances_and_each_opens_its_worst_launch(
     assert errors == []
 
 
+def test_the_summary_names_the_header_line_of_an_inlined_line_and_the_time_of_each_kernel(
+    browser, tmp_path, serve, inlined_transpose
+):
+    inlined_transpose.save(tmp_path / "trace-0.npz")
+    demos.histogram_trace().save(tmp_path / "trace-1.npz")
+    times = {
+        name: {"launches": [1], "nanoseconds": [value], "shortest": value, "longest": value}
+        for name, value in (("transpose", 1_500_000), ("histogram", 500_000))
+    }
+    result = {"format": 1, "rounds": 1, "kernels": times}
+    (tmp_path / "kernel-times.json").write_text(json.dumps(result))
+    with serve([tmp_path]) as server:
+        context = browser.new_context(viewport={"width": 1600, "height": 1000})
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(f"http://localhost:{server.server_address[1]}/")
+        page.wait_for_selector("#summary-kernels tr")
+        line = page.locator("#summary-lines tr").first.locator("td").nth(2)
+        expect(line.locator(".what")).to_contain_text("tile_copy.cuh:3")
+        expect(line).to_contain_text("return tile[c][r];")
+        expect(line).to_contain_text("inlined at line 10")
+        expect(page.locator("#summary-stats")).to_contain_text("2.0 ms")
+        header = page.locator("#summary-kernels").locator("xpath=..").locator("th")
+        expect(header.nth(4)).to_be_visible()
+        expect(header.nth(4)).to_have_text("Time")
+        first = page.locator("#summary-kernels tr").first.locator("td")
+        expect(first.nth(4)).to_have_text("1.5 ms")
+        expect(first.nth(5)).to_have_text("75.0%")
+        context.close()
+    assert errors == []
+
+
+def test_the_summary_of_an_untimed_run_hides_the_time_columns(summary_page):
+    header = summary_page.locator("#summary-kernels").locator("xpath=..").locator("th")
+    expect(header.nth(4)).to_be_hidden()
+    expect(summary_page.locator("#summary-kernels tr").first.locator("td")).to_have_count(4)
+
+
 def test_each_excess_names_its_part_of_all_the_passes_of_the_kernel(page):
     selected = page.locator('#instruction-rows tr[aria-selected="true"] td').nth(3)
     expect(selected).to_contain_text("% of all")

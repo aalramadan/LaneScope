@@ -6,12 +6,11 @@ from lanescope import kernel_names, kernel_times
 from lanescope.commands import argument_types
 from lanescope.cuda.toolchain import cache_folder
 from lanescope.recorder.build import build_kernel_timer
-from lanescope.summary_text import percent
+from lanescope.summary_text import duration, duration_range, percent
 from lanescope.text_view import printable
 
 USAGE = "lanescope time [-h] [--rounds N] FOLDER [FOLDER ...] [-- command ...]"
 TABLE_HEADER = "{:>12}  {:>7}  {:>8}  {:>18}  kernel"
-DURATION_UNITS = ((1e9, "s"), (1e6, "ms"), (1e3, "us"))
 
 
 def add_parsers(commands: argparse._SubParsersAction) -> None:
@@ -79,16 +78,16 @@ def _print_table(folder: pathlib.Path, result: dict) -> None:
     total = sum(kernel.median_ns for kernel in kernels)
     rounds = result["rounds"]
     print(
-        f"{printable(folder)}: {len(kernels):,} kernels, {_duration(total)} of kernel time, "
+        f"{printable(folder)}: {len(kernels):,} kernels, {duration(total)} of kernel time, "
         f"median of {rounds} round{'' if rounds == 1 else 's'}"
     )
     print(TABLE_HEADER.format("median", "of time", "launches", "range over rounds"))
     for kernel in kernels:
         print(
-            f"{_duration(kernel.median_ns):>12}  "
+            f"{duration(kernel.median_ns):>12}  "
             f"{percent(round(kernel.median_ns), round(total)):>7}  "
             f"{kernel.launches:>8,}  "
-            f"{_range(kernel.fastest_round_ns, kernel.slowest_round_ns):>18}  "
+            f"{duration_range(kernel.fastest_round_ns, kernel.slowest_round_ns):>18}  "
             f"{printable(kernel_names.short(names[kernel.name]))}"
         )
         if not kernel.even_launches:
@@ -105,20 +104,3 @@ def _print_table(folder: pathlib.Path, result: dict) -> None:
             "which its times leave out.",
             file=sys.stderr,
         )
-
-
-def _unit(nanoseconds: float) -> tuple[float, str]:
-    return next(
-        ((scale, name) for scale, name in DURATION_UNITS if nanoseconds >= scale), (1.0, "ns")
-    )
-
-
-def _duration(nanoseconds: float) -> str:
-    scale, name = _unit(nanoseconds)
-    return f"{nanoseconds / scale:,.1f} {name}" if scale > 1 else f"{nanoseconds:,.0f} ns"
-
-
-def _range(fastest: float, slowest: float) -> str:
-    scale, name = _unit(slowest)
-    digits = 1 if scale > 1 else 0
-    return f"{fastest / scale:,.{digits}f}-{slowest / scale:,.{digits}f} {name}"

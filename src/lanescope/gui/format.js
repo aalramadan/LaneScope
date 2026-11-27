@@ -105,7 +105,26 @@ export const TERMS = {
     "The extra passes or sectors as a part of all the passes or sectors of the kernel over the run. A fix cuts the count of the kernel by this much.",
   wavefronts: "A wavefront is one pass of shared memory. In one pass, each of the 32 banks hands out one 4-byte word.",
   sectors: "A sector is a 32-byte piece of global memory. The GPU always reads whole sectors.",
+  time: "The median time of the kernel over the rounds of lanescope time, a run of the program without the recorder.",
+  timeShare: "The time of the kernel as a part of the time of every kernel of its run.",
 };
+
+const DURATION_UNITS = [
+  [1e9, "s"],
+  [1e6, "ms"],
+  [1e3, "us"],
+];
+
+// A time in the largest unit that keeps a whole number, such as 2.3 ms, as the command line gives it.
+export function duration(nanoseconds) {
+  const found = DURATION_UNITS.find(([scale]) => nanoseconds >= scale);
+  if (!found) {
+    return `${NUMBER.format(Math.round(nanoseconds))} ns`;
+  }
+  const [scale, name] = found;
+  const value = new Intl.NumberFormat("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return `${value.format(nanoseconds / scale)} ${name}`;
+}
 
 const KIND_NAMES = { load: "load", store: "store", atomic: "atomic operation" };
 const GLOBAL_VERBS = { load: "fetches", store: "writes", atomic: "touches" };

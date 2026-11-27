@@ -2,9 +2,9 @@ import functools
 import pathlib
 from collections.abc import Callable
 
-from lanescope import __version__, trace_reports
+from lanescope import __version__, recording_comparison, trace_reports
 from lanescope.fixes.layouts import Buffer, Change, Padding, XorSwizzle
-from lanescope.summary import MAX_TRACES, UNITS, read_many, run_of, summarize, trace_files
+from lanescope.summary import MAX_TRACES, UNITS, read_many, summarize_files, trace_files
 from lanescope.trace import Trace
 
 try:
@@ -80,7 +80,10 @@ def summary(recording_path: str, limit: int = 20) -> dict:
     instances. A source line adds up over the instances of its template. The answer keeps
     the worst lines of each unit up to the limit. Each line names the trace and the PC that
     the other tools take, and says whether its conflicts follow the input values over all
-    launches, which no layout removes.
+    launches, which no layout removes. A line inlined from another file, such as a header,
+    keys on its origin there, with the call line in file, line, and source. After
+    lanescope time, each kernel gives time_ns, its median time over the rounds, and times
+    gives the kernel time of the run.
     """
     root = pathlib.Path(recording_path)
     if not root.exists():
@@ -88,17 +91,30 @@ def summary(recording_path: str, limit: int = 20) -> dict:
     paths = trace_files(root, MAX_TRACES)
     if not paths:
         raise ValueError(f"found no trace files in {recording_path}")
-    found = read_many(paths)
-    data = summarize(
-        (str(path), str(run_of(path)), facts) for path, facts in zip(paths, found, strict=True)
-    )
+    data = summarize_files(paths, read_many(paths))
     kept = [
         line for unit in UNITS for line in [x for x in data["lines"] if x["unit"] == unit][:limit]
     ]
     return data | {"lines": kept}
 
 
-TOOLS = (explain, lanes, whatif, suggest, summary)
+def compare(before_path: str, after_path: str) -> dict:
+    """Compare two recordings, such as before and after a fix, by kernel template.
+
+    Give a recording folder or a trace file for each side. Each row of kernels gives the
+    launches, the wavefronts and sectors (achieved, ideal, excessive), and the median
+    time_ns over the rounds of lanescope time of each side, with time_range_ns over the
+    rounds and the speedup, before over after. within_spread is true where the ranges of
+    the rounds overlap, which makes no speedup claim. only_before and only_after list the
+    templates of one side alone, and total adds up every kernel of each side. timed gives
+    the rounds of each side, or null for a side that lanescope time has not timed.
+    """
+    before = recording_comparison.read_side(pathlib.Path(before_path))
+    after = recording_comparison.read_side(pathlib.Path(after_path))
+    return recording_comparison.compare(before, after)
+
+
+TOOLS = (explain, lanes, whatif, suggest, summary, compare)
 
 
 def server():

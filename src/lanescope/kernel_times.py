@@ -7,7 +7,7 @@ import statistics
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 
 FORMAT = 1
 RUN_FILE = "run.json"
@@ -107,6 +107,32 @@ def time_folders(
     return results
 
 
+def read_times(folder: pathlib.Path) -> dict | None:
+    """Return the kernel times that lanescope time wrote into a folder, or None without them."""
+    path = folder / TIMES_FILE
+    if not path.is_file():
+        return None
+    try:
+        result = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"{path} holds no kernel times ({error})") from error
+    if not _valid_times(result):
+        raise ValueError(
+            f"{path} holds no kernel times of format {FORMAT}. Time the folder again with "
+            f"lanescope time {folder}"
+        )
+    return result
+
+
+def round_totals(result: dict, names: Iterable[str] | None = None) -> list[int]:
+    """Return the nanoseconds of each round of a timing, summed over the named kernels or all."""
+    kernels = result["kernels"]
+    picked = [kernels[name] for name in (kernels if names is None else names) if name in kernels]
+    return [
+        sum(kernel["nanoseconds"][index] for kernel in picked) for index in range(result["rounds"])
+    ]
+
+
 def ranked(result: dict) -> list[KernelTime]:
     """Return the kernels of a timing by their median time over the rounds, longest first."""
     medians = {
@@ -197,6 +223,24 @@ def _process_times(scratch: pathlib.Path) -> tuple[dict[str, dict], int]:
             kept["shortest"] = min(kept["shortest"], times["shortest"])
             kept["longest"] = max(kept["longest"], times["longest"])
     return kernels, untimed
+
+
+def _valid_times(result: object) -> bool:
+    if not isinstance(result, dict) or result.get("format") != FORMAT:
+        return False
+    rounds, kernels = result.get("rounds"), result.get("kernels")
+    if not isinstance(rounds, int) or rounds < 1 or not isinstance(kernels, dict):
+        return False
+    return all(
+        isinstance(kernel, dict)
+        and all(
+            isinstance(kernel.get(name), list)
+            and len(kernel[name]) == rounds
+            and all(isinstance(value, int) and value >= 0 for value in kernel[name])
+            for name in ("launches", "nanoseconds")
+        )
+        for kernel in kernels.values()
+    )
 
 
 def _by_kernel(per_round: Sequence[dict[str, dict]]) -> dict[str, dict]:

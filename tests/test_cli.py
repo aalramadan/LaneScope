@@ -585,6 +585,55 @@ def test_summary_lists_the_instances_of_a_template_as_kernels_on_request(tmp_pat
     assert "instances)" not in kernels
 
 
+def write_times(folder, rounds, **kernels):
+    """Write the kernel-times.json of lanescope time, with the nanoseconds of each round."""
+    result = {
+        "format": 1,
+        "rounds": rounds,
+        "kernels": {
+            name: {
+                "launches": [1] * rounds,
+                "nanoseconds": values,
+                "shortest": min(values),
+                "longest": max(values),
+            }
+            for name, values in kernels.items()
+        },
+    }
+    (folder / "kernel-times.json").write_text(json.dumps(result))
+
+
+def test_summary_gives_the_kernel_times_that_lanescope_time_stored_beside_the_traces(
+    recording, capsys
+):
+    write_times(recording, 3, transpose=[3_000, 3_200, 3_100], histogram=[900, 1_000, 1_100])
+    assert main(["summary", str(recording)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[1] == "Kernel time: 4.2 us, the median of 3 rounds without the recorder."
+    rows = out[out.index("Kernels by extra passes") + 2 :][:2]
+    assert rows[0].split()[-4:] == ["3.1", "us", "73.8%", "transpose"]
+    assert main(["summary", str(recording), "--sort", "time", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert {kernel["name"]: kernel["time_ns"] for kernel in data["kernels"]} == {
+        "transpose": 3_100,
+        "histogram": 1_000,
+    }
+
+
+def test_summary_sorts_the_kernels_by_time_on_request(recording, capsys):
+    write_times(recording, 1, transpose=[1_000], histogram=[5_000])
+    assert main(["summary", str(recording), "--sort", "time"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    rows = out[out.index("Kernels by time") + 2 :][:2]
+    assert [row.split()[-1] for row in rows] == ["histogram", "transpose"]
+
+
+def test_summary_names_a_broken_file_of_kernel_times(recording, capsys):
+    (recording / "kernel-times.json").write_text("{}")
+    assert main(["summary", str(recording)]) == 2
+    assert "kernel-times.json holds no kernel times of format 1" in capsys.readouterr().err
+
+
 def test_summary_of_global_memory_ranks_extra_sectors(tmp_path, capsys):
     demos.column_sums_trace().save(tmp_path / "trace-0.npz")
     assert main(["summary", str(tmp_path), "--global"]) == 0

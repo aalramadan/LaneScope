@@ -72,6 +72,12 @@ def test_built_page_runs_the_api_in_the_browser_with_relative_paths(tmp_path):
     assert all((tmp_path / name).is_file() for name in build_site["ASSETS"] + (".nojekyll",))
 
 
+def test_built_page_holds_every_module_that_the_page_imports(tmp_path, page_modules):
+    build_site = runpy.run_path(str(ROOT / "scripts" / "build_site.py"))
+    build_site["assemble"](tmp_path, "lanescope-1.0.0-py3-none-any.whl")
+    assert [name for name in page_modules if not (tmp_path / name).is_file()] == []
+
+
 def test_browser_api_sums_the_demo_in_one_call_without_threads(api):
     answer = ask(api, "GET", "/api/summary", {})
     assert answer["status"] == 200

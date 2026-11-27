@@ -1,3 +1,5 @@
+export const $ = (id) => document.getElementById(id);
+
 export function stat(label, value, title = "") {
   const wrapper = document.createElement("div");
   wrapper.title = title;

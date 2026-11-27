@@ -7,12 +7,28 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 GUI = ROOT / "src" / "lanescope" / "gui"
 ASSETS = (
+    "address.js",
     "api.js",
     "app.js",
+    "banner.js",
+    "buffer.js",
+    "diagnosis.js",
     "dom.js",
+    "fix-form.js",
     "format.js",
     "grid.js",
+    "instructions.js",
+    "lanes.js",
+    "navigation.js",
+    "selection.js",
+    "source.js",
+    "state.js",
+    "suggestions.js",
     "summary.js",
+    "theme.js",
+    "tooltip.js",
+    "topbar.js",
+    "whatif.js",
     "style.css",
     "icon.svg",
 )

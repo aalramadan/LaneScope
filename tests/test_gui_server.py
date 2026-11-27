@@ -69,6 +69,13 @@ def test_page_and_static_files_carry_their_types_and_security_headers(server):
     assert (response.getheader("Content-Type") or "").startswith("text/javascript")
 
 
+def test_static_route_serves_every_module_that_the_page_imports(server, page_modules):
+    assert len(page_modules) > 1
+    for name in page_modules:
+        response, _ = request(server, f"/static/{name}")
+        assert response.status == 200, name
+
+
 @pytest.mark.parametrize(
     "path",
     [

@@ -1,7 +1,5 @@
 import * as format from "./format.js";
-import { cell, detail, meter, stat } from "./dom.js";
-
-const $ = (id) => document.getElementById(id);
+import { $, cell, detail, meter, stat } from "./dom.js";
 
 // The rows that the table of lines shows, worst first. The summary keeps more.
 export const SHOWN_LINES = 50;

@@ -1,5 +1,6 @@
 import contextlib
 import json
+import re
 import threading
 import time
 
@@ -58,6 +59,20 @@ def gui_folder(tmp_path_factory):
     Trace.from_accesses([column, strided], {"kernel": "mixed"} | source).save(folder / "mixed.npz")
     (folder / "broken.npz").write_bytes(b"not a trace")
     return folder
+
+
+@pytest.fixture(scope="session")
+def page_modules():
+    """Return the names of the script modules that the page loads, app.js and its imports."""
+    found = []
+    pending = ["app.js"]
+    while pending:
+        name = pending.pop()
+        if name not in found:
+            found.append(name)
+            text = (gui.STATIC / name).read_text()
+            pending.extend(re.findall(r'^import [^;]*? from "\./([\w-]+\.js)";', text, re.M))
+    return sorted(found)
 
 
 @pytest.fixture(scope="session")

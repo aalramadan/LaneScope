@@ -68,7 +68,8 @@ def stand_in_tools(folder):
     """Return a toolchain of empty files, for builds whose compile a test replaces."""
     compiler = folder / "g++"
     compiler.write_text("one compiler")
-    folders = dict.fromkeys(("sanitizer_include", "sanitizer_lib", "cuda_include"), folder)
+    names = ("sanitizer_include", "sanitizer_lib", "cuda_include", "crt_include")
+    folders = dict.fromkeys(names, folder)
     return dataclasses.replace(EMPTY, compiler=compiler, **folders)
 
 
@@ -411,6 +412,53 @@ def test_find_takes_cupti_from_the_cuda_12_wheel_beside_the_other_wheels(tmp_pat
     found = toolchain.find_toolchain({"PATH": ""})
     assert found.cupti_include == cupti / "include"
     assert found.cupti_lib == cupti / "lib" / "libcupti.so.12"
+
+
+def test_find_takes_the_crt_headers_of_cuda_12_from_the_wheel_of_the_compiler(
+    tmp_path, monkeypatch
+):
+    wheels = make_wheels(tmp_path)
+    header = wheels["nvidia.cuda_nvcc"] / "include" / "crt" / "host_defines.h"
+    header.parent.mkdir(parents=True)
+    header.write_text("")
+    monkeypatch.setattr(
+        toolchain, "_wheel_dirs", lambda package: [wheels[package]] if package in wheels else []
+    )
+    found = toolchain.find_toolchain({"PATH": ""})
+    assert found.crt_include == wheels["nvidia.cuda_nvcc"] / "include"
+
+
+def test_find_takes_the_crt_headers_of_a_toolkit_from_its_include_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(toolchain, "_wheel_dirs", lambda package: [])
+    make_toolkit(tmp_path)
+    header = tmp_path / "include" / "crt" / "host_defines.h"
+    header.parent.mkdir(parents=True)
+    header.write_text("")
+    found = toolchain.find_toolchain({"CUDA_HOME": str(tmp_path), "PATH": ""})
+    assert found.crt_include == tmp_path / "include"
+
+
+def test_the_kernel_timer_compiles_with_the_folder_of_the_crt_headers(tmp_path, monkeypatch):
+    cupti = tmp_path / "libcupti.so.12"
+    cupti.write_text("")
+    crt = tmp_path / "nvcc" / "include"
+    tools = dataclasses.replace(
+        stand_in_tools(tmp_path), cupti_include=tmp_path, cupti_lib=cupti, crt_include=crt
+    )
+    commands = []
+    monkeypatch.setattr(build, "_run", commands.append)
+    build._compile_timer(tmp_path / "timer.so", tools)
+    assert f"-I{crt}" in commands[0]
+
+
+def test_the_kernel_timer_needs_the_crt_headers(tmp_path):
+    cupti = tmp_path / "libcupti.so.12"
+    cupti.write_text("")
+    tools = dataclasses.replace(
+        stand_in_tools(tmp_path), cupti_include=tmp_path, cupti_lib=cupti, crt_include=None
+    )
+    with pytest.raises(toolchain.ToolchainError, match="missing CUDA tools: crt_include"):
+        build.build_kernel_timer(tmp_path / "out", tools)
 
 
 def test_find_leaves_cupti_out_when_its_headers_or_its_library_are_missing(tmp_path, monkeypatch):

@@ -218,5 +218,5 @@ def test_time_without_cupti_names_the_missing_tools(tmp_path, monkeypatch, capsy
     monkeypatch.setattr("lanescope.recorder.build.find_toolchain", lambda: empty)
     assert main(["time", str(folder)]) == 2
     err = capsys.readouterr().err
-    assert "missing CUDA tools: cupti_include, cupti_lib, cuda_include" in err
+    assert "missing CUDA tools: cupti_include, cupti_lib, cuda_include, crt_include" in err
     assert "pip install 'lanescope[gpu]'" in err

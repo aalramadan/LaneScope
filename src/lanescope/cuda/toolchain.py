@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from lanescope.nsight.installer import cached_ncu
 
 Path = pathlib.Path
+CRT_HEADER = "crt/host_defines.h"
 
 
 class ToolchainError(RuntimeError):
@@ -31,6 +32,9 @@ class Toolchain:
     disassemblers: tuple[Path, ...] = ()
     cupti_include: Path | None = None
     cupti_lib: Path | None = None
+    # The folder of crt/host_defines.h, which the runtime headers of CUPTI include. The
+    # wheels for CUDA 12 keep it with the compiler, apart from cuda.h.
+    crt_include: Path | None = None
 
     def require(self, *names: str) -> None:
         """Raise ToolchainError naming every listed tool that is missing.
@@ -108,6 +112,7 @@ def find_toolchain(environ: Mapping[str, str] | None = None) -> Toolchain:
             disassemblers=disassemblers,
             cupti_include=cupti_include,
             cupti_lib=cupti_lib,
+            crt_include=_first_dir([root / "include"], CRT_HEADER),
         )
     sanitizer = _wheel_dirs("nvidia.cuda_sanitizer_api")
     cupti_include, cupti_lib = _cupti(_wheel_dirs("nvidia.cuda_cupti"))
@@ -139,6 +144,11 @@ def find_toolchain(environ: Mapping[str, str] | None = None) -> Toolchain:
         disassemblers=disassemblers,
         cupti_include=cupti_include,
         cupti_lib=cupti_lib,
+        crt_include=_first_dir(
+            [d / "include" for d in _wheel_dirs("nvidia.cuda_nvcc")]
+            + [d / "include" for d in _wheel_dirs("nvidia.cuda_runtime")],
+            CRT_HEADER,
+        ),
     )
 
 

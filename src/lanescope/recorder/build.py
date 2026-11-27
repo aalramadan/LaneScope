@@ -9,7 +9,7 @@ import tempfile
 from collections.abc import Sequence
 
 from lanescope.cuda import nvrtc
-from lanescope.cuda.toolchain import Toolchain, find_toolchain
+from lanescope.cuda.toolchain import CRT_HEADER, Toolchain, find_toolchain
 
 RECORDER_DIR = pathlib.Path(__file__).parent
 LIBRARY_NAME = "liblanescope_recorder.so"
@@ -84,7 +84,7 @@ def build_kernel_timer(
     new compile, as for the recorder.
     """
     tools = tools or find_toolchain()
-    tools.require("cupti_include", "cupti_lib", "cuda_include", "compiler")
+    tools.require("cupti_include", "cupti_lib", "cuda_include", "crt_include", "compiler")
     out_dir.mkdir(parents=True, exist_ok=True)
     library = out_dir / TIMER_LIBRARY
     if cache is None:
@@ -107,10 +107,10 @@ def _timer_key(tools: Toolchain) -> str:
     digest = hashlib.sha256(b"kernel timer")
     for name in TIMER_SOURCES:
         digest.update((RECORDER_DIR / name).read_bytes())
-    assert tools.cupti_include and tools.cuda_include
+    assert tools.cupti_include and tools.cuda_include and tools.crt_include
     used = (
         tools.compiler, tools.cupti_lib, tools.cupti_include / "cupti.h",
-        tools.cuda_include / "cuda.h",
+        tools.cuda_include / "cuda.h", tools.crt_include / CRT_HEADER,
     )  # fmt: skip
     _add_files(digest, used)
     return digest.hexdigest()[:20]
@@ -130,9 +130,10 @@ def _publish(staged: pathlib.Path, path: pathlib.Path) -> None:
 
 def _compile_timer(library: pathlib.Path, tools: Toolchain) -> pathlib.Path:
     assert tools.cupti_include and tools.cupti_lib and tools.cuda_include and tools.compiler
+    assert tools.crt_include
     _run([
         str(tools.compiler), "-std=c++17", "-O2", "-fPIC", "-shared",
-        f"-I{tools.cupti_include}", f"-I{tools.cuda_include}",
+        f"-I{tools.cupti_include}", f"-I{tools.cuda_include}", f"-I{tools.crt_include}",
         str(RECORDER_DIR / "kernel_timer.cpp"),
         str(tools.cupti_lib), f"-Wl,-rpath,{tools.cupti_lib.parent}",
         "-o", str(library),

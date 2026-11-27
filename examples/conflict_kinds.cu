@@ -12,8 +12,12 @@ extern "C" __global__ void histogram(const unsigned* values, unsigned* out, int 
 }
 
 // A tile read down its columns, the 32-way conflict that a padding or a swizzle removes.
+// With TILE_PAD=1, each row holds one float more, and the threads of a warp read 32 banks.
+#ifndef TILE_PAD
+#define TILE_PAD 0
+#endif
 extern "C" __global__ void transpose(const float* in, float* out, int width) {
-    __shared__ float tile[32][32];
+    __shared__ float tile[32][32 + TILE_PAD];
     int x = blockIdx.x * 32 + threadIdx.x;
     int y = blockIdx.y * 32 + threadIdx.y;
     tile[threadIdx.y][threadIdx.x] = in[y * width + x];

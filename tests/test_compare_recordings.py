@@ -154,14 +154,14 @@ needs_gpu = pytest.mark.skipif(
 
 
 @needs_gpu
-def test_two_recordings_of_one_program_timed_together_compare_kernel_by_kernel(tmp_path, capsys):
+def test_the_example_and_its_padded_tile_timed_together_compare_kernel_by_kernel(tmp_path, capsys):
     driver = Driver()
     arch = driver.arch()
     driver.close()
     built = build_recorder(tmp_path / "build", arch, TOOLS)
-    command = [sys.executable, str(CONFLICT_KINDS)]
-    folders = [tmp_path / "first", tmp_path / "second"]
-    for folder in folders:
+    plain = [sys.executable, str(CONFLICT_KINDS)]
+    folders = [tmp_path / "before", tmp_path / "after"]
+    for folder, command in zip(folders, (plain, [*plain, "--padded"]), strict=True):
         assert capture.record_command(command, built, folder) == 0
         capture.import_recording(folder, TOOLS.disassemblers)
         kernel_times.write_stored_command(folder, command)
@@ -176,6 +176,9 @@ def test_two_recordings_of_one_program_timed_together_compare_kernel_by_kernel(t
         "tree_sum",
     ]
     assert data["only_before"] == data["only_after"] == []
+    transpose = next(row for row in data["kernels"] if row["name"] == "transpose")
+    assert transpose["before"]["wavefronts"]["excessive"] == 31_744
+    assert transpose["after"]["wavefronts"]["excessive"] == 0
     for row in data["kernels"]:
         assert row["before"]["launches"] == row["after"]["launches"]
         assert row["before"]["time_ns"] > 0 and row["after"]["time_ns"] > 0

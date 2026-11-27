@@ -609,9 +609,9 @@ def test_summary_gives_the_kernel_times_that_lanescope_time_stored_beside_the_tr
     write_times(recording, 3, transpose=[3_000, 3_200, 3_100], histogram=[900, 1_000, 1_100])
     assert main(["summary", str(recording)]) == 0
     out = capsys.readouterr().out.splitlines()
-    assert out[1] == "Kernel time: 4.2 us, the median of 3 rounds without the recorder."
+    assert out[1] == "Kernel time: 4.20 us, the median of 3 rounds without the recorder."
     rows = out[out.index("Kernels by extra passes") + 2 :][:2]
-    assert rows[0].split()[-4:] == ["3.1", "us", "73.8%", "transpose"]
+    assert rows[0].split()[-4:] == ["3.10", "us", "73.8%", "transpose"]
     assert main(["summary", str(recording), "--sort", "time", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert {kernel["name"]: kernel["time_ns"] for kernel in data["kernels"]} == {
@@ -628,10 +628,17 @@ def test_summary_sorts_the_kernels_by_time_on_request(recording, capsys):
     assert [row.split()[-1] for row in rows] == ["histogram", "transpose"]
 
 
-def test_summary_names_a_broken_file_of_kernel_times(recording, capsys):
+def test_summary_keeps_the_counts_of_a_run_whose_file_of_kernel_times_is_broken(recording, capsys):
     (recording / "kernel-times.json").write_text("{}")
-    assert main(["summary", str(recording)]) == 2
-    assert "kernel-times.json holds no kernel times of format 1" in capsys.readouterr().err
+    assert main(["summary", str(recording)]) == 0
+    captured = capsys.readouterr()
+    assert f"{recording}: 3 launches of 2 kernels" in captured.out
+    assert "Kernel time" not in captured.out
+    assert (
+        f"lanescope: {recording / 'kernel-times.json'} holds no kernel times of format 1"
+        in captured.err
+    )
+    assert f"The counts of {recording} stay, without its kernel times." in captured.err
 
 
 def test_summary_of_global_memory_ranks_extra_sectors(tmp_path, capsys):

@@ -8,6 +8,7 @@ from lanescope.fixes import layouts
 
 TILE_4 = "void ns::tile<4>(float*)"
 TILE_8 = "void ns::tile<8>(float*)"
+TILE_16 = "void ns::tile<16>(float*)"
 
 
 def padded_transpose():
@@ -60,6 +61,25 @@ def test_times_whose_rounds_overlap_lie_within_the_spread():
     assert row["time"]["within_spread"] is True
 
 
+@pytest.mark.parametrize(
+    ("before_rounds", "after_rounds", "within"),
+    [
+        ([18_300, 19_000, 20_300], [20_400, 21_300, 22_500], True),
+        ([1_000, 1_050, 1_100], [1_150, 1_180, 1_200], True),
+        ([1_000, 1_050, 1_100], [1_200, 1_250, 1_300], False),
+        ([1_000, 1_000, 1_000], [1_000, 1_000, 1_000], True),
+    ],
+)
+def test_a_change_counts_only_when_the_ranges_lie_apart_by_the_larger_spread(
+    before_rounds, after_rounds, within
+):
+    before = side("a", [demos.transpose_trace()], timing(transpose=before_rounds))
+    after = side("b", [demos.transpose_trace()], timing(transpose=after_rounds))
+    data = recording_comparison.compare_summaries(before, after)
+    assert data["kernels"][0]["time"]["within_spread"] is within
+    assert data["total"]["time"]["within_spread"] is within
+
+
 def test_a_side_without_times_gives_no_speedup():
     before = side("a", [demos.transpose_trace()], timing(transpose=[500]))
     after = side("b", [padded_transpose()])
@@ -97,17 +117,44 @@ def test_the_total_adds_up_every_kernel_of_each_side_with_the_time_of_the_whole_
 def test_the_instances_of_a_template_compare_where_their_names_agree():
     traces = [demos.transpose_trace(tiles_per_side=1), demos.transpose_trace()]
     before = side("a", traces, kernel=[TILE_4, TILE_8])
-    after = side("b", traces, kernel=[TILE_4, "void ns::tile<16>(float*)"])
-    (row,) = recording_comparison.compare_summaries(before, after)["kernels"]
+    after = side("b", [*traces, demos.transpose_trace()], kernel=[TILE_4, TILE_8, TILE_16])
+    data = recording_comparison.compare_summaries(before, after)
+    (row,) = data["kernels"]
     assert row["template"] == "ns::tile"
-    assert [(found["kernel"], found["name"]) for found in row["instances"]] == [(TILE_4, "tile<4>")]
+    assert [(found["kernel"], found["name"]) for found in row["instances"]] == [
+        (TILE_8, "tile<8>"),
+        (TILE_4, "tile<4>"),
+    ]
+    assert [entry["kernel"] for entry in data["only_after"]] == [TILE_16]
+
+
+def test_a_template_compares_only_the_instances_that_both_sides_hold():
+    traces = [demos.transpose_trace(), demos.transpose_trace(tiles_per_side=1)]
+    before = side(
+        "a", traces, timing(**{TILE_4: [4_200] * 3, TILE_8: [1_300] * 3}), [TILE_4, TILE_8]
+    )
+    after = side("b", traces[:1], timing(**{TILE_4: [4_200] * 3}), [TILE_4])
+    data = recording_comparison.compare_summaries(before, after)
+    (row,) = data["kernels"]
+    assert (row["name"], row["matched_instances"], row["instances"]) == ("tile<4>", "some", [])
+    assert row["before"]["launches"] == row["after"]["launches"] == 1
+    assert row["before"]["wavefronts"] == row["after"]["wavefronts"]
+    assert row["before"]["time_ns"] == row["after"]["time_ns"] == 4_200
+    assert row["time"]["within_spread"] is True
+    (alone,) = data["only_before"]
+    assert (alone["template"], alone["kernel"], alone["name"]) == ("ns::tile", TILE_8, "tile<8>")
+    assert (alone["launches"], alone["time_ns"]) == (1, 1_300)
+    assert data["only_after"] == []
 
 
 def test_a_template_of_one_instance_whose_arguments_change_compares_under_its_template():
     before = side("a", [demos.transpose_trace()], kernel=[TILE_4])
     after = side("b", [padded_transpose()], kernel=[TILE_8])
-    (row,) = recording_comparison.compare_summaries(before, after)["kernels"]
+    data = recording_comparison.compare_summaries(before, after)
+    (row,) = data["kernels"]
     assert (row["name"], row["full_name"], row["instances"]) == ("tile", "ns::tile", [])
+    assert row["matched_instances"] == "none"
+    assert data["only_before"] == data["only_after"] == []
 
 
 def test_a_side_adds_up_every_trace_of_its_folder_as_one_run_with_its_times(tmp_path):

@@ -584,6 +584,61 @@ def test_a_template_row_lists_its_instances_and_each_opens_its_worst_launch(
     assert errors == []
 
 
+def test_the_toggle_of_a_template_counts_every_instance_and_those_of_the_shown_unit(
+    browser, tmp_path, serve
+):
+    for index, (trace, kernel) in enumerate(
+        [
+            (demos.transpose_trace(), "void ns::tile<4>(float*)"),
+            (demos.column_sums_trace(), "void ns::tile<8>(float*)"),
+        ]
+    ):
+        trace.metadata["kernel"] = kernel
+        trace.save(tmp_path / f"trace-{index}.npz")
+    with serve([tmp_path]) as server:
+        context = browser.new_context(viewport={"width": 1600, "height": 1000})
+        page = context.new_page()
+        page.goto(f"http://localhost:{server.server_address[1]}/")
+        page.wait_for_selector("#summary-kernels tr")
+        expect(page.locator("#summary-subtitle")).to_contain_text("2 kernels in 1 template")
+        toggle = page.locator("#summary-kernels .instances-toggle")
+        expect(toggle).to_have_text("1 of 2 instances")
+        page.locator('input[name="summary-unit"][value="sectors"]').check(force=True)
+        expect(toggle).to_have_text("2 instances")
+        context.close()
+
+
+def test_the_summary_labels_the_kernel_time_of_each_timed_run_and_notes_broken_times(
+    browser, tmp_path, serve
+):
+    for name, total in (("run1", 1_500_000), ("run2", 2_000), ("run3", None)):
+        (tmp_path / name).mkdir()
+        demos.transpose_trace().save(tmp_path / name / "trace-0.npz")
+        times = {"launches": [1], "nanoseconds": [total], "shortest": 1, "longest": 1}
+        result = {"format": 1, "rounds": 1, "kernels": {"transpose": times}}
+        written = json.dumps(result) if total else '{"format": 1, "rounds": 2, "kern'
+        (tmp_path / name / "kernel-times.json").write_text(written)
+    with serve([tmp_path]) as server:
+        context = browser.new_context(viewport={"width": 1600, "height": 1000})
+        page = context.new_page()
+        page.goto(f"http://localhost:{server.server_address[1]}/")
+        page.wait_for_selector("#summary-kernels tr")
+        stats = page.locator("#summary-stats > div")
+        timed = stats.filter(has_text="Kernel time")
+        expect(timed).to_have_count(2)
+        expect(timed.nth(0).locator("dt")).to_have_text(f"Kernel time of {tmp_path.name}/run1")
+        expect(timed.nth(0).locator("dd")).to_have_text("1.50 ms")
+        expect(timed.nth(1).locator("dt")).to_have_text(f"Kernel time of {tmp_path.name}/run2")
+        expect(timed.nth(1).locator("dd")).to_have_text("2.00 us")
+        expect(page.locator("#summary-notes")).to_contain_text(
+            f"{tmp_path / 'run3' / 'kernel-times.json'} holds no kernel times ("
+        )
+        expect(page.locator("#summary-notes")).to_contain_text(
+            f"The counts of {tmp_path.name}/run3 stay, without its kernel times."
+        )
+        context.close()
+
+
 def test_the_summary_names_the_header_line_of_an_inlined_line_and_the_time_of_each_kernel(
     browser, tmp_path, serve, inlined_transpose
 ):
@@ -606,12 +661,12 @@ def test_the_summary_names_the_header_line_of_an_inlined_line_and_the_time_of_ea
         expect(line.locator(".what")).to_contain_text("tile_copy.cuh:3")
         expect(line).to_contain_text("return tile[c][r];")
         expect(line).to_contain_text("inlined at line 10")
-        expect(page.locator("#summary-stats")).to_contain_text("2.0 ms")
+        expect(page.locator("#summary-stats")).to_contain_text("2.00 ms")
         header = page.locator("#summary-kernels").locator("xpath=..").locator("th")
         expect(header.nth(4)).to_be_visible()
         expect(header.nth(4)).to_have_text("Time")
         first = page.locator("#summary-kernels tr").first.locator("td")
-        expect(first.nth(4)).to_have_text("1.5 ms")
+        expect(first.nth(4)).to_have_text("1.50 ms")
         expect(first.nth(5)).to_have_text("75.0%")
         context.close()
     assert errors == []

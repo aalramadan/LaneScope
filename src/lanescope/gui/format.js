@@ -115,15 +115,15 @@ const DURATION_UNITS = [
   [1e3, "us"],
 ];
 
-// A time in the largest unit that keeps a whole number, such as 2.3 ms, as the command line gives it.
+// A time with three significant digits in the largest unit it fills, such as 1.34 ms, as the
+// command line gives it. The rounding comes first, since 999.6 ns rounds up to 1.00 us.
 export function duration(nanoseconds) {
-  const found = DURATION_UNITS.find(([scale]) => nanoseconds >= scale);
-  if (!found) {
-    return `${NUMBER.format(Math.round(nanoseconds))} ns`;
-  }
-  const [scale, name] = found;
-  const value = new Intl.NumberFormat("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-  return `${value.format(nanoseconds / scale)} ${name}`;
+  const rounded = Number(nanoseconds.toPrecision(3));
+  const [scale, name] = DURATION_UNITS.find(([unit]) => rounded >= unit) ?? [1, "ns"];
+  const value = rounded / scale;
+  const digits = value ? Math.max(0, 2 - Math.floor(Math.log10(value))) : 0;
+  const shown = new Intl.NumberFormat("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  return `${shown.format(value)} ${name}`;
 }
 
 const KIND_NAMES = { load: "load", store: "store", atomic: "atomic operation" };

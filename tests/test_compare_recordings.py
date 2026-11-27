@@ -65,7 +65,7 @@ def test_compare_prints_the_passes_and_the_times_of_each_kernel_before_and_after
         f"after: {after}, kernel times of 3 rounds",
         "Shared memory: 6,894 passes before and 622 after. Bank conflicts add 5,934 before and "
         "174 after.",
-        "Kernel time: 2.2 ms before and 915.0 us after, a speedup of 2.37x.",
+        "Kernel time: 2.17 ms before and 915 us after, a speedup of 2.37x.",
     ]
     counts = out[out.index("Extra passes by kernel") + 1 :]
     assert counts[0].split() == (
@@ -75,10 +75,10 @@ def test_compare_prints_the_passes_and_the_times_of_each_kernel_before_and_after
     assert counts[3].split() == ["3/2", "6,894", "622", "5,934", "174", "all", "kernels"]
     times = out[out.index("Kernel time by kernel") + 1 :]
     assert times[1].split() == [
-        "1.6", "ms", "1.6-1.7", "ms", "410.0", "us", "400.0-420.0", "us", "4.02x", "transpose"
+        "1.65", "ms", "1.60-1.70", "ms", "410", "us", "400-420", "us", "4.02x", "transpose"
     ]  # fmt: skip
     assert times[2].split()[-3:] == ["within", "spread", "histogram"]
-    assert any(line.startswith("within spread: the times of the rounds") for line in out)
+    assert any(line.startswith("within spread: the rounds of the two sides") for line in out)
     alone = out[out.index("Kernels of one side alone") + 2]
     assert alone.split() == ["before", "only", "1", "1,792", "10.0", "us", "row_sums"]
     assert not any(line.startswith("Next step") for line in out)
@@ -86,6 +86,8 @@ def test_compare_prints_the_passes_and_the_times_of_each_kernel_before_and_after
 
 def test_compare_without_times_names_lanescope_time_as_the_next_step(sides, capsys):
     before, after = sides
+    for folder in sides:
+        kernel_times.write_stored_command(folder, ["./my_app"])
     assert main(["compare", str(before), str(after)]) == 0
     out = capsys.readouterr().out
     assert "Kernel time by kernel" not in out
@@ -99,10 +101,74 @@ def test_compare_of_trace_files_names_their_folders_for_lanescope_time(tmp_path,
     for name, trace in (("a", demos.transpose_trace()), ("b", padded_transpose())):
         (tmp_path / name).mkdir()
         trace.save(tmp_path / name / "transpose.npz")
+        kernel_times.write_stored_command(tmp_path / name, ["./my_app"])
     files = [str(tmp_path / name / "transpose.npz") for name in ("a", "b")]
     assert main(["compare", *files]) == 0
     out = capsys.readouterr().out
     assert f"Next step: lanescope time {tmp_path / 'a'} {tmp_path / 'b'} times" in out
+
+
+def test_compare_of_folders_without_their_command_names_the_step_that_times_each(sides, capsys):
+    before, after = sides
+    assert main(["compare", str(before), str(after)]) == 0
+    out = capsys.readouterr().out.rstrip().splitlines()
+    assert out[-2:] == [
+        f"Next step for the before side: {before} holds no run.json with the command of its "
+        f"recording. lanescope time {before} -- ./my_app times the kernels of the program given "
+        f"after --, and a new recording with lanescope record --out {before} keeps its command "
+        "for lanescope time.",
+        f"Next step for the after side: {after} holds no run.json with the command of its "
+        f"recording. lanescope time {after} -- ./my_app times the kernels of the program given "
+        f"after --, and a new recording with lanescope record --out {after} keeps its command "
+        "for lanescope time.",
+    ]
+
+
+def test_compare_names_lanescope_time_for_the_untimed_side_alone_when_the_other_lacks_run_json(
+    sides, capsys
+):
+    before, after = sides
+    write_times(before, transpose=[1_000])
+    kernel_times.write_stored_command(after, ["./my_app"])
+    assert main(["compare", str(before), str(after)]) == 0
+    assert capsys.readouterr().out.rstrip().splitlines()[-1] == (
+        f"Next step for the after side: lanescope time {after} times its kernels with the "
+        "command of its recording, and lanescope compare then gives their times."
+    )
+
+
+def test_compare_lists_an_instance_of_one_side_alone_and_compares_the_shared_ones(tmp_path, capsys):
+    before, after = tmp_path / "before", tmp_path / "after"
+    scale_4, scale_8 = "void scale<4>(float*)", "void scale<8>(float*)"
+    for folder, kernels in ((before, (scale_4, scale_8)), (after, (scale_4,))):
+        folder.mkdir()
+        for index, kernel in enumerate(kernels):
+            trace = demos.transpose_trace()
+            trace.metadata["kernel"] = kernel
+            trace.save(folder / f"trace-{index}.npz")
+        write_times(folder, **{kernel: [4_200, 4_300, 4_250] for kernel in kernels})
+    assert main(["compare", str(before), str(after)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    counts = out[out.index("Extra passes by kernel") + 2 :]
+    assert counts[0].split() == "1 4,224 4,224 3,968 3,968 scale<4> (shared instances)".split()
+    times = out[out.index("Kernel time by kernel") + 2 :]
+    assert times[0].split()[-5:] == "within spread scale<4> (shared instances)".split()
+    assert any(line.startswith("shared instances: the row adds up only") for line in out)
+    alone = out[out.index("Kernels of one side alone") + 2]
+    assert alone.split() == ["before", "only", "1", "3,968", "4.25", "us", "scale<8>"]
+
+
+def test_compare_keeps_the_counts_of_a_side_whose_file_of_kernel_times_is_broken(sides, capsys):
+    before, after = sides
+    (after / "kernel-times.json").write_text('{"format": 1, "rounds": 2, "kern')
+    assert main(["compare", str(before), str(after)]) == 0
+    captured = capsys.readouterr()
+    assert "Shared memory: 6,894 passes before and 622 after." in captured.out
+    assert f"lanescope: {after / 'kernel-times.json'} holds no kernel times (" in captured.err
+    assert f"The counts of {after} stay, without its kernel times." in captured.err
+    assert main(["compare", str(before), str(after), "--json"]) == 0
+    (unread,) = json.loads(capsys.readouterr().out)["unreadable_times"]
+    assert unread["file"] == str(after / "kernel-times.json")
 
 
 def test_compare_of_global_memory_lists_the_kernels_with_sectors(sides, capsys):

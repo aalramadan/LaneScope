@@ -48,10 +48,13 @@ export function renderSummary(data, unit, open) {
     stat("Launches", format.count(data.traces)),
     stat("Kernels", format.count(instances)),
   );
-  if (data.times.length === 1) {
-    const [timed] = data.times;
+  for (const timed of data.times) {
     $("summary-stats").append(
-      stat("Kernel time", format.duration(timed.total_ns), `The median of ${format.plural(timed.rounds, "round")} of lanescope time.`),
+      stat(
+        runs.length > 1 ? `Kernel time of ${timed.run}` : "Kernel time",
+        format.duration(timed.total_ns),
+        `The median of ${format.plural(timed.rounds, "round")} of lanescope time.`,
+      ),
     );
   }
   renderNotes(data);
@@ -76,6 +79,9 @@ function renderNotes(data) {
   }
   if (data.unreadable) {
     notes.push(`The page skipped ${format.plural(data.unreadable, "file")} without a trace.`);
+  }
+  for (const unread of data.unreadable_times) {
+    notes.push(`${unread.reason.replace(/\.$/, "")}. The counts of ${unread.run} stay, without its kernel times.`);
   }
   if (data.truncated) {
     notes.push(`The summary adds up only the first ${format.count(data.traces + data.unreadable)} trace files.`);
@@ -140,7 +146,7 @@ function renderKernels(data, unit, open) {
         shown.hidden = !openTemplates.has(key);
         return shown;
       });
-      row.cells[2].append(instancesToggle(key, rows));
+      row.cells[2].append(instancesToggle(key, rows, kernel.instances.length));
       return [row, ...rows];
     }),
   );
@@ -173,11 +179,12 @@ function kernelRow(entry, unit, peak, open, name, runTimes) {
 }
 
 // A button that shows or hides the instances of a template without opening the row it sits in.
-function instancesToggle(key, rows) {
+function instancesToggle(key, rows, instances) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "instances-toggle";
-  button.textContent = format.plural(rows.length, "instance");
+  const counted = format.plural(instances, "instance");
+  button.textContent = rows.length === instances ? counted : `${format.count(rows.length)} of ${counted}`;
   const show = (open) => {
     button.setAttribute("aria-expanded", String(open));
     button.title = open ? "Hide the instances of this template" : "List the instances of this template";

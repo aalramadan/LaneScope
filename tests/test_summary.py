@@ -379,6 +379,53 @@ def test_a_line_that_one_trace_marks_stays_marked_over_all_launches():
     assert line["data_dependent"] is True
 
 
+def fixed_strides(kernel, first_stride):
+    """Return the facts of one launch whose 20 warps store with 10 fixed strides in turn."""
+    rows = [
+        Access(
+            0x10,
+            Space.SHARED,
+            Kind.STORE,
+            4,
+            tuple(4 * (first_stride + warp % 10) * lane for lane in range(WARP_SIZE)),
+            warp // 4,
+            warp % 4,
+        )
+        for warp in range(20)
+    ]
+    metadata = {
+        "kernel": kernel,
+        "source_file": "/src/k.cu",
+        "lines": {"0x10": 10},
+        "source": ["x"] * 20,
+        "opcodes": {"0x10": "STS"},
+    }
+    return facts(Trace.from_accesses(rows, metadata))
+
+
+def test_two_instances_with_fixed_layouts_of_their_own_leave_their_line_unmarked():
+    items = [
+        ("r/trace-0.npz", "r", fixed_strides("void k<1>(int*)", 1)),
+        ("r/trace-1.npz", "r", fixed_strides("void k<2>(int*)", 11)),
+    ]
+    (line,) = shared_lines(summary.summarize(items))
+    assert (line["instances"], line["data_dependent"], line["excess_range"]) == (2, False, None)
+
+
+def test_a_template_line_is_marked_when_the_launches_of_one_instance_follow_the_input():
+    def on_line_5(found, kernel):
+        lined = tuple(dataclasses.replace(item, line=5) for item in found.instructions)
+        return dataclasses.replace(found, kernel=kernel, instructions=lined)
+
+    items = [
+        (f"r/trace-{n}.npz", "r", on_line_5(scattered_bins(seed), TILE_4))
+        for n, seed in enumerate((1, 2, 3))
+    ]
+    items.append(("r/trace-3.npz", "r", on_line_5(scattered_bins(1), TILE_8)))
+    (line,) = shared_lines(summary.summarize(items))
+    assert (line["instances"], line["data_dependent"]) == (2, True)
+
+
 def column_loads(origins):
     """Return the facts of two conflicted loads on call line 7, with the origins they are given."""
     rows = [
@@ -452,14 +499,36 @@ def test_the_text_names_the_header_line_that_an_inlined_line_comes_from():
 
 @pytest.mark.parametrize(
     ("nanoseconds", "text"),
-    [(512, "512 ns"), (1_500, "1.5 us"), (2_340_000, "2.3 ms"), (3_100_000_000, "3.1 s")],
+    [
+        (768, "768 ns"),
+        (19_000, "19.0 us"),
+        (1_342_000, "1.34 ms"),
+        (12_340_000, "12.3 ms"),
+        (123_400_000, "123 ms"),
+        (1_234_000_000, "1.23 s"),
+        (999_600, "1.00 ms"),
+        (5, "5.00 ns"),
+        (0, "0 ns"),
+    ],
 )
-def test_durations_take_the_largest_unit_that_keeps_a_whole_number(nanoseconds, text):
+def test_durations_keep_three_significant_digits(nanoseconds, text):
     assert summary_text.duration(nanoseconds) == text
 
 
-def test_a_range_takes_the_unit_of_its_slowest_round():
-    assert summary_text.duration_range(900, 1_200) == "0.9-1.2 us"
+@pytest.mark.parametrize(
+    ("fastest", "slowest", "median", "text"),
+    [
+        (750, 1_000, 768, "750-1,000 ns"),
+        (18_300, 20_300, 19_000, "18.3-20.3 us"),
+        (1_301_000, 1_349_000, 1_342_000, "1.30-1.35 ms"),
+    ],
+)
+def test_a_range_takes_the_unit_and_the_decimals_of_its_median(fastest, slowest, median, text):
+    assert summary_text.duration_range(fastest, slowest, median) == text
+
+
+def test_a_range_without_its_median_takes_the_unit_of_its_slowest_round():
+    assert summary_text.duration_range(900, 1_200) == "0.90-1.20 us"
 
 
 def timing(**kernels):
@@ -522,11 +591,11 @@ def test_the_text_of_a_timed_run_gives_the_time_of_each_kernel_and_its_part_of_t
     ]
     times = {"r": timing(transpose=[1_500_000], histogram=[2_500_000], scale=[1_000_000])}
     lines = summary_text.render_summary_text(summary.summarize(items, times=times)).splitlines()
-    assert lines[1] == "Kernel time: 5.0 ms, the median of 1 round without the recorder."
+    assert lines[1] == "Kernel time: 5.00 ms, the median of 1 round without the recorder."
     table = lines[lines.index("Kernels by extra passes") + 1 :]
     assert table[0].split() == "extra passes of kernel launches time of run kernel".split()
-    assert table[1].split()[-4:] == ["1.5", "ms", "30.0%", "transpose"]
-    assert table[2].split()[-4:] == ["2.5", "ms", "50.0%", "histogram"]
+    assert table[1].split()[-4:] == ["1.50", "ms", "30.0%", "transpose"]
+    assert table[2].split()[-4:] == ["2.50", "ms", "50.0%", "histogram"]
 
 
 def test_the_text_orders_the_kernels_by_time_on_request():
@@ -554,10 +623,10 @@ def test_the_text_of_an_untimed_run_has_no_time_column():
 def test_the_times_of_a_recording_lie_in_its_folder_and_those_of_a_trace_file_beside_it(tmp_path):
     (tmp_path / "run").mkdir()
     (tmp_path / "run" / "kernel-times.json").write_text(json.dumps(timing(k=[7])))
-    found = summary.run_times(
+    found, unreadable = summary.run_times(
         {"run": tmp_path / "run", "demo": tmp_path / "run" / "demo.npz", "bare": tmp_path}
     )
-    assert sorted(found) == ["demo", "run"]
+    assert (sorted(found), unreadable) == (["demo", "run"], [])
     assert found["run"]["kernels"]["k"]["nanoseconds"] == [7]
 
 
@@ -575,3 +644,21 @@ def test_a_summary_of_files_takes_one_run_for_all_on_request(tmp_path):
     assert together["runs"] == [str(folder)]
     assert together["kernels"][0]["launches"] == 2
     assert together["kernels"][0]["time_ns"] == 9
+
+
+def test_a_broken_times_file_leaves_out_the_times_of_its_run_and_keeps_its_counts(tmp_path):
+    for name in ("good", "broken"):
+        (tmp_path / name).mkdir()
+        demos.transpose_trace().save(tmp_path / name / "trace-0.npz")
+    (tmp_path / "good" / "kernel-times.json").write_text(json.dumps(timing(transpose=[9])))
+    broken = tmp_path / "broken" / "kernel-times.json"
+    broken.write_text('{"format": 1, "rounds": 2, "kern')
+    paths = summary.trace_files(tmp_path, 10)
+    data = summary.summarize_files(paths, [summary.read_facts(path) for path in paths])
+    assert [timed["run"] for timed in data["times"]] == [str(tmp_path / "good")]
+    assert [kernel["launches"] for kernel in data["kernels"]] == [1, 1]
+    (unread,) = data["unreadable_times"]
+    assert (unread["run"], unread["file"]) == (str(tmp_path / "broken"), str(broken))
+    (note,) = summary_text.notes(data)
+    assert note.startswith(f"{broken} holds no kernel times (")
+    assert note.endswith(f"The counts of {tmp_path / 'broken'} stay, without its kernel times.")

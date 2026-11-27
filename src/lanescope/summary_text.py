@@ -1,3 +1,4 @@
+import math
 import pathlib
 
 from lanescope.text_view import printable
@@ -116,7 +117,7 @@ def render_summary_text(
 
 
 def notes(data: dict) -> list[str]:
-    """Return the warnings of a summary: launches without source lines or with lost records."""
+    """Return the warnings of a summary: launches without lines or with lost records, bad files."""
     found = []
     traces = _plural(data["traces"], "launch")
     if data["without_lines"]:
@@ -133,7 +134,17 @@ def notes(data: dict) -> list[str]:
         )
     if data["unreadable"]:
         found.append(f"skipped {_plural(data['unreadable'], 'file')} without a trace")
+    found += [unreadable_times_note(unread) for unread in data["unreadable_times"]]
     return found
+
+
+def unreadable_times_note(unread: dict) -> str:
+    """Return the note on a file of kernel times that a summary could not read."""
+    run = printable(unread["run"])
+    return (
+        f"{printable(unread['reason']).rstrip('.')}. The counts of {run} stay, without its "
+        "kernel times."
+    )
 
 
 def _place(line: dict) -> str:
@@ -160,22 +171,29 @@ def percent(part: int, whole: int) -> str:
 
 
 def duration(nanoseconds: float) -> str:
-    """Return a time in the largest unit that keeps a whole number, such as 2.3 ms."""
-    scale, name = _time_unit(nanoseconds)
-    return f"{nanoseconds / scale:,.1f} {name}" if scale > 1 else f"{nanoseconds:,.0f} ns"
+    """Return a time with three significant digits in the largest unit it fills, such as 1.34 ms."""
+    scale, name, digits = _time_unit(nanoseconds)
+    return f"{nanoseconds / scale:,.{digits}f} {name}"
 
 
-def duration_range(fastest: float, slowest: float) -> str:
-    """Return a range of times in the unit of its slowest end, such as 0.9-1.2 us."""
-    scale, name = _time_unit(slowest)
-    digits = 1 if scale > 1 else 0
+def duration_range(fastest: float, slowest: float, median: float | None = None) -> str:
+    """Return a range of times in the unit and the decimals of its median, such as 18.3-20.3 us.
+
+    Without a median, the range takes those of its slowest end.
+    """
+    scale, name, digits = _time_unit(slowest if median is None else median)
     return f"{fastest / scale:,.{digits}f}-{slowest / scale:,.{digits}f} {name}"
 
 
-def _time_unit(nanoseconds: float) -> tuple[float, str]:
-    return next(
-        ((scale, name) for scale, name in DURATION_UNITS if nanoseconds >= scale), (1.0, "ns")
+def _time_unit(nanoseconds: float) -> tuple[float, str, int]:
+    """Return the scale, the name, and the decimals that give a time three significant digits."""
+    # The rounding comes first, since 999.6 ns rounds up to 1.00 us.
+    rounded = float(f"{nanoseconds:.3g}")
+    scale, name = next(
+        ((scale, name) for scale, name in DURATION_UNITS if rounded >= scale), (1.0, "ns")
     )
+    value = rounded / scale
+    return scale, name, max(0, 2 - math.floor(math.log10(value))) if value else 0
 
 
 def _plural(value: int, noun: str) -> str:

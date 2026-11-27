@@ -83,7 +83,8 @@ def summary(recording_path: str, limit: int = 20) -> dict:
     launches, which no layout removes. A line inlined from another file, such as a header,
     keys on its origin there, with the call line in file, line, and source. After
     lanescope time, each kernel gives time_ns, its median time over the rounds, and times
-    gives the kernel time of the run.
+    gives the kernel time of the run. unreadable_times names each kernel-times.json that
+    could not be read, whose run keeps its counts without times.
     """
     root = pathlib.Path(recording_path)
     if not root.exists():
@@ -105,9 +106,14 @@ def compare(before_path: str, after_path: str) -> dict:
     launches, the wavefronts and sectors (achieved, ideal, excessive), and the median
     time_ns over the rounds of lanescope time of each side, with time_range_ns over the
     rounds and the speedup, before over after. within_spread is true where the ranges of
-    the rounds overlap, which makes no speedup claim. only_before and only_after list the
-    templates of one side alone, and total adds up every kernel of each side. timed gives
+    the rounds lie apart by less than the larger spread of the two sides, its slowest round
+    minus its fastest, which makes no speedup claim. matched_instances is all where both
+    sides hold the same instances of the template, some where the row adds up only the
+    shared ones, and none where the instances differ and the row adds up all of them.
+    only_before and only_after list the templates of one side alone, and the instances of
+    one side alone with their kernel. total adds up every kernel of each side. timed gives
     the rounds of each side, or null for a side that lanescope time has not timed.
+    unreadable_times names each kernel-times.json that could not be read.
     """
     before = recording_comparison.read_side(pathlib.Path(before_path))
     after = recording_comparison.read_side(pathlib.Path(after_path))

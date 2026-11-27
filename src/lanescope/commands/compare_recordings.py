@@ -1,16 +1,25 @@
 import argparse
 import json
 import pathlib
+import sys
 
-from lanescope import recording_comparison
+from lanescope import kernel_times, recording_comparison
 from lanescope.commands import argument_types
-from lanescope.summary_text import UNITS, duration, duration_range
+from lanescope.summary_text import UNITS, duration, duration_range, unreadable_times_note
 from lanescope.text_view import printable
 
 COUNTS_HEADER = "{:>9}  {:>14}  {:>14}  {:>13}  {:>13}  kernel"
 TIMES_HEADER = "{:>11}  {:>17}  {:>11}  {:>17}  {:>13}  kernel"
 ALONE_HEADER = "{:>11}  {:>9}  {:>13}  {:>11}  kernel"
 WITHIN_SPREAD = "within spread"
+# How a row names the instances it adds up, by its matched_instances.
+INSTANCE_MARKS = {"all": "", "some": " (shared instances)", "none": " (instances differ)"}
+INSTANCE_NOTES = {
+    "some": "shared instances: the row adds up only the instances of the template that both "
+    "sides hold. The others are listed under the kernels of one side alone.",
+    "none": "instances differ: the two sides hold different instances of the template, such as "
+    "after a change of a template argument, and the row adds up all of them.",
+}
 
 
 def add_parsers(commands: argparse._SubParsersAction) -> None:
@@ -44,9 +53,11 @@ def _compare(args: argparse.Namespace) -> int:
     data = recording_comparison.compare_summaries(before, after)
     if args.json:
         print(json.dumps({"before": str(args.before), "after": str(args.after)} | data, indent=2))
-        return 0
-    unit = "sectors" if args.global_memory else "wavefronts"
-    print(render_comparison(data, args.before, args.after, unit, args.limit))
+    else:
+        unit = "sectors" if args.global_memory else "wavefronts"
+        print(render_comparison(data, args.before, args.after, unit, args.limit))
+    for unread in data["unreadable_times"]:
+        print(f"lanescope: {unreadable_times_note(unread)}", file=sys.stderr)
     return 0
 
 
@@ -88,23 +99,70 @@ def render_comparison(
         )
     )
     for row in rows[:limit]:
-        out.append(_counts_row(row, unit, row["name"]))
+        out.append(_counts_row(row, unit, _row_name(row)))
         out += [_counts_row(found, unit, f"  {found['name']}") for found in row["instances"]]
     out += _hidden_kernels_line(len(rows) - limit)
     out.append(_counts_row(total, unit, "all kernels"))
+    out += _instance_notes(rows[:limit])
     if timed["before"] and timed["after"]:
         out += _times_table(data, limit)
     out += _one_sided_kernels(data, unit, noun)
-    if not (timed["before"] and timed["after"]):
-        folders = " ".join(
-            printable(recording_comparison.times_folder(path)) for path in (before, after)
-        )
-        out += [
-            "",
-            f"Next step: lanescope time {folders} times the kernels of both sides in turns, "
-            "and lanescope compare then gives their times.",
-        ]
+    untimed = [
+        (side, recording_comparison.times_folder(path))
+        for side, path in (("before", before), ("after", after))
+        if not timed[side]
+    ]
+    if untimed:
+        out += ["", *_timing_steps(untimed, before, after)]
     return "\n".join(out)
+
+
+def _timing_steps(
+    untimed: list[tuple[str, pathlib.Path]], before: pathlib.Path, after: pathlib.Path
+) -> list[str]:
+    """Return the next step that gives each untimed side its kernel times.
+
+    lanescope time runs the stored command of a folder, which a folder without run.json
+    lacks, and times both sides in turns only when each of them has one.
+    """
+    folders = [recording_comparison.times_folder(path) for path in (before, after)]
+    if len(untimed) == 2 and all(_has_command(folder) for folder in folders):
+        shown = " ".join(printable(folder) for folder in folders)
+        return [
+            f"Next step: lanescope time {shown} times the kernels of both sides in turns, "
+            "and lanescope compare then gives their times."
+        ]
+    steps = []
+    for side, folder in untimed:
+        shown = printable(folder)
+        if _has_command(folder):
+            steps.append(
+                f"Next step for the {side} side: lanescope time {shown} times its kernels with "
+                "the command of its recording, and lanescope compare then gives their times."
+            )
+        else:
+            steps.append(
+                f"Next step for the {side} side: {shown} holds no {kernel_times.RUN_FILE} with "
+                f"the command of its recording. lanescope time {shown} -- ./my_app times the "
+                "kernels of the program given after --, and a new recording with lanescope "
+                f"record --out {shown} keeps its command for lanescope time."
+            )
+    return steps
+
+
+def _has_command(folder: pathlib.Path) -> bool:
+    return (folder / kernel_times.RUN_FILE).is_file()
+
+
+def _row_name(row: dict) -> str:
+    return row["name"] + INSTANCE_MARKS[row["matched_instances"]]
+
+
+def _instance_notes(rows: list[dict]) -> list[str]:
+    """Return the sentences that explain the marks of rows over some or differing instances."""
+    found = {row["matched_instances"] for row in rows}
+    notes = [INSTANCE_NOTES[match] for match in ("some", "none") if match in found]
+    return ["", *notes] if notes else []
 
 
 def _times_table(data: dict, limit: int) -> list[str]:
@@ -116,15 +174,17 @@ def _times_table(data: dict, limit: int) -> list[str]:
         )
     )
     for row in rows[:limit]:
-        out.append(_times_row(row, row["name"]))
+        out.append(_times_row(row, _row_name(row)))
         out += [_times_row(found, f"  {found['name']}") for found in row["instances"]]
     out += _hidden_kernels_line(len(rows) - limit)
     out.append(_times_row(data["total"], "all kernels"))
     if any(row["time"]["within_spread"] for row in [*rows[:limit], data["total"]]):
         out += [
             "",
-            f"{WITHIN_SPREAD}: the times of the rounds before and after overlap, therefore the "
-            "difference lies within the spread of the rounds.",
+            f"{WITHIN_SPREAD}: the rounds of the two sides lie apart by less than the larger "
+            "of their spreads, the slowest round of a side minus its fastest. The difference "
+            "can then come from the noise of the rounds, and it counts as neither a speedup "
+            "nor a slowdown.",
         ]
     return out
 
@@ -190,7 +250,10 @@ def _time_text(side: dict) -> str:
 
 
 def _range_text(side: dict) -> str:
-    return "-" if side["time_range_ns"] is None else duration_range(*side["time_range_ns"])
+    if side["time_range_ns"] is None:
+        return "-"
+    fastest, slowest = side["time_range_ns"]
+    return duration_range(fastest, slowest, side["time_ns"])
 
 
 def _rounds_suffix(rounds: int | None) -> str:

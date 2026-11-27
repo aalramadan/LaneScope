@@ -160,7 +160,8 @@ class Library:
             for stamp in [stamp for stamp in self._facts if stamp not in current]:
                 del self._facts[stamp]
         runs = {file.run: summary.run_of(file.path) for file in files}
-        data = summary.summarize(items, times=summary.run_times(runs))
+        times, unreadable_times = summary.run_times(runs)
+        data = summary.summarize(items, times=times, unreadable_times=unreadable_times)
         return {"state": "done", "truncated": len(files) == summary.MAX_TRACES} | data
 
     def close(self, timeout: float = 5.0) -> None:

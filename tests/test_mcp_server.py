@@ -75,6 +75,20 @@ def test_summary_tool_gives_the_kernel_times_stored_with_the_recording(tmp_path)
     assert data["times"][0]["total_ns"] == 900
 
 
+def test_summary_and_compare_tools_keep_the_counts_of_a_run_with_broken_kernel_times(tmp_path):
+    for name in ("before", "after"):
+        (tmp_path / name).mkdir()
+        demos.transpose_trace().save(tmp_path / name / "trace-0.npz")
+    broken = tmp_path / "after" / "kernel-times.json"
+    broken.write_text('{"format": 1, "rounds": 2, "kern')
+    data = mcp_server.summary(str(tmp_path / "after"))
+    assert (data["traces"], data["times"]) == (1, [])
+    assert [unread["file"] for unread in data["unreadable_times"]] == [str(broken)]
+    compared = mcp_server.compare(str(tmp_path / "before"), str(tmp_path / "after"))
+    assert compared["kernels"][0]["after"]["wavefronts"]["excessive"] == 3968
+    assert [unread["file"] for unread in compared["unreadable_times"]] == [str(broken)]
+
+
 def test_compare_tool_gives_the_counts_of_each_template_before_and_after(tmp_path):
     for name in ("before", "after"):
         (tmp_path / name).mkdir()

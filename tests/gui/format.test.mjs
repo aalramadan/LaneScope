@@ -134,3 +134,20 @@ test("a ranked fix reads as the object of a sentence with its effect", () => {
     "removes all 192 extra passes on this buffer, adds 128 B of shared memory, and adds 8 excess sectors of global memory",
   );
 });
+
+test("a duration keeps three significant digits in the largest unit it fills", () => {
+  const cases = [
+    [768, "768 ns"],
+    [19_000, "19.0 us"],
+    [1_342_000, "1.34 ms"],
+    [12_340_000, "12.3 ms"],
+    [123_400_000, "123 ms"],
+    [1_234_000_000, "1.23 s"],
+    [999_600, "1.00 ms"],
+    [5, "5.00 ns"],
+    [0, "0 ns"],
+  ];
+  for (const [nanoseconds, text] of cases) {
+    assert.equal(format.duration(nanoseconds), text);
+  }
+});

@@ -52,7 +52,7 @@ class Instruction:
     fewest: int
     most: int
     # The hashes of the distinct patterns of lane offsets and the distinct excess counts of
-    # a shared instruction with excess, which judge its line over all launches.
+    # a shared instruction with excess, which judge its line over all launches of its kernel.
     patterns: frozenset[int] | None = frozenset()
     excess_counts: frozenset[int] = frozenset()
     # The file, line, and text that an inlined instruction comes from, such as a line of a
@@ -93,17 +93,25 @@ def run_of(path: pathlib.Path) -> pathlib.Path:
     return path.parent if RECORDED_NAME.fullmatch(path.name) else path
 
 
-def run_times(runs: Mapping[str, pathlib.Path]) -> dict[str, dict]:
-    """Return the kernel times of each run that has them, by its name.
+def run_times(runs: Mapping[str, pathlib.Path]) -> tuple[dict[str, dict], list[dict]]:
+    """Return the kernel times of each run that has them by its name, and the unreadable ones.
 
-    The times of a recording lie in its folder, and those of a trace file beside it.
+    The times of a recording lie in its folder, and those of a trace file beside it. An
+    unreadable file names its run, its path, and the reason.
     """
     found = {}
+    unreadable = []
     for name, run in runs.items():
-        result = kernel_times.read_times(run if run.is_dir() else run.parent)
+        folder = run if run.is_dir() else run.parent
+        try:
+            result = kernel_times.read_times(folder)
+        except ValueError as error:
+            path = str(folder / kernel_times.TIMES_FILE)
+            unreadable.append({"run": name, "file": path, "reason": str(error)})
+            continue
         if result is not None:
             found[name] = result
-    return found
+    return found, unreadable
 
 
 def read_facts(path: pathlib.Path) -> TraceFacts | None:
@@ -197,6 +205,7 @@ def summarize(
     items: Iterable[tuple[str, str, TraceFacts | None]],
     by_template: bool = True,
     times: Mapping[str, dict] | None = None,
+    unreadable_times: Sequence[dict] = (),
 ) -> dict:
     """Return the counts of many traces by kernel template and by source line, worst first.
 
@@ -204,7 +213,8 @@ def summarize(
     with None for a file that holds no trace. Each entry of a template lists its kernel
     instances, and without `by_template` each instance stands alone. The lines keep only
     instructions with extra passes or sectors. `times` holds the kernel times of the runs
-    that lanescope time timed, by run.
+    that lanescope time timed, by run, and `unreadable_times` the files of times that
+    run_times could not read.
     """
     times = times or {}
     traces = unreadable = without_lines = dropped_traces = dropped = 0
@@ -269,6 +279,7 @@ def summarize(
         "without_lines": without_lines,
         "dropped": {"traces": dropped_traces, "records": dropped},
         "times": [_run_time(run, times[run]) for run in runs if run in times],
+        "unreadable_times": list(unreadable_times),
         "kernels": sorted(templates.values(), key=_kernel_order),
         "lines": ranked_lines,
     }
@@ -286,13 +297,15 @@ def summarize_files(
     trace file for all of them.
     """
     runs = [run or run_of(path) for path in paths]
+    times, unreadable_times = run_times({str(found_run): found_run for found_run in runs})
     return summarize(
         (
             (str(path), str(found_run), found)
             for path, found_run, found in zip(paths, runs, facts, strict=True)
         ),
         by_template=by_template,
-        times=run_times({str(found_run): found_run for found_run in runs}),
+        times=times,
+        unreadable_times=unreadable_times,
     )
 
 
@@ -325,7 +338,7 @@ def _group_templates(
                 "name": kernel_names.short_name(entry["template"]),
                 "full_name": entry["template"],
             }
-        entry |= _template_time(instances)
+        entry |= template_time(instances)
     return templates, owners
 
 
@@ -341,7 +354,7 @@ def _instance_time(result: dict | None, kernel: str) -> dict:
     }
 
 
-def _template_time(instances: Sequence[dict]) -> dict:
+def template_time(instances: Sequence[dict]) -> dict:
     """Return the time of the timed instances of a template, round by round.
 
     The median of the rounds of the sum stays within the range of the rounds, which a sum
@@ -376,11 +389,17 @@ def _merge_lines(
 ) -> dict[tuple, dict]:
     """Return the lines of each kernel added up per template.
 
-    A line without a line table stays apart per kernel, since the PCs of two instances
-    do not match.
+    Each kernel judges on its own launches whether its line follows the input, since two
+    instances with fixed layouts of their own differ like input values. A line without a
+    line table stays apart per kernel, since the PCs of two instances do not match.
     """
     merged: dict[tuple, dict] = {}
     for (run, kernel, file, where, instruction, space), line in lines.items():
+        line["data_dependent"] |= data_dependence.follows_input_over_launches(
+            line["requests"], len(line["traces"]), line["patterns"], line["excess_counts"]
+        )
+        for name in ("patterns", "excess_counts"):
+            del line[name]
         owner = owners[(run, kernel)]
         place = where if line["line"] is not None else (kernel, where)
         key = (owner, file, place, instruction, space)
@@ -395,7 +414,6 @@ def _merge_lines(
         entry["data_dependent"] |= line["data_dependent"]
         entry["fewest"] = min(entry["fewest"], line["fewest"])
         entry["most"] = max(entry["most"], line["most"])
-        _add_evidence(entry, line["patterns"], line["excess_counts"])
         if line["worst"]["excessive"] > entry["worst"]["excessive"]:
             for name in ("worst", "kernel", "file", "line", "source"):
                 entry[name] = line[name]
@@ -421,13 +439,9 @@ def _shown_place(entry: dict) -> tuple[str, int]:
 
 
 def _finished_line(entry: dict, template: dict) -> dict:
-    """Return a line as a summary gives it, judged over all its launches."""
-    launches = len(entry["traces"])
-    dependent = entry["data_dependent"] or data_dependence.follows_input_over_launches(
-        entry["requests"], launches, entry["patterns"], entry["excess_counts"]
-    )
-    for name in ("traces", "patterns", "excess_counts"):
-        del entry[name]
+    """Return a line as a summary gives it, with the launches of every kernel that adds to it."""
+    launches = len(entry.pop("traces"))
+    dependent = entry["data_dependent"]
     fewest, most = entry.pop("fewest"), entry.pop("most")
     entry["worst"].pop("excessive")
     return entry | {

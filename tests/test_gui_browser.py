@@ -3,7 +3,7 @@ import re
 
 import pytest
 
-from lanescope import analysis, demos
+from lanescope import demos, trace_reports
 from lanescope.fixes import layouts
 from lanescope.gui import server as gui
 
@@ -93,8 +93,8 @@ def test_column_headers_and_counts_explain_their_terms_on_hover(page):
 
 def predicted_excess(change):
     """Return the excess wavefronts of the demo transpose after a change, as the page shows it."""
-    data = analysis.whatif(TRANSPOSE, layouts.Buffer(0, 4096), change)
-    total = analysis.overview(TRANSPOSE)["totals"]["wavefronts"]["excessive"]
+    data = trace_reports.whatif(TRANSPOSE, layouts.Buffer(0, 4096), change)
+    total = trace_reports.overview(TRANSPOSE)["totals"]["wavefronts"]["excessive"]
     for item in data["instructions"]:
         total += item["after"]["excessive"] - item["before"]["excessive"]
     return f"{total:,}"

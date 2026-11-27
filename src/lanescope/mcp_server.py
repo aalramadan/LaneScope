@@ -2,7 +2,7 @@ import functools
 import pathlib
 from collections.abc import Callable
 
-from lanescope import __version__, analysis
+from lanescope import __version__, trace_reports
 from lanescope.fixes.layouts import Buffer, Change, Padding, XorSwizzle
 from lanescope.summary import MAX_TRACES, UNITS, read_many, run_of, summarize, trace_files
 from lanescope.trace import Trace
@@ -16,12 +16,12 @@ except ImportError:  # The MCP SDK is an optional dependency.
 
 def explain(trace_path: str) -> dict:
     """Return the shared wavefronts and global sectors of every instruction, worst first."""
-    return analysis.explain(Trace.load(trace_path))
+    return trace_reports.explain(Trace.load(trace_path))
 
 
 def lanes(trace_path: str, pc: str) -> str:
     """Return the lane-by-bank or lane-by-sector view of the worst access of an instruction."""
-    return analysis.lanes(Trace.load(trace_path), int(pc, 0))
+    return trace_reports.lanes(Trace.load(trace_path), int(pc, 0))
 
 
 def whatif(
@@ -53,7 +53,7 @@ def whatif(
         change = XorSwizzle(swizzle_bits, swizzle_base, swizzle_shift)
     else:
         raise ValueError("give pad_row_bytes for a padding or swizzle_bits for a swizzle")
-    return analysis.whatif(Trace.load(trace_path), Buffer(buffer_start, buffer_size), change)
+    return trace_reports.whatif(Trace.load(trace_path), Buffer(buffer_start, buffer_size), change)
 
 
 def suggest(
@@ -69,7 +69,7 @@ def suggest(
     if buffer_start and not buffer_size:
         raise ValueError("a buffer needs both buffer_start and buffer_size")
     buffer = Buffer(buffer_start, buffer_size) if buffer_size else None
-    return analysis.suggest(Trace.load(trace_path), buffer, int(pc, 0) if pc else None, limit)
+    return trace_reports.suggest(Trace.load(trace_path), buffer, int(pc, 0) if pc else None, limit)
 
 
 def summary(recording_path: str, limit: int = 20) -> dict:

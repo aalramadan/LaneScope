@@ -5,8 +5,8 @@ import tarfile
 
 import pytest
 
-import lanescope.cli as cli_module
 from lanescope.cli import main
+from lanescope.commands import nsight_check
 from lanescope.cuda import toolchain
 from lanescope.nsight import installer
 
@@ -156,7 +156,7 @@ def test_install_replaces_a_damaged_copy_on_request(tmp_path, monkeypatch):
 
 def test_get_ncu_reports_an_ncu_that_is_found_without_downloading(monkeypatch, capsys, tmp_path):
     ncu = tmp_path / "ncu"
-    monkeypatch.setattr(cli_module, "find", lambda: _tools(ncu))
+    monkeypatch.setattr(nsight_check, "find", lambda: _tools(ncu))
     monkeypatch.setattr(installer, "install", lambda *args: pytest.fail("no download expected"))
     assert main(["get-ncu"]) == 0
     assert str(ncu) in capsys.readouterr().out
@@ -164,8 +164,8 @@ def test_get_ncu_reports_an_ncu_that_is_found_without_downloading(monkeypatch, c
 
 def test_get_ncu_downloads_for_a_given_cuda_version_even_beside_another_ncu(monkeypatch, tmp_path):
     calls = []
-    monkeypatch.setattr(cli_module, "find", lambda: _tools(tmp_path / "ncu"))
-    monkeypatch.setattr(cli_module, "cache_folder", lambda: tmp_path / "cache")
+    monkeypatch.setattr(nsight_check, "find", lambda: _tools(tmp_path / "ncu"))
+    monkeypatch.setattr(nsight_check, "cache_folder", lambda: tmp_path / "cache")
 
     def install(cuda, folder, replace=False):
         calls.append((cuda, folder, replace))

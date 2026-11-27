@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from lanescope import analysis
+from lanescope import trace_reports
 from lanescope.gui import server as gui
 
 playwright = pytest.importorskip("playwright.sync_api")
@@ -18,8 +18,8 @@ def title_matches_grid(page):
 
 
 def test_a_slow_access_of_a_left_instruction_never_lands(page, monkeypatch, slow):
-    monkeypatch.setattr(analysis, "patterns", slow(analysis.patterns, 0.4))
-    monkeypatch.setattr(analysis, "access", slow(analysis.access, 0.8))
+    monkeypatch.setattr(trace_reports, "patterns", slow(trace_reports.patterns, 0.4))
+    monkeypatch.setattr(trace_reports, "access", slow(trace_reports.access, 0.8))
     page.locator('#instruction-rows tr[data-key="0xb0/shared"]').click()
     page.wait_for_timeout(900)
     page.locator('#instruction-rows tr[data-key="0xa0/global"]').click()
@@ -31,7 +31,7 @@ def test_a_slow_access_of_a_left_instruction_never_lands(page, monkeypatch, slow
 
 
 def test_pattern_buttons_of_a_left_instruction_do_nothing(page, monkeypatch, slow):
-    monkeypatch.setattr(analysis, "access", slow(analysis.access, 0.6))
+    monkeypatch.setattr(trace_reports, "access", slow(trace_reports.access, 0.6))
     page.locator('#instruction-rows tr[data-key="0xa0/global"]').click()
     page.wait_for_timeout(150)
     # The buttons still show the patterns of 0x120 while the access of 0xa0 runs.
@@ -48,7 +48,7 @@ def test_fix_controls_moved_while_an_instruction_loads_send_nothing(page, monkey
     expect(page.locator("#result .hero .figure")).to_have_text("0")
     posts = []
     page.on("request", lambda request: request.method == "POST" and posts.append(request))
-    monkeypatch.setattr(analysis, "patterns", slow(analysis.patterns, 0.6))
+    monkeypatch.setattr(trace_reports, "patterns", slow(trace_reports.patterns, 0.6))
     page.locator('#instruction-rows tr[data-key="0xa0/global"]').click()
     page.locator("#pad-bytes").fill("8")
     expect(page.locator("#lanes-title")).to_have_text("0xa0, line 5")
@@ -60,7 +60,7 @@ def test_fix_controls_moved_while_an_instruction_loads_send_nothing(page, monkey
 
 def test_a_prediction_from_before_a_trace_switch_never_lands(page, monkeypatch, slow):
     expect(page.locator("#suggestion-list li").first).to_be_visible()
-    monkeypatch.setattr(analysis, "whatif", slow(analysis.whatif, 0.8))
+    monkeypatch.setattr(trace_reports, "whatif", slow(trace_reports.whatif, 0.8))
     page.locator('input[name="kind"][value="padding"]').check(force=True)
     page.wait_for_timeout(200)
     # A trace without accesses starts no prediction of its own that could cover the old one.
@@ -98,7 +98,7 @@ def test_an_abort_while_the_answer_arrives_shows_no_error(page, monkeypatch):
 
 
 def test_the_grid_stays_busy_until_the_newer_of_two_accesses_answers(page, monkeypatch, slow):
-    monkeypatch.setattr(analysis, "access", slow(analysis.access, 0.8))
+    monkeypatch.setattr(trace_reports, "access", slow(trace_reports.access, 0.8))
     page.locator("#patterns button").nth(1).click()
     page.wait_for_timeout(100)
     page.locator("#patterns button").nth(2).click()
@@ -128,7 +128,7 @@ def test_a_trace_that_fails_to_open_cancels_nothing_of_the_one_on_screen(page, m
     expect(page.locator("#suggestion-list li").first).to_be_visible()
     page.locator('input[name="kind"][value="padding"]').check(force=True)
     expect(page.locator("#result .hero .figure")).to_have_text("0")
-    monkeypatch.setattr(analysis, "whatif", slow(analysis.whatif, 0.8))
+    monkeypatch.setattr(trace_reports, "whatif", slow(trace_reports.whatif, 0.8))
     page.locator("#pad-bytes").fill("8")
     page.wait_for_timeout(200)
     page.locator("#trace-select").select_option("0/broken.npz")
@@ -138,7 +138,7 @@ def test_a_trace_that_fails_to_open_cancels_nothing_of_the_one_on_screen(page, m
 
 
 def test_a_slow_search_never_fills_the_panel_of_another_instruction(page, monkeypatch, slow):
-    monkeypatch.setattr(analysis, "suggest", slow(analysis.suggest, 1.0))
+    monkeypatch.setattr(trace_reports, "suggest", slow(trace_reports.suggest, 1.0))
     page.locator("#buffer-size").fill("2048")
     page.locator("#buffer-size").press("Enter")
     expect(page.locator("#suggestions-note")).to_contain_text("Searching")
@@ -149,7 +149,7 @@ def test_a_slow_search_never_fills_the_panel_of_another_instruction(page, monkey
 
 
 def test_none_drops_a_prediction_that_is_still_running(page, monkeypatch, slow):
-    monkeypatch.setattr(analysis, "whatif", slow(analysis.whatif, 0.8))
+    monkeypatch.setattr(trace_reports, "whatif", slow(trace_reports.whatif, 0.8))
     page.locator('input[name="kind"][value="padding"]').check(force=True)
     page.wait_for_timeout(200)
     page.locator('input[name="kind"][value="none"]').check(force=True)
@@ -164,7 +164,7 @@ def test_fix_controls_moved_while_a_shared_instruction_loads_send_nothing(page, 
     expect(page.locator("#result .hero .figure")).to_have_text("0")
     posts = []
     page.on("request", lambda request: request.method == "POST" and posts.append(request))
-    monkeypatch.setattr(analysis, "patterns", slow(analysis.patterns, 0.8))
+    monkeypatch.setattr(trace_reports, "patterns", slow(trace_reports.patterns, 0.8))
     page.locator('#instruction-rows tr[data-key="0xb0/shared"]').click()
     page.locator("#pad-bytes").fill("8")
     page.wait_for_timeout(500)
@@ -176,7 +176,7 @@ def test_a_ranked_fix_clicked_while_an_instruction_loads_sends_nothing(page, mon
     expect(page.locator("#suggestion-list li").first).to_be_visible()
     posts = []
     page.on("request", lambda request: request.method == "POST" and posts.append(request))
-    monkeypatch.setattr(analysis, "patterns", slow(analysis.patterns, 0.8))
+    monkeypatch.setattr(trace_reports, "patterns", slow(trace_reports.patterns, 0.8))
     page.locator('#instruction-rows tr[data-key="0xa0/global"]').click()
     page.locator("#suggestion-list button").first.click()
     expect(page.locator("#lanes-title")).to_have_text("0xa0, line 5")
@@ -187,7 +187,7 @@ def test_a_ranked_fix_clicked_while_an_instruction_loads_sends_nothing(page, mon
 
 def test_a_buffer_typed_while_an_instruction_loads_opens_nothing(page, monkeypatch, slow):
     expect(page.locator("#suggestion-list li").first).to_be_visible()
-    monkeypatch.setattr(analysis, "patterns", slow(analysis.patterns, 0.4))
+    monkeypatch.setattr(trace_reports, "patterns", slow(trace_reports.patterns, 0.4))
     monkeypatch.setattr(gui, "_buffer_facts", slow(gui._buffer_facts, 1.2))
     page.locator('#instruction-rows tr[data-key="0xa0/global"]').click()
     page.locator("#buffer-size").fill("2048")

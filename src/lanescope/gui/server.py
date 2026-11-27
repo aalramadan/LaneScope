@@ -17,7 +17,7 @@ from typing import TypeVar
 
 import numpy as np
 
-from lanescope import __version__, analysis, kernel_names, summary
+from lanescope import __version__, kernel_names, summary, trace_reports
 from lanescope.fixes import codegen
 from lanescope.fixes.layouts import Buffer, apply, infer_buffer, lanes_inside
 from lanescope.fixes.ranking import divisors
@@ -263,7 +263,7 @@ class Library:
             self.listing()
             raise NotFound(f"the trace {trace_id} no longer exists") from None
         counts = validate.measured_counts(item.path, str(trace.metadata.get("kernel", "")))
-        entry = (trace, _with_measurements(analysis.overview(trace), counts))
+        entry = (trace, _with_measurements(trace_reports.overview(trace), counts))
         with self._lock:
             self._cache[key] = entry
             while len(self._cache) > MAX_CACHED:
@@ -433,11 +433,11 @@ def _trace_route(trace: Trace, overview: dict, query: dict[str, str]) -> dict:
 
 
 def _patterns_route(trace: Trace, overview: dict, query: dict[str, str]) -> dict:
-    return analysis.patterns(trace, _integer(query, "pc"), _space(_text(query, "space")))
+    return trace_reports.patterns(trace, _integer(query, "pc"), _space(_text(query, "space")))
 
 
 def _access_route(trace: Trace, overview: dict, query: dict[str, str]) -> dict:
-    return analysis.access(trace, _integer(query, "row"))
+    return trace_reports.access(trace, _integer(query, "row"))
 
 
 def _buffer_route(trace: Trace, overview: dict, query: dict[str, str]) -> dict:
@@ -451,7 +451,7 @@ def _suggest_route(trace: Trace, overview: dict, query: dict[str, str]) -> dict:
     if "size" in query:
         buffer = _buffer(_text(query, "start"), _text(query, "size"))
     pc = _integer(query, "pc") if "pc" in query else None
-    return analysis.suggest(trace, buffer, pc, SUGGESTIONS)
+    return trace_reports.suggest(trace, buffer, pc, SUGGESTIONS)
 
 
 TRACE_ROUTES: dict[str, Callable[[Trace, dict, dict[str, str]], dict]] = {
@@ -504,8 +504,8 @@ def _interrupt(signum: int, frame: object) -> None:
 
 
 def _whatif(trace: Trace, overview: dict, buffer: Buffer, body: dict) -> dict:
-    change = analysis.change_from_params(body.get("change"))
-    data = analysis.whatif(trace, buffer, change)
+    change = trace_reports.change_from_params(body.get("change"))
+    data = trace_reports.whatif(trace, buffer, change)
     element = _element_bytes(_widths(trace, buffer))
     data["element_bytes"] = element
     data["forms"] = codegen.forms(buffer, change, element)
@@ -514,7 +514,7 @@ def _whatif(trace: Trace, overview: dict, buffer: Buffer, body: dict) -> dict:
     if row is not None:
         if not isinstance(row, int) or isinstance(row, bool):
             raise ValueError("row must be an integer")
-        data["access"] = analysis.access(apply(trace, buffer, change), row)
+        data["access"] = trace_reports.access(apply(trace, buffer, change), row)
     return data
 
 

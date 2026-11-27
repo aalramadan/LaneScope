@@ -1,6 +1,6 @@
 import numpy as np
 
-from lanescope import analysis, demos
+from lanescope import demos, trace_reports
 from lanescope.fixes import layouts
 from lanescope.model.counters import count
 from lanescope.trace import Kind, Space
@@ -41,7 +41,7 @@ def test_row_sums_reads_put_each_quarter_warp_into_four_banks():
         for index in range(len(trace))
         if trace.space[index] == Space.SHARED and trace.kind[index] == Kind.LOAD
     )
-    data = analysis.access(trace, row)
+    data = trace_reports.access(trace, row)
     assert [phase["wavefronts"] for phase in data["phases"]] == [8, 8, 8, 8]
     assert (data["achieved"], data["ideal"]) == (32, 4)
 
@@ -49,13 +49,13 @@ def test_row_sums_reads_put_each_quarter_warp_into_four_banks():
 def test_row_sums_tile_needs_one_vector_of_padding_per_row():
     trace = demos.row_sums_trace(blocks=1)
     buffer = layouts.Buffer(0, 32 * demos.ROW_BYTES)
-    data = analysis.whatif(trace, buffer, layouts.Padding(demos.ROW_BYTES, demos.VECTOR_BYTES))
+    data = trace_reports.whatif(trace, buffer, layouts.Padding(demos.ROW_BYTES, demos.VECTOR_BYTES))
     assert all(item["after"]["excessive"] == 0 for item in data["instructions"])
 
 
 def test_column_sums_reads_take_one_sector_per_lane():
     trace = demos.column_sums_trace(blocks=1)
-    data = analysis.access(trace, 0)
+    data = trace_reports.access(trace, 0)
     assert (data["achieved"], data["lines"], data["ideal"]) == (32, 32, 4)
 
 
@@ -77,7 +77,7 @@ def test_matmul_tile_ldmatrix_puts_the_eight_rows_of_each_matrix_on_one_bank():
 
 
 def test_matmul_tile_needs_the_swizzle_that_cute_uses_for_128_byte_rows():
-    best = analysis.suggest(demos.matmul_tile_trace())["changes"][0]
+    best = trace_reports.suggest(demos.matmul_tile_trace())["changes"][0]
     assert best["change"] == "XOR swizzle Swizzle<3,4,3> on byte offsets"
     assert best["excessive_after"] == 0
 
@@ -91,8 +91,8 @@ def test_matmul_tile_maps_the_copy_and_the_ldmatrix_to_their_source_lines():
 
 def test_the_llama_cpp_recordings_show_the_conflicts_that_the_fix_removes():
     traces = demos.recorded_traces()
-    before = analysis.overview(traces["6_llama_cpp_indexer.npz"])["totals"]["wavefronts"]
-    after = analysis.overview(traces["7_llama_cpp_indexer_fixed.npz"])["totals"]["wavefronts"]
+    before = trace_reports.overview(traces["6_llama_cpp_indexer.npz"])["totals"]["wavefronts"]
+    after = trace_reports.overview(traces["7_llama_cpp_indexer_fixed.npz"])["totals"]["wavefronts"]
     assert (before["achieved"], before["ideal"], before["excessive"]) == (2584, 1848, 736)
     assert (after["achieved"], after["ideal"], after["excessive"]) == (1752, 1752, 0)
 

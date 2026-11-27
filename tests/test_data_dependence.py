@@ -1,6 +1,6 @@
 import numpy as np
 
-from lanescope import analysis, demos
+from lanescope import demos, trace_reports
 from lanescope.fixes.layouts import Buffer
 from lanescope.model.counters import count
 from lanescope.model.data_dependence import MIN_ACCESSES, data_dependent
@@ -46,7 +46,7 @@ def test_accesses_of_one_warp_alone_tell_nothing_about_the_input_values():
 
 
 def test_explain_marks_the_instruction_and_gives_the_excess_of_its_warps():
-    records = analysis.explain(demos.histogram_trace())["instructions"]
+    records = trace_reports.explain(demos.histogram_trace())["instructions"]
     atomic = next(record for record in records if record["pc"] == hex(demos.PC_ADD_BIN))
     assert atomic["data_dependent"] is True
     fewest, most = atomic["excess_range"]
@@ -56,12 +56,12 @@ def test_explain_marks_the_instruction_and_gives_the_excess_of_its_warps():
 
 
 def test_suggest_says_whether_the_conflicts_of_its_instruction_follow_the_input_values():
-    assert analysis.suggest(demos.histogram_trace())["data_dependent"] is True
-    assert analysis.suggest(demos.transpose_trace())["data_dependent"] is False
+    assert trace_reports.suggest(demos.histogram_trace())["data_dependent"] is True
+    assert trace_reports.suggest(demos.transpose_trace())["data_dependent"] is False
 
 
 def test_suggest_for_a_given_buffer_says_whether_its_conflicts_follow_the_input_values():
     bins = Buffer(0, demos.HISTOGRAM_BINS * 4)
-    assert analysis.suggest(demos.histogram_trace(), bins)["data_dependent"] is True
+    assert trace_reports.suggest(demos.histogram_trace(), bins)["data_dependent"] is True
     tile = Buffer(0, 4096)
-    assert analysis.suggest(demos.transpose_trace(), tile)["data_dependent"] is False
+    assert trace_reports.suggest(demos.transpose_trace(), tile)["data_dependent"] is False

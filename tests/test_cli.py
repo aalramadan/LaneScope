@@ -12,10 +12,11 @@ import urllib.request
 import numpy as np
 import pytest
 
-import lanescope.cli as cli_module
-from lanescope import demos, mcp_server
+from lanescope import demos, mcp_server, summary
 from lanescope.cli import main
+from lanescope.commands import nsight_check, record_program
 from lanescope.cuda import toolchain
+from lanescope.fixes import ranking
 from lanescope.gui import server as gui
 from lanescope.nsight import calibration
 from lanescope.recorder import capture
@@ -181,7 +182,8 @@ def test_bench_build_writes_the_cubin_and_its_source_without_the_driver(
     def no_driver():
         raise AssertionError("the CUDA driver was loaded")
 
-    monkeypatch.setattr(cli_module, "Driver", no_driver)
+    monkeypatch.setattr(record_program, "Driver", no_driver)
+    monkeypatch.setattr(nsight_check, "Driver", no_driver)
     monkeypatch.setattr(calibration, "Driver", no_driver)
     cubin = tmp_path / "bench-sm_89.cubin"
     source = tmp_path / "bench-sm_89.cu"
@@ -231,10 +233,10 @@ def fake_recorder(monkeypatch, status, launches):
             (out_dir / f"launch-{launch}.json").write_text(json.dumps(info))
         return status
 
-    monkeypatch.setattr(cli_module, "build_recorder", lambda out, arch, cache: None)
+    monkeypatch.setattr(record_program, "build_recorder", lambda out, arch, cache: None)
     monkeypatch.setattr(capture, "record", run)
     tools = toolchain.Toolchain(*[None] * 9, disassemblers=())
-    monkeypatch.setattr(cli_module, "find", lambda: tools)
+    monkeypatch.setattr(record_program, "find", lambda: tools)
     return settings
 
 
@@ -460,7 +462,7 @@ def test_import_reads_lines_with_the_next_nvdisasm_when_one_fails(tmp_path, monk
     (tmp_path / "launch-0.json").write_text(json.dumps(info))
     (tmp_path / "module-0.cubin").write_bytes(b"")
     tools = toolchain.Toolchain(*[None] * 9, disassemblers=(failing, working))
-    monkeypatch.setattr(cli_module, "find", lambda: tools)
+    monkeypatch.setattr(record_program, "find", lambda: tools)
     assert main(["import", str(tmp_path)]) == 0
     assert Trace.load(tmp_path / "trace-0.npz").metadata["lines"] == {"0x10": 3}
 
@@ -474,7 +476,7 @@ def test_import_without_nvdisasm_says_that_instruction_rules_fall_back(
     info = {"format": 1, "kernel": "k", "module": 0, "function_pc": 0x1000, "record_bytes": 280}
     (tmp_path / "launch-0.json").write_text(json.dumps(info))
     tools = toolchain.Toolchain(*[None] * 9, disassemblers=())
-    monkeypatch.setattr(cli_module, "find", lambda: tools)
+    monkeypatch.setattr(record_program, "find", lambda: tools)
     assert main(["import", str(tmp_path)]) == 0
     assert "nvdisasm was not found" in capsys.readouterr().err
 
@@ -588,7 +590,7 @@ def test_summary_skips_files_without_a_trace_and_says_so(recording, capsys):
 def test_summary_reads_a_large_recording_in_several_processes(recording, monkeypatch, capsys):
     assert main(["summary", str(recording), "--json"]) == 0
     serial = json.loads(capsys.readouterr().out)
-    monkeypatch.setattr(cli_module.summary, "PARALLEL_TRACES", 1)
+    monkeypatch.setattr(summary, "PARALLEL_TRACES", 1)
     assert main(["summary", str(recording), "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == serial
 
@@ -614,7 +616,7 @@ def test_suggest_warns_that_a_fix_for_input_values_may_help_less_on_other_inputs
 def test_suggest_explains_input_values_when_no_layout_lowers_them(tmp_path, monkeypatch, capsys):
     path = tmp_path / "histogram.npz"
     demos.histogram_trace().save(path)
-    monkeypatch.setattr(cli_module.analysis.ranking, "suggest", lambda trace, buffer: [])
+    monkeypatch.setattr(ranking, "suggest", lambda trace, buffer: [])
     assert main(["suggest", str(path)]) == 0
     out = capsys.readouterr().out
     assert "no padding or swizzle lowers the excess wavefronts of this buffer" in out
@@ -657,7 +659,7 @@ def test_record_with_a_disassembler_but_no_line_tables_advises_lineinfo(
 ):
     fake_recorder(monkeypatch, status=0, launches=1)
     tools = toolchain.Toolchain(*[None] * 9, disassemblers=(pathlib.Path("nvdisasm"),))
-    monkeypatch.setattr(cli_module, "find", lambda: tools)
+    monkeypatch.setattr(record_program, "find", lambda: tools)
     assert run_record(tmp_path) == 0
     err = capsys.readouterr().err
     assert "no source lines in 1 of 1 launch, since their kernels were built without" in err

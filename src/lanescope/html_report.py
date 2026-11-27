@@ -1,6 +1,6 @@
 import html
 
-from lanescope import __version__, analysis, text_view
+from lanescope import __version__, text_view, trace_reports
 from lanescope.model import global_memory, shared_memory
 from lanescope.model.counters import InstructionCounters, count, worst_first
 from lanescope.trace import WARP_SIZE, Space, Trace
@@ -162,7 +162,7 @@ def _section(trace: Trace, counter: InstructionCounters) -> str:
 
 
 def _suggestions(trace: Trace, pc: int, limit: int = 3) -> str:
-    data = analysis.suggest(trace, pc=pc, limit=limit)
+    data = trace_reports.suggest(trace, pc=pc, limit=limit)
     if not data["changes"]:
         none = "<p>No padding or swizzle lowers the excess wavefronts of this buffer.</p>"
         if data["data_dependent"]:

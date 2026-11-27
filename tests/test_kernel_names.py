@@ -74,3 +74,41 @@ def test_a_failing_cpp_filt_leaves_the_names_as_they_are(monkeypatch):
     monkeypatch.setattr(kernel_names.shutil, "which", lambda name: "/usr/bin/c++filt")
     monkeypatch.setattr(kernel_names.subprocess, "run", fail)
     assert kernel_names.readable(["_Z1kv"]) == {"_Z1kv": "_Z1kv"}
+
+
+@pytest.mark.parametrize(
+    ("name", "template"),
+    [
+        (
+            "void cub::detail::merge_sort::DeviceMergeSortBlockSortKernel<A, B>(C, D)",
+            "cub::detail::merge_sort::DeviceMergeSortBlockSortKernel",
+        ),
+        (MERGE_SORT, "cub::CUB_300102_SM_750::detail::merge_sort::DeviceMergeSortBlockSortKernel"),
+        (ELEMENTWISE, "at::native::(anonymous namespace)::vectorized_elementwise_kernel"),
+        ("transpose(float const*, float*, int)", "transpose"),
+        ("(anonymous namespace)::reduce_rows(float*, int)", "(anonymous namespace)::reduce_rows"),
+        ("histogram", "histogram"),
+        ("void ns::Outer<int>::kernel<float>(float*)", "ns::Outer::kernel"),
+        (
+            "void ns::launch<ns::run(int)::{lambda(int)#1}>(int, ns::run(int)::{lambda(int)#1})",
+            "ns::launch",
+        ),
+        ("void ns::apply<&ns::Less::operator<, 4>(int)", "ns::apply"),
+        ("void ns::apply<&ns::Shift::operator<<, 4>(int)", "ns::apply"),
+        ("void ns::apply<&ns::Call::operator(), 4>(ns::Call)", "ns::apply"),
+        ("void ns::apply<&ns::Pointer::operator->, 4>(ns::Pointer)", "ns::apply"),
+        ("bool ns::operator< <int>(ns::V<int> const&, ns::V<int> const&)", "ns::operator<"),
+        ("void ns::Functor::operator()(int)", "ns::Functor::operator()"),
+        ("_Z6kernelILi4EEvPf", "_Z6kernelILi4EEvPf"),
+    ],
+)
+def test_the_template_of_a_kernel_keeps_its_namespaces_and_drops_every_argument_list(
+    name, template
+):
+    assert kernel_names.template_name(name) == template
+
+
+def test_short_names_keep_the_plain_arguments_after_an_operator_argument():
+    types = ", ".join(f"ns::T{index}<int>" for index in range(6))
+    name = f"void ns::apply<4, &ns::Cmp::operator<, {types}, 8>(int)"
+    assert kernel_names.short(name) == "apply<4, …, 8>"

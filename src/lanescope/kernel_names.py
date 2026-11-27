@@ -10,6 +10,13 @@ ELLIPSIS = "…"
 _PLAIN_ARGUMENT = re.compile(r"[\w.+-]{1,24}")
 _OPENING = "<({["
 _CLOSING = ">)}]"
+# The symbols of operators such as operator< or operator(), and the arrow, hold brackets
+# that pair with nothing. A bracket scan reads them, and a space before a template
+# argument list of an operator, as plain characters.
+_UNPAIRED = re.compile(
+    r"\boperator\s*(?:\(\)|\[\]|<=>|<<=|>>=|->\*|->|<<|>>|<=|>=|<|>|(?:new|delete)\s*\[\])"
+    r"(?:\s+(?=<))?|->\*?"
+)
 _readable: dict[str, str] = {}
 
 
@@ -29,6 +36,31 @@ def readable(names: Iterable[str]) -> dict[str, str]:
         if len(lines) == len(missing):
             _readable.update(zip(missing, lines, strict=True))
     return {name: _readable.get(name, name) for name in names}
+
+
+def template_name(full: str) -> str:
+    """Return the template of a kernel: its qualified name without types, parameters, or arguments.
+
+    A name that c++filt could not demangle stays as it is.
+    """
+    name = full.strip()
+    if name.startswith("_Z"):
+        return full
+    text = _without_return_type(_without_parameters(name))
+    kept = []
+    depth = 0
+    arguments = False
+    for index, current in enumerate(_plain(text)):
+        if current == "<" and depth == 0:
+            arguments = True
+        if not arguments:
+            kept.append(text[index])
+        if current in _OPENING:
+            depth += 1
+        elif current in _CLOSING:
+            depth = max(depth - 1, 0)
+            arguments &= depth > 0
+    return "".join(kept).strip()
 
 
 def short(name: str, length: int = SHORT_LENGTH) -> str:
@@ -57,13 +89,14 @@ def short(name: str, length: int = SHORT_LENGTH) -> str:
 
 def _without_parameters(text: str) -> str:
     """Return a demangled name without the parameter list at its end."""
-    if not text.endswith(")"):
+    plain = _plain(text)
+    if not plain.endswith(")"):
         return text
     depth = 0
-    for index in range(len(text) - 1, -1, -1):
-        if text[index] == ")":
+    for index in range(len(plain) - 1, -1, -1):
+        if plain[index] == ")":
             depth += 1
-        elif text[index] == "(":
+        elif plain[index] == "(":
             depth -= 1
             if depth == 0:
                 return text[:index] if index else text
@@ -94,7 +127,7 @@ def _depth_zero(text: str, character: str) -> list[int]:
     """Return the indices of a character outside every pair of brackets of a name."""
     found = []
     depth = 0
-    for index, current in enumerate(text):
+    for index, current in enumerate(_plain(text)):
         if current == character and depth == 0:
             found.append(index)
         if current in _OPENING:
@@ -102,3 +135,8 @@ def _depth_zero(text: str, character: str) -> list[int]:
         elif current in _CLOSING:
             depth = max(depth - 1, 0)
     return found
+
+
+def _plain(text: str) -> str:
+    """Return a name of the same length with the unpaired brackets of its operators blanked."""
+    return _UNPAIRED.sub(lambda found: "#" * len(found[0]), text)

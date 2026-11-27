@@ -55,6 +55,16 @@ def test_summary_tool_ranks_the_lines_of_a_recording_and_names_their_trace(tmp_p
     assert shared[0]["excessive"] == 3968
 
 
+def test_summary_tool_gives_one_entry_per_template_with_its_instances(tmp_path):
+    for index, kernel in enumerate(["void ns::tile<4>(float*)", "void ns::tile<8>(float*)"]):
+        trace = demos.transpose_trace()
+        trace.metadata["kernel"] = kernel
+        trace.save(tmp_path / f"trace-{index}.npz")
+    (entry,) = mcp_server.summary(str(tmp_path))["kernels"]
+    assert entry["template"] == "ns::tile"
+    assert sorted(found["name"] for found in entry["instances"]) == ["tile<4>", "tile<8>"]
+
+
 def test_summary_tool_names_a_missing_folder():
     with pytest.raises(ValueError, match="no such file or folder"):
         mcp_server.summary("/no/such/recording")

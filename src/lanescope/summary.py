@@ -10,8 +10,8 @@ import sys
 from collections.abc import Generator, Iterable, Sequence
 
 from lanescope import kernel_names
+from lanescope.model import data_dependence
 from lanescope.model.counters import count
-from lanescope.model.data_dependence import data_dependent
 from lanescope.trace import Trace
 
 # The recorder names the traces of one run trace-<n>.npz, and the launches of a run add
@@ -50,6 +50,10 @@ class Instruction:
     data_dependent: bool
     fewest: int
     most: int
+    # The hashes of the distinct patterns of lane offsets and the distinct excess counts of
+    # a shared instruction with excess, which judge its line over all launches.
+    patterns: frozenset[int] | None = frozenset()
+    excess_counts: frozenset[int] = frozenset()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -134,11 +138,11 @@ def _main_importable() -> bool:
 def trace_facts(trace: Trace) -> TraceFacts:
     """Return the facts of one trace that a summary adds up."""
     counters = count(trace)
-    dependent = data_dependent(trace, counters)
+    evidence = data_dependence.input_evidence(trace, counters)
     instructions = []
     for counter in counters:
         line = trace.source_line(counter.pc)
-        key = (counter.pc, int(counter.space), int(counter.kind), counter.width)
+        found = evidence.get((counter.pc, int(counter.space), int(counter.kind), counter.width))
         instructions.append(
             Instruction(
                 pc=counter.pc,
@@ -154,9 +158,11 @@ def trace_facts(trace: Trace) -> TraceFacts:
                 achieved=counter.achieved,
                 ideal=counter.ideal,
                 excessive=counter.excessive,
-                data_dependent=key in dependent,
+                data_dependent=found is not None and found.data_dependent,
                 fewest=counter.fewest,
                 most=counter.most,
+                patterns=found.patterns if found else frozenset(),
+                excess_counts=found.excess_counts if found else frozenset(),
             )
         )
     metadata = trace.metadata
@@ -169,12 +175,15 @@ def trace_facts(trace: Trace) -> TraceFacts:
     )
 
 
-def summarize(items: Iterable[tuple[str, str, TraceFacts | None]]) -> dict:
-    """Return the counts of many traces by kernel and by source line, worst first.
+def summarize(
+    items: Iterable[tuple[str, str, TraceFacts | None]], by_template: bool = True
+) -> dict:
+    """Return the counts of many traces by kernel template and by source line, worst first.
 
     Each item names a trace by the id that opens it and by its run, with its facts, or
-    with None for a file that holds no trace. The lines keep only instructions with
-    extra passes or sectors.
+    with None for a file that holds no trace. Each entry of a template lists its kernel
+    instances, and without `by_template` each instance stands alone. The lines keep only
+    instructions with extra passes or sectors.
     """
     traces = unreadable = without_lines = dropped_traces = dropped = 0
     runs: dict[str, None] = {}
@@ -202,14 +211,7 @@ def summarize(items: Iterable[tuple[str, str, TraceFacts | None]]) -> dict:
             where = item.line if item.line is not None else f"{item.pc:#x}"
             key = (run, facts.kernel, facts.source_file, where, item.instruction, item.space)
             entry = lines.setdefault(key, _line_entry(run, facts, item))
-            _add(entry, item)
-            entry["traces"].add(trace_id)
-            entry["data_dependent"] |= item.data_dependent
-            if item.data_dependent:
-                low, high = entry["excess_range"] or (item.fewest, item.most)
-                entry["excess_range"] = (min(low, item.fewest), max(high, item.most))
-            if item.excessive > entry["worst"]["excessive"]:
-                entry["worst"] = _place(trace_id, item)
+            _add_to_line(entry, trace_id, item)
     names = kernel_names.readable(kernel for _, kernel in kernels)
     totals = {unit: _zero() for unit in UNITS}
     for kernel in kernels.values():
@@ -218,38 +220,25 @@ def summarize(items: Iterable[tuple[str, str, TraceFacts | None]]) -> dict:
         for unit in UNITS:
             for name, value in kernel["totals"][unit].items():
                 totals[unit][name] += value
-            if kernel["worst"][unit]:
-                kernel["worst"][unit].pop("excessive")
+    templates, owners = _group_templates(kernels, by_template)
     ranked_lines = []
+    merged = _merge_lines(lines, templates, owners)
     for unit in UNITS:
-        found = [entry for entry in lines.values() if entry["unit"] == unit]
+        found = [entry for entry in merged.values() if entry["unit"] == unit]
         found.sort(
             key=lambda entry: (
-                -entry["excessive"], entry["run"], entry["kernel"], entry["file"],
-                entry["line"] or 0, entry["instruction"],
+                -entry["excessive"], entry["run"], entry["template"], entry["kernel"],
+                entry["file"], entry["line"] or 0, entry["instruction"],
             )
         )  # fmt: skip
         for entry in found[:MAX_LINES]:
-            kernel = kernels[(entry["run"], entry["kernel"])]
-            entry["worst"].pop("excessive")
-            entry |= {
-                "pc": entry["worst"]["pc"],
-                "name": kernel["name"],
-                "full_name": kernel["full_name"],
-                "launches": len(entry.pop("traces")),
-                "kernel_achieved": kernel["totals"][unit]["achieved"],
-                "excess_range": list(entry["excess_range"]) if entry["excess_range"] else None,
-            }
-            ranked_lines.append(entry)
-    ordered = sorted(
-        kernels.values(),
-        key=lambda kernel: (
-            -kernel["totals"]["wavefronts"]["excessive"],
-            -kernel["totals"]["sectors"]["excessive"],
-            kernel["run"],
-            kernel["name"],
-        ),
-    )
+            template = templates[owners[(entry["run"], entry["kernel"])]]
+            ranked_lines.append(_finished_line(entry, template))
+    for template in templates.values():
+        for place in [template, *template["instances"]]:
+            for worst in place["worst"].values():
+                if worst:
+                    worst.pop("excessive", None)
     return {
         "traces": traces,
         "unreadable": unreadable,
@@ -257,9 +246,101 @@ def summarize(items: Iterable[tuple[str, str, TraceFacts | None]]) -> dict:
         "totals": totals,
         "without_lines": without_lines,
         "dropped": {"traces": dropped_traces, "records": dropped},
-        "kernels": ordered,
+        "kernels": sorted(templates.values(), key=_kernel_order),
         "lines": ranked_lines,
     }
+
+
+def _group_templates(
+    kernels: dict[tuple[str, str], dict], by_template: bool
+) -> tuple[dict[tuple[str, str], dict], dict[tuple[str, str], tuple[str, str]]]:
+    """Return the entries of the templates of each run and the template key of each kernel."""
+    templates: dict[tuple[str, str], dict] = {}
+    owners = {}
+    for key, kernel in kernels.items():
+        template = kernel_names.template_name(kernel["full_name"])
+        owner = (kernel["run"], template if by_template else kernel["kernel"])
+        entry = templates.setdefault(owner, _template_entry(kernel["run"], template))
+        owners[key] = owner
+        entry["instances"].append(kernel)
+        entry["launches"] += kernel["launches"]
+        for unit in UNITS:
+            for name, value in kernel["totals"][unit].items():
+                entry["totals"][unit][name] += value
+            worst, found = entry["worst"][unit], kernel["worst"][unit]
+            if found and (worst is None or found["excessive"] > worst["excessive"]):
+                entry["worst"][unit] = dict(found)
+    for entry in templates.values():
+        instances = entry["instances"]
+        instances.sort(key=_kernel_order)
+        if len(instances) == 1:
+            entry |= {"name": instances[0]["name"], "full_name": instances[0]["full_name"]}
+        else:
+            entry |= {"name": kernel_names.short(entry["template"]), "full_name": entry["template"]}
+    return templates, owners
+
+
+def _merge_lines(
+    lines: dict[tuple, dict],
+    templates: dict[tuple[str, str], dict],
+    owners: dict[tuple[str, str], tuple[str, str]],
+) -> dict[tuple, dict]:
+    """Return the lines of each kernel added up per template.
+
+    A line without a line table stays apart per kernel, since the PCs of two instances
+    do not match.
+    """
+    merged: dict[tuple, dict] = {}
+    for (run, kernel, file, where, instruction, space), line in lines.items():
+        owner = owners[(run, kernel)]
+        place = where if line["line"] is not None else (kernel, where)
+        key = (owner, file, place, instruction, space)
+        entry = merged.get(key)
+        if entry is None:
+            merged[key] = line | {"template": templates[owner]["template"], "instances": 1}
+            continue
+        for name in _zero():
+            entry[name] += line[name]
+        entry["instances"] += 1
+        entry["traces"] |= line["traces"]
+        entry["data_dependent"] |= line["data_dependent"]
+        entry["fewest"] = min(entry["fewest"], line["fewest"])
+        entry["most"] = max(entry["most"], line["most"])
+        _add_evidence(entry, line["patterns"], line["excess_counts"])
+        if line["worst"]["excessive"] > entry["worst"]["excessive"]:
+            entry["worst"] = line["worst"]
+            entry["kernel"] = line["kernel"]
+    return merged
+
+
+def _finished_line(entry: dict, template: dict) -> dict:
+    """Return a line as a summary gives it, judged over all its launches."""
+    launches = len(entry["traces"])
+    dependent = entry["data_dependent"] or data_dependence.follows_input_over_launches(
+        entry["requests"], launches, entry["patterns"], entry["excess_counts"]
+    )
+    for name in ("traces", "patterns", "excess_counts"):
+        del entry[name]
+    fewest, most = entry.pop("fewest"), entry.pop("most")
+    entry["worst"].pop("excessive")
+    return entry | {
+        "data_dependent": dependent,
+        "pc": entry["worst"]["pc"],
+        "name": template["name"],
+        "full_name": template["full_name"],
+        "launches": launches,
+        "kernel_achieved": template["totals"][entry["unit"]]["achieved"],
+        "excess_range": [fewest, most] if dependent else None,
+    }
+
+
+def _kernel_order(entry: dict) -> tuple:
+    return (
+        -entry["totals"]["wavefronts"]["excessive"],
+        -entry["totals"]["sectors"]["excessive"],
+        entry["run"],
+        entry["name"],
+    )
 
 
 def _kernel_entry(run: str, kernel: str) -> dict:
@@ -269,6 +350,17 @@ def _kernel_entry(run: str, kernel: str) -> dict:
         "launches": 0,
         "totals": {unit: _zero() for unit in UNITS},
         "worst": {unit: None for unit in UNITS},
+    }
+
+
+def _template_entry(run: str, template: str) -> dict:
+    return {
+        "run": run,
+        "template": template,
+        "launches": 0,
+        "totals": {unit: _zero() for unit in UNITS},
+        "worst": {unit: None for unit in UNITS},
+        "instances": [],
     }
 
 
@@ -286,10 +378,35 @@ def _line_entry(run: str, facts: TraceFacts, item: Instruction) -> dict:
         "instruction": item.instruction,
         "traces": set(),
         "data_dependent": False,
-        "excess_range": None,
+        "fewest": item.fewest,
+        "most": item.most,
+        "patterns": set(),
+        "excess_counts": set(),
         "worst": {"excessive": -1},
         **_zero(),
     }
+
+
+def _add_to_line(entry: dict, trace_id: str, item: Instruction) -> None:
+    _add(entry, item)
+    entry["traces"].add(trace_id)
+    entry["data_dependent"] |= item.data_dependent
+    entry["fewest"] = min(entry["fewest"], item.fewest)
+    entry["most"] = max(entry["most"], item.most)
+    _add_evidence(entry, item.patterns, item.excess_counts)
+    if item.excessive > entry["worst"]["excessive"]:
+        entry["worst"] = _place(trace_id, item)
+
+
+def _add_evidence(
+    entry: dict, patterns: Iterable[int] | None, excess_counts: Iterable[int]
+) -> None:
+    # A launch with too many patterns to keep leaves the line to the rule for one trace.
+    if patterns is None:
+        entry["patterns"] = None
+    elif entry["patterns"] is not None:
+        entry["patterns"].update(patterns)
+    entry["excess_counts"].update(excess_counts)
 
 
 def _zero() -> dict[str, int]:

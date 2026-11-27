@@ -73,11 +73,14 @@ def suggest(
 
 
 def summary(recording_path: str, limit: int = 20) -> dict:
-    """Rank the kernels and source lines of a recording by their extra wavefronts and sectors.
+    """Rank the kernel templates and source lines of a recording by extra wavefronts and sectors.
 
-    Give the folder of a recording or a trace file. The answer keeps the worst lines of
-    each unit up to the limit. Each line names the trace and the PC that the other tools
-    take, and says whether its conflicts follow the input values, which no layout removes.
+    Give the folder of a recording or a trace file. Each entry of kernels is one template,
+    such as cub::DeviceMergeSortBlockSortKernel, and lists its kernel instances in
+    instances. A source line adds up over the instances of its template. The answer keeps
+    the worst lines of each unit up to the limit. Each line names the trace and the PC that
+    the other tools take, and says whether its conflicts follow the input values over all
+    launches, which no layout removes.
     """
     root = pathlib.Path(recording_path)
     if not root.exists():

@@ -59,7 +59,7 @@
             <dl id="summary-stats" class="stats summary-stats"></dl>
             <ul id="summary-notes" class="summary-notes"></ul>
             <h3 id="summary-lines-title">Lines with the most extra passes</h3>
-            <p class="note">Each line adds up its accesses over every launch of its kernel. Select a line to open its worst launch.</p>
+            <p class="note">Each line adds up its accesses over every launch of its kernel and the other instances of its template. Select a line to open its worst launch.</p>
             <table class="ranking" aria-labelledby="summary-lines-title">
               <thead>
                 <tr>
@@ -74,6 +74,7 @@
             </table>
             <p id="summary-lines-note" class="note"></p>
             <h3 id="summary-kernels-title">Kernels</h3>
+            <p class="note">Each row adds up the instances of one kernel template. Select a row to open its worst launch.</p>
             <table class="ranking" aria-labelledby="summary-kernels-title">
               <thead>
                 <tr>

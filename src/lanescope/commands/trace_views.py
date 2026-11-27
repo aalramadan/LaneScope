@@ -37,6 +37,11 @@ def add_parsers(commands: argparse._SubParsersAction) -> None:
     summing.add_argument(
         "--limit", type=argument_types.size, default=10, help="most kernels and lines to list"
     )
+    summing.add_argument(
+        "--instances",
+        action="store_true",
+        help="list each instance of a kernel template as a kernel of its own",
+    )
     summing.add_argument("--json", action="store_true", help="print JSON for tools and agents")
     summing.set_defaults(run=_summary)
 
@@ -91,8 +96,11 @@ def _summary(args: argparse.Namespace) -> int:
         raise ValueError(f"found no trace files in {', '.join(str(root) for root in args.paths)}")
     facts = _read_facts(paths)
     data = summary.summarize(
-        (str(path), str(summary.run_of(path)), found)
-        for path, found in zip(paths, facts, strict=True)
+        (
+            (str(path), str(summary.run_of(path)), found)
+            for path, found in zip(paths, facts, strict=True)
+        ),
+        by_template=not args.instances,
     )
     if args.json:
         print(json.dumps(data, indent=2))

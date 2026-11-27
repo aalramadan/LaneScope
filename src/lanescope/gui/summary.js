@@ -9,6 +9,10 @@ const UNITS = {
   sectors: { noun: "sectors", memory: "Global-memory sectors" },
 };
 
+// The templates whose instances the table of kernels lists, by run and template. They stay
+// open while the page switches the unit.
+const openTemplates = new Set();
+
 const DATA_DEPENDENT_TITLE =
   "The banks of this line follow the values that the kernel reads, such as the bins of a histogram. " +
   "No padding or swizzle removes these conflicts.";
@@ -31,15 +35,18 @@ export function renderSummary(data, unit, open) {
   const { noun, memory } = UNITS[unit];
   const runs = data.runs;
   const where = runs.length === 1 ? runs[0] : `${format.count(runs.length)} runs`;
+  const instances = data.kernels.reduce((sum, kernel) => sum + kernel.instances.length, 0);
+  const templates = new Set(data.kernels.map((kernel) => `${kernel.run}\n${kernel.template}`)).size;
+  const grouped = templates < instances ? ` in ${format.plural(templates, "template")}` : "";
   $("summary-subtitle").textContent =
-    `${where}: ${launches(data.traces)} of ${format.plural(data.kernels.length, "kernel")}`;
+    `${where}: ${launches(data.traces)} of ${format.plural(instances, "kernel")}${grouped}`;
   const total = data.totals[unit];
   $("summary-stats").replaceChildren(
     stat(`${memory}, whole run`, `${format.count(total.achieved)} / ${format.count(total.ideal)}`,
       "The second number is the fewest that the same accesses could take."),
     stat(`Extra ${noun}`, `${format.count(total.excessive)} (${format.percent(total.excessive, total.achieved)})`),
     stat("Launches", format.count(data.traces)),
-    stat("Kernels", format.count(data.kernels.length)),
+    stat("Kernels", format.count(instances)),
   );
   renderNotes(data);
   renderLines(data, unit, open);
@@ -89,7 +96,7 @@ function renderLines(data, unit, open) {
         extraCell(line, peak),
         cell(format.percent(line.excessive, line.kernel_achieved), "num"),
         lineCell(line),
-        kernelCell(line, data.runs.length > 1),
+        kernelCell(line, data.runs.length > 1, line.instances),
         cell(format.count(line.launches), "num"),
       );
       return row;
@@ -104,24 +111,75 @@ function renderLines(data, unit, open) {
 }
 
 function renderKernels(data, unit, open) {
-  const kernels = data.kernels.filter((kernel) => kernel.totals[unit].achieved > 0);
-  kernels.sort((a, b) => b.totals[unit].excessive - a.totals[unit].excessive);
+  const withRun = data.runs.length > 1;
+  const kernels = byExcess(data.kernels, unit);
   const peak = Math.max(1, ...kernels.map((kernel) => kernel.totals[unit].excessive));
   $("summary-kernels").replaceChildren(
-    ...kernels.map((kernel) => {
-      const counts = kernel.totals[unit];
-      const row = openingRow(kernel.worst[unit], open);
-      const extra = cell(format.count(counts.excessive), "num");
-      extra.append(meter(counts.excessive, peak));
-      row.append(
-        extra,
-        cell(format.percent(counts.excessive, counts.achieved), "num"),
-        kernelCell(kernel, data.runs.length > 1),
-        cell(format.count(kernel.launches), "num"),
-      );
-      return row;
+    ...kernels.flatMap((kernel) => {
+      const row = kernelRow(kernel, unit, peak, open, kernelCell(kernel, withRun));
+      if (kernel.instances.length < 2) {
+        return [row];
+      }
+      const key = `${kernel.run}\n${kernel.template}`;
+      const rows = byExcess(kernel.instances, unit).map((instance) => {
+        const name = kernelCell(instance, false);
+        name.classList.add("instance-name");
+        const shown = kernelRow(instance, unit, peak, open, name);
+        shown.classList.add("instance");
+        shown.hidden = !openTemplates.has(key);
+        return shown;
+      });
+      row.cells[2].append(instancesToggle(key, rows));
+      return [row, ...rows];
     }),
   );
+}
+
+function byExcess(entries, unit) {
+  const found = entries.filter((entry) => entry.totals[unit].achieved > 0);
+  return found.sort((a, b) => b.totals[unit].excessive - a.totals[unit].excessive);
+}
+
+function kernelRow(entry, unit, peak, open, name) {
+  const counts = entry.totals[unit];
+  const row = openingRow(entry.worst[unit], open);
+  const extra = cell(format.count(counts.excessive), "num");
+  extra.append(meter(counts.excessive, peak));
+  row.append(
+    extra,
+    cell(format.percent(counts.excessive, counts.achieved), "num"),
+    name,
+    cell(format.count(entry.launches), "num"),
+  );
+  return row;
+}
+
+// A button that shows or hides the instances of a template without opening the row it sits in.
+function instancesToggle(key, rows) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "instances-toggle";
+  button.textContent = format.plural(rows.length, "instance");
+  const show = (open) => {
+    button.setAttribute("aria-expanded", String(open));
+    button.title = open ? "Hide the instances of this template" : "List the instances of this template";
+    for (const row of rows) {
+      row.hidden = !open;
+    }
+  };
+  show(openTemplates.has(key));
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const open = !openTemplates.has(key);
+    if (open) {
+      openTemplates.add(key);
+    } else {
+      openTemplates.delete(key);
+    }
+    show(open);
+  });
+  button.addEventListener("keydown", (event) => event.stopPropagation());
+  return button;
 }
 
 // A row that opens its place on a click or on Enter, or a plain row without a place.
@@ -179,13 +237,16 @@ function lineCell(line) {
   return element;
 }
 
-function kernelCell(entry, withRun) {
+function kernelCell(entry, withRun, instances = 1) {
   const element = document.createElement("td");
   const name = document.createElement("span");
   name.className = "what mono";
   name.textContent = entry.name || "kernel";
   name.title = entry.full_name || entry.name || "";
   element.append(name);
+  if (instances > 1) {
+    element.append(detail(format.plural(instances, "instance")));
+  }
   if (withRun) {
     element.append(detail(entry.run));
   }

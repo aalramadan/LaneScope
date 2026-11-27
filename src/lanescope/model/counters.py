@@ -26,16 +26,28 @@ class InstructionCounters:
     excessive: int
     conflicts: int
     worst_row: int
-    # The excess of the access with the fewest and of the one with the most, and the
-    # number of distinct excess counts among all accesses of the instruction.
-    fewest: int = 0
-    most: int = 0
-    levels: int = 1
+    # The distinct excess counts among all accesses of the instruction, in rising order.
+    excess_counts: tuple[int, ...] = (0,)
 
     @property
     def unit(self) -> str:
         """Return the name of the counted unit."""
         return "wavefronts" if self.space == Space.SHARED else "sectors"
+
+    @property
+    def fewest(self) -> int:
+        """Return the excess of the access with the fewest."""
+        return self.excess_counts[0]
+
+    @property
+    def most(self) -> int:
+        """Return the excess of the access with the most."""
+        return self.excess_counts[-1]
+
+    @property
+    def levels(self) -> int:
+        """Return the number of distinct excess counts among the accesses."""
+        return len(self.excess_counts)
 
 
 def instruction_key(trace: Trace, row: int) -> InstructionKey:
@@ -67,7 +79,7 @@ def count(trace: Trace) -> list[InstructionCounters]:
     # Each instruction with each of its distinct excess counts, sorted, once.
     levels = np.unique(np.column_stack([group, excess]), axis=0)
     starts = np.unique(levels[:, 0], return_index=True)[1]
-    ends = np.append(starts[1:], len(levels)) - 1
+    excess_counts = np.split(levels[:, 1], starts[1:])
     return [
         InstructionCounters(
             pc=pc,
@@ -80,18 +92,10 @@ def count(trace: Trace) -> list[InstructionCounters]:
             excessive=total[3],
             conflicts=total[4],
             worst_row=worst_row,
-            fewest=fewest,
-            most=most,
-            levels=level_count,
+            excess_counts=tuple(counts.tolist()),
         )
-        for (pc, space, kind, width), total, worst_row, fewest, most, level_count in zip(
-            instructions.tolist(),
-            totals.tolist(),
-            worst.tolist(),
-            levels[starts, 1].tolist(),
-            levels[ends, 1].tolist(),
-            (ends - starts + 1).tolist(),
-            strict=True,
+        for (pc, space, kind, width), total, worst_row, counts in zip(
+            instructions.tolist(), totals.tolist(), worst.tolist(), excess_counts, strict=True
         )
     ]
 

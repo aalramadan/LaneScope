@@ -1,10 +1,14 @@
 import concurrent.futures
 import dataclasses
 
+import numpy as np
 import pytest
 
 from lanescope import demos, summary, summary_text
-from lanescope.trace import Access, Kind, Space, Trace
+from lanescope.trace import WARP_SIZE, Access, Kind, Space, Trace
+
+TILE_4 = "void ns::tile<4>(float*)"
+TILE_8 = "void ns::tile<8>(float*)"
 
 
 def facts(trace):
@@ -13,6 +17,39 @@ def facts(trace):
 
 def shared_lines(data):
     return [line for line in data["lines"] if line["unit"] == "wavefronts"]
+
+
+def instance(trace, kernel):
+    return dataclasses.replace(facts(trace), kernel=kernel)
+
+
+def two_instances():
+    """Return the items of one run: a small transpose as tile<4>, two large ones as tile<8>."""
+    small = instance(demos.transpose_trace(tiles_per_side=1), TILE_4)
+    large = instance(demos.transpose_trace(), TILE_8)
+    return [
+        ("r/trace-0.npz", "r", small),
+        ("r/trace-1.npz", "r", large),
+        ("r/trace-2.npz", "r", large),
+    ]
+
+
+def scattered_bins(seed, accesses=24):
+    """Return the facts of a launch of shared atomics whose lanes add to random bins."""
+    rng = np.random.default_rng(seed)
+    rows = [
+        Access(
+            0x40,
+            Space.SHARED,
+            Kind.ATOMIC,
+            4,
+            tuple(4 * int(v) for v in rng.integers(0, 1024, WARP_SIZE)),
+            index % 2,
+            index % 8,
+        )
+        for index in range(accesses)
+    ]
+    return facts(Trace.from_accesses(rows, {"kernel": "bins"}))
 
 
 def test_the_launches_of_one_kernel_in_a_run_add_up():
@@ -218,3 +255,124 @@ def test_reading_in_processes_holds_a_bounded_window_and_cancels_the_rest_when_c
     assert len(pool.submitted) == summary.WINDOW_PER_WORKER * 2 + 3
     reader.close()
     assert pool.cancelled
+
+
+def test_the_instances_of_a_template_add_up_in_one_entry_that_lists_them():
+    data = summary.summarize(two_instances())
+    (entry,) = data["kernels"]
+    assert (entry["template"], entry["name"], entry["full_name"]) == (
+        "ns::tile",
+        "tile",
+        "ns::tile",
+    )
+    assert [found["full_name"] for found in entry["instances"]] == [TILE_8, TILE_4]
+    assert [found["launches"] for found in entry["instances"]] == [2, 1]
+    assert entry["launches"] == 3
+    excess = [found["totals"]["wavefronts"]["excessive"] for found in entry["instances"]]
+    assert entry["totals"]["wavefronts"]["excessive"] == sum(excess)
+    assert entry["worst"]["wavefronts"] == {
+        "id": "r/trace-1.npz",
+        "pc": hex(demos.PC_LOAD_TILE),
+        "space": "shared",
+    }
+
+
+def test_an_entry_of_one_instance_keeps_the_names_of_its_kernel():
+    data = summary.summarize([("t.npz", "t.npz", instance(demos.transpose_trace(), TILE_4))])
+    (entry,) = data["kernels"]
+    assert (entry["template"], entry["name"], entry["full_name"]) == ("ns::tile", "tile<4>", TILE_4)
+    (only,) = entry["instances"]
+    assert (only["kernel"], only["name"], only["launches"]) == (TILE_4, "tile<4>", 1)
+
+
+def test_a_source_line_adds_up_over_the_instances_of_its_template():
+    data = summary.summarize(two_instances())
+    (line,) = shared_lines(data)
+    (entry,) = data["kernels"]
+    assert (line["line"], line["template"], line["instances"], line["launches"]) == (
+        10,
+        "ns::tile",
+        2,
+        3,
+    )
+    assert line["excessive"] == entry["totals"]["wavefronts"]["excessive"]
+    assert (line["kernel"], line["name"]) == (TILE_8, "tile")
+    assert line["kernel_achieved"] == entry["totals"]["wavefronts"]["achieved"]
+    assert line["worst"]["id"] == "r/trace-1.npz"
+
+
+def test_lines_without_a_line_table_stay_apart_per_instance():
+    rows = [Access(0x10, Space.SHARED, Kind.LOAD, 4, tuple(128 * lane for lane in range(32)))]
+    trace = Trace.from_accesses(rows, {})
+    items = [("a.npz", "r", instance(trace, TILE_4)), ("b.npz", "r", instance(trace, TILE_8))]
+    data = summary.summarize(items)
+    assert len(data["kernels"]) == 1
+    lines = shared_lines(data)
+    assert sorted(line["kernel"] for line in lines) == [TILE_4, TILE_8]
+    assert all((line["pc"], line["instances"]) == ("0x10", 1) for line in lines)
+
+
+def test_without_templates_each_instance_stands_alone():
+    data = summary.summarize(two_instances(), by_template=False)
+    assert [(entry["name"], entry["template"]) for entry in data["kernels"]] == [
+        ("tile<8>", "ns::tile"),
+        ("tile<4>", "ns::tile"),
+    ]
+    assert all(len(entry["instances"]) == 1 for entry in data["kernels"])
+    assert [line["name"] for line in shared_lines(data)] == ["tile<8>", "tile<4>"]
+
+
+def test_the_text_lists_a_template_once_with_the_count_of_its_instances():
+    text = summary_text.render(summary.summarize(two_instances()))
+    lines = text.splitlines()
+    assert lines[0] == "r: 3 launches of 2 kernels in 1 template"
+    kernels = lines[lines.index("Kernels by extra passes") + 2 :]
+    assert kernels[0].endswith("  tile (2 instances)")
+    assert not kernels[1].strip()
+
+
+def test_the_text_of_the_instances_view_lists_each_instance_as_its_own_kernel():
+    text = summary_text.render(summary.summarize(two_instances(), by_template=False))
+    lines = text.splitlines()
+    assert lines[0] == "r: 3 launches of 2 kernels in 1 template"
+    kernels = lines[lines.index("Kernels by extra passes") + 2 :][:2]
+    assert [row.split()[-1] for row in kernels] == ["tile<8>", "tile<4>"]
+
+
+def test_a_line_of_few_accesses_per_launch_follows_the_input_when_its_patterns_differ_each_time():
+    launches = [scattered_bins(seed) for seed in (1, 2, 3)]
+    assert not any(item.data_dependent for found in launches for item in found.instructions)
+    data = summary.summarize((f"b/trace-{n}.npz", "b", found) for n, found in enumerate(launches))
+    (line,) = shared_lines(data)
+    assert line["data_dependent"] is True
+    fewest, most = line["excess_range"]
+    assert fewest < most
+
+
+def test_a_line_whose_launches_repeat_their_patterns_does_not_follow_the_input():
+    same = scattered_bins(1)
+    data = summary.summarize((f"b/trace-{n}.npz", "b", same) for n in range(3))
+    (line,) = shared_lines(data)
+    assert line["data_dependent"] is False
+    assert line["excess_range"] is None
+
+
+def test_a_launch_with_too_many_patterns_to_keep_leaves_the_line_unmarked():
+    launches = [scattered_bins(seed) for seed in (1, 2, 3)]
+    (item,) = launches[0].instructions
+    launches[0] = dataclasses.replace(
+        launches[0], instructions=(dataclasses.replace(item, patterns=None),)
+    )
+    data = summary.summarize((f"b/trace-{n}.npz", "b", found) for n, found in enumerate(launches))
+    assert shared_lines(data)[0]["data_dependent"] is False
+
+
+def test_a_line_that_one_trace_marks_stays_marked_over_all_launches():
+    marked = facts(demos.histogram_trace())
+    unkept = tuple(dataclasses.replace(item, patterns=None) for item in marked.instructions)
+    items = [
+        ("h/trace-0.npz", "h", marked),
+        ("h/trace-1.npz", "h", dataclasses.replace(marked, instructions=unkept)),
+    ]
+    (line,) = shared_lines(summary.summarize(items))
+    assert line["data_dependent"] is True

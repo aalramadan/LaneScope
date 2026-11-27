@@ -17,7 +17,12 @@ def render(data: dict, unit: str = "wavefronts", limit: int = 10) -> str:
     memory, noun, cause = UNITS[unit]
     kernels = data["kernels"]
     runs = ", ".join(printable(run) for run in data["runs"]) or "no run"
-    out = [f"{runs}: {_plural(data['traces'], 'launch')} of {_plural(len(kernels), 'kernel')}"]
+    instances = sum(len(kernel["instances"]) for kernel in kernels)
+    templates = len({(kernel["run"], kernel["template"]) for kernel in kernels})
+    grouped = f" in {_plural(templates, 'template')}" if templates < instances else ""
+    out = [
+        f"{runs}: {_plural(data['traces'], 'launch')} of {_plural(instances, 'kernel')}{grouped}"
+    ]
     total = data["totals"][unit]
     if total["achieved"] == 0:
         out.append(f"{memory}: no accesses")
@@ -32,9 +37,11 @@ def render(data: dict, unit: str = "wavefronts", limit: int = 10) -> str:
     out += ["", f"Kernels by extra {noun}", header]
     for kernel in ranked[:limit]:
         counts = kernel["totals"][unit]
+        several = len(kernel["instances"])
+        count = f" ({several:,} instances)" if several > 1 else ""
         out.append(
             f"{counts['excessive']:>14,}  {percent(counts['excessive'], counts['achieved']):>9}  "
-            f"{kernel['launches']:>8,}  {printable(kernel['name'])}"
+            f"{kernel['launches']:>8,}  {printable(kernel['name'])}{count}"
         )
     if len(ranked) > limit:
         out.append(f"{'':>14}  and {_plural(len(ranked) - limit, 'more kernel')}")

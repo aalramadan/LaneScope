@@ -543,6 +543,47 @@ def test_a_line_that_follows_the_input_values_says_so_and_offers_no_fix(summary_
     expect(card.locator(".primary-button")).to_have_count(0)
 
 
+def test_a_template_row_lists_its_instances_and_each_opens_its_worst_launch(
+    browser, tmp_path, serve
+):
+    for index, (tiles, kernel) in enumerate(
+        [(1, "void ns::tile<4>(float*)"), (2, "void ns::tile<8>(float*)")]
+    ):
+        trace = demos.transpose_trace(tiles_per_side=tiles)
+        trace.metadata["kernel"] = kernel
+        trace.save(tmp_path / f"trace-{index}.npz")
+    with serve([tmp_path]) as server:
+        context = browser.new_context(viewport={"width": 1600, "height": 1000})
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(f"http://localhost:{server.server_address[1]}/")
+        page.wait_for_selector("#summary-kernels tr")
+        expect(page.locator("#summary-subtitle")).to_contain_text("2 kernels in 1 template")
+        expect(page.locator("#summary-lines tr").first).to_contain_text("2 instances")
+        rows = page.locator("#summary-kernels tr")
+        expect(rows.first).to_contain_text("tile")
+        instances = page.locator("#summary-kernels tr.instance")
+        expect(instances).to_have_count(2)
+        expect(instances.first).to_be_hidden()
+        toggle = rows.first.locator(".instances-toggle")
+        expect(toggle).to_have_text("2 instances")
+        toggle.focus()
+        toggle.press("Enter")
+        expect(toggle).to_have_attribute("aria-expanded", "true")
+        expect(page.locator("#summary-view")).to_be_visible()
+        expect(instances.nth(0)).to_contain_text("tile<8>")
+        expect(instances.nth(1)).to_contain_text("tile<4>")
+        page.locator('input[name="summary-unit"][value="sectors"]').check(force=True)
+        page.locator('input[name="summary-unit"][value="wavefronts"]').check(force=True)
+        expect(page.locator("#summary-kernels tr.instance").first).to_be_visible()
+        page.locator("#summary-kernels tr.instance").nth(1).press("Enter")
+        page.wait_for_selector("figure.grid svg")
+        assert page.locator("#trace-select").input_value() == "0/trace-0.npz"
+        context.close()
+    assert errors == []
+
+
 def test_each_excess_names_its_part_of_all_the_passes_of_the_kernel(page):
     selected = page.locator('#instruction-rows tr[aria-selected="true"] td').nth(3)
     expect(selected).to_contain_text("% of all")

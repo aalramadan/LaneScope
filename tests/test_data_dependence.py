@@ -1,9 +1,16 @@
 import numpy as np
+import pytest
 
 from lanescope import demos, trace_reports
 from lanescope.fixes.layouts import Buffer
 from lanescope.model.counters import count
-from lanescope.model.data_dependence import MIN_ACCESSES, data_dependent
+from lanescope.model.data_dependence import (
+    MAX_PATTERNS,
+    MIN_ACCESSES,
+    data_dependent,
+    follows_input_over_launches,
+    input_evidence,
+)
 from lanescope.trace import WARP_SIZE, Access, Kind, Space, Trace
 
 
@@ -65,3 +72,45 @@ def test_suggest_for_a_given_buffer_says_whether_its_conflicts_follow_the_input_
     assert trace_reports.suggest(demos.histogram_trace(), bins)["data_dependent"] is True
     tile = Buffer(0, 4096)
     assert trace_reports.suggest(demos.transpose_trace(), tile)["data_dependent"] is False
+
+
+def test_the_evidence_of_a_shared_instruction_gives_its_rows_patterns_and_excess_counts():
+    trace = random_bins(24, 8)
+    (counter,) = count(trace)
+    (found,) = input_evidence(trace, [counter]).values()
+    assert found.rows == 24
+    assert found.patterns is not None and len(found.patterns) == 24
+    assert found.excess_counts == frozenset(counter.excess_counts)
+    assert found.data_dependent is False
+
+
+def test_the_evidence_of_one_trace_keeps_no_patterns_past_its_limit():
+    trace = random_bins(MAX_PATTERNS + 1, 8)
+    (found,) = input_evidence(trace, count(trace)).values()
+    assert found.patterns is None
+    assert found.data_dependent is True
+
+
+def test_instructions_without_excess_and_global_ones_carry_no_evidence():
+    trace = demos.transpose_trace()
+    keys = {key[0] for key in input_evidence(trace, count(trace))}
+    assert keys == {demos.PC_LOAD_TILE}
+
+
+@pytest.mark.parametrize(
+    ("rows", "launches", "patterns", "levels", "follows"),
+    [
+        (48, 2, 24, 3, True),
+        (48, 1, 48, 3, False),
+        (MIN_ACCESSES - 1, 2, 31, 3, False),
+        (48, 2, 23, 3, False),
+        (48, 2, 48, 2, False),
+        (48, 2, None, 3, False),
+    ],
+)
+def test_the_launches_of_a_line_follow_the_input_when_they_differ_enough(
+    rows, launches, patterns, levels, follows
+):
+    hashes = None if patterns is None else frozenset(range(patterns))
+    found = follows_input_over_launches(rows, launches, hashes, frozenset(range(levels)))
+    assert found is follows

@@ -555,6 +555,23 @@ def test_summary_json_gives_the_whole_summary_for_tools(recording, capsys):
     }
 
 
+def test_summary_lists_the_instances_of_a_template_as_kernels_on_request(tmp_path, capsys):
+    for index, (tiles, kernel) in enumerate(
+        [(1, "void ns::tile<4>(float*)"), (2, "void ns::tile<8>(float*)")]
+    ):
+        trace = demos.transpose_trace(tiles_per_side=tiles)
+        trace.metadata["kernel"] = kernel
+        trace.save(tmp_path / f"trace-{index}.npz")
+    assert main(["summary", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert f"{tmp_path}: 2 launches of 2 kernels in 1 template" in out
+    assert "tile (2 instances)" in out
+    assert main(["summary", str(tmp_path), "--instances"]) == 0
+    kernels = capsys.readouterr().out.split("Kernels by extra passes")[1].split("Lines by")[0]
+    assert kernels.index("tile<8>") < kernels.index("tile<4>")
+    assert "instances)" not in kernels
+
+
 def test_summary_of_global_memory_ranks_extra_sectors(tmp_path, capsys):
     demos.column_sums_trace().save(tmp_path / "trace-0.npz")
     assert main(["summary", str(tmp_path), "--global"]) == 0

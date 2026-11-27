@@ -210,6 +210,61 @@ def test_a_command_that_leaves_no_times_stops_the_timing(tmp_path):
     assert not (folder / "kernel-times.json").exists()
 
 
+def test_a_run_without_times_names_processes_that_end_without_exit_handlers(tmp_path):
+    folder = fake_folder(tmp_path, "run", [None])
+    with pytest.raises(ValueError) as error:
+        kernel_times.time_folders([folder], tmp_path / "timer.so", 1)
+    assert (
+        "A process that ends through _exit or a signal, such as a worker of a multiprocessing "
+        "Pool, may also have lost the times of the kernels it launched in its last 0.1 s"
+    ) in str(error.value)
+
+
+def test_a_timing_counts_the_processes_that_ended_without_exit_handlers(tmp_path):
+    folder = tmp_path / "run"
+    script = tmp_path / "three_processes.py"
+    script.write_text(
+        "import json, os\n"
+        "base = os.environ['LANESCOPE_KERNEL_TIMES']\n"
+        "kernels = {'k': {'launches': 1, 'nanoseconds': 5, 'shortest': 5, 'longest': 5}}\n"
+        "for pid, exited in ((101, True), (102, False), (103, False)):\n"
+        "    with open(f'{base}.{pid}', 'w') as file:\n"
+        "        json.dump({'format': 1, 'exited': exited, 'kernels': kernels}, file)\n"
+    )
+    kernel_times.write_stored_command(folder, [sys.executable, str(script)])
+    (result,) = kernel_times.time_folders([folder], tmp_path / "timer.so", 2)
+    assert result["unfinished_processes"] == [2, 2]
+    assert result["kernels"]["k"]["launches"] == [3, 3]
+
+
+def test_a_timing_stores_a_new_command_with_its_times_once_every_round_succeeded(tmp_path):
+    folder = fake_folder(tmp_path, "run", [{"k": times(1, 10)}])
+    stored, _ = kernel_times.read_stored_command(folder)
+    failing = [sys.executable, "-c", "import sys; sys.exit(3)"]
+    with pytest.raises(ValueError, match="exited with status 3"):
+        kernel_times.time_folders([folder], tmp_path / "timer.so", 1, commands=[failing])
+    assert kernel_times.read_stored_command(folder)[0] == stored
+    fresh = tmp_path / "fresh"
+    (result,) = kernel_times.time_folders([fresh], tmp_path / "timer.so", 1, commands=[stored])
+    assert kernel_times.read_stored_command(fresh)[0] == stored
+    assert kernel_times.read_times(fresh) == result
+
+
+def test_an_interrupted_write_of_the_times_keeps_the_earlier_ones(tmp_path, monkeypatch):
+    folder = fake_folder(tmp_path, "run", [{"k": times(1, 10)}])
+    (earlier,) = kernel_times.time_folders([folder], tmp_path / "timer.so", 1)
+    kept = sorted(path.name for path in folder.iterdir())
+
+    def interrupt(*_):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(kernel_times.os, "replace", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        kernel_times.time_folders([folder], tmp_path / "timer.so", 2)
+    assert kernel_times.read_times(folder) == earlier
+    assert sorted(path.name for path in folder.iterdir()) == kept
+
+
 def test_a_command_that_cannot_start_names_its_folder(tmp_path):
     kernel_times.write_stored_command(tmp_path, [str(tmp_path / "missing-program")])
     with pytest.raises(ValueError, match=f"the command of {tmp_path} cannot start"):
@@ -297,6 +352,17 @@ def test_round_totals_add_up_the_named_kernels_or_every_kernel_in_each_round():
     assert kernel_times.round_totals(result, ["b", "missing"]) == [1, 2]
 
 
+def test_median_total_is_the_median_of_the_round_sums_over_every_kernel():
+    result = {
+        "rounds": 3,
+        "kernels": {
+            "a": times_over_rounds([1, 1, 1], [40, 10, 50]),
+            "b": times_over_rounds([1, 1, 1], [30, 50, 10]),
+        },
+    }
+    assert kernel_times.median_total(result) == 60
+
+
 def _has_gpu() -> bool:
     try:
         Driver().close()
@@ -335,3 +401,50 @@ def test_the_timer_times_every_kernel_that_a_recording_of_the_bench_traces(tmp_p
         assert result["kernels"][name]["launches"] == [launches, launches], name
         assert all(nanoseconds > 0 for nanoseconds in result["kernels"][name]["nanoseconds"])
     assert result["untimed_launches"] == [0, 0]
+
+
+# Leaving the block terminates the worker, which ends without its exit handlers.
+POOL_PROGRAM = r"""
+import multiprocessing
+import pathlib
+import sys
+import time
+
+from lanescope.nsight import calibration
+
+
+def run_bench(cubin):
+    calibration.run_calibration(pathlib.Path(cubin))
+    time.sleep(1)
+
+
+if __name__ == "__main__":
+    with multiprocessing.get_context(sys.argv[1]).Pool(1) as pool:
+        pool.apply(run_bench, (sys.argv[2],))
+"""
+
+
+@needs_gpu
+@pytest.mark.parametrize("start_method", ["spawn", "forkserver"])
+def test_the_timer_keeps_the_times_of_a_pool_worker_that_ends_without_exit_handlers(
+    tmp_path, start_method
+):
+    driver = Driver()
+    arch = driver.arch()
+    driver.close()
+    cubin = tmp_path / "bench.cubin"
+    cubin.write_bytes(calibration.compile_kernels(arch, TOOLS))
+    script = tmp_path / "pool_bench.py"
+    script.write_text(POOL_PROGRAM)
+    direct, pooled = tmp_path / "direct", tmp_path / "pooled"
+    command = [sys.executable, "-m", "lanescope", "bench", "run", "--cubin", str(cubin)]
+    kernel_times.write_stored_command(direct, command)
+    pool_command = [sys.executable, str(script), start_method, str(cubin)]
+    kernel_times.write_stored_command(pooled, pool_command)
+    timer = build_kernel_timer(tmp_path / "build", TOOLS)
+    alone, in_worker = kernel_times.time_folders([direct, pooled], timer, 1)
+    assert {name: kernel["launches"] for name, kernel in in_worker["kernels"].items()} == {
+        name: kernel["launches"] for name, kernel in alone["kernels"].items()
+    }
+    assert in_worker["unfinished_processes"] == [1]
+    assert alone["unfinished_processes"] == [0]

@@ -7,6 +7,7 @@ from lanescope import kernel_times
 from lanescope.cli import main
 from lanescope.commands import time_program
 from lanescope.cuda import toolchain
+from lanescope.summary_text import duration, duration_range
 
 # A stand-in for a timed program that writes the file of the kernel timer itself. Its
 # argument holds the kernels of each run, taken in turn.
@@ -68,12 +69,42 @@ def test_time_prints_the_kernels_of_each_folder_by_median_time(tmp_path, no_time
     out = capsys.readouterr().out.splitlines()
     assert [line.split(":")[0] for line in out[:3]] == [f"round {n} of 3" for n in (1, 2, 3)]
     table = out[out.index("") + 1 :]
-    assert table[0] == f"{folder}: 2 kernels, 5.6 us of kernel time, median of 3 rounds"
+    assert table[0] == f"{folder}: 2 kernels, {duration(5700)} of kernel time, median of 3 rounds"
     assert table[1].split() == "median of time launches range over rounds kernel".split()
-    assert table[2].split() == ["4.6", "us", "82.1%", "2", "4.0-5.0", "us", "transpose"]
-    assert table[3].split() == ["1.0", "us", "17.9%", "1", "0.9-1.1", "us", "scale"]
+    transpose_range = duration_range(4000, 5000, 4600).split()
+    assert table[2].split() == [
+        *duration(4600).split(),
+        "80.7%",
+        "2",
+        *transpose_range,
+        "transpose",
+    ]
+    scale_range = duration_range(900, 1100, 1000).split()
+    assert table[3].split() == [*duration(1000).split(), "17.5%", "1", *scale_range, "scale"]
     assert table[4] == f"wrote {folder / 'kernel-times.json'}"
     assert json.loads((folder / "kernel-times.json").read_text())["rounds"] == 3
+
+
+def test_time_gives_the_median_of_the_round_sums_as_the_kernel_time_of_a_folder(
+    tmp_path, no_timer_build, capsys
+):
+    rounds = [
+        {"transpose": kernel(1, 4000), "scale": kernel(1, 3000)},
+        {"transpose": kernel(1, 1000), "scale": kernel(1, 5000)},
+        {"transpose": kernel(1, 5000), "scale": kernel(1, 1000)},
+    ]
+    folder = stored_folder(tmp_path, "run", rounds)
+    assert main(["time", str(folder), "--rounds", "3"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    header = f"{folder}: 2 kernels, {duration(6000)} of kernel time, median of 3 rounds"
+    assert header in out
+
+
+def test_time_names_one_kernel_in_the_singular(tmp_path, no_timer_build, capsys):
+    folder = stored_folder(tmp_path, "run", [{"k": kernel(1, 10)}])
+    assert main(["time", str(folder), "--rounds", "1"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert f"{folder}: 1 kernel, {duration(10)} of kernel time, median of 1 round" in out
 
 
 def test_time_takes_five_rounds_by_default_in_turns_over_the_folders(
@@ -86,7 +117,8 @@ def test_time_takes_five_rounds_by_default_in_turns_over_the_folders(
     assert [line.split(" ran in")[0] for line in progress] == [
         f"round {n} of 5: {folder}" for n in range(1, 6) for folder in (first, second)
     ]
-    assert no_timer_build == [first / "build"]
+    assert len(no_timer_build) == 1
+    assert not no_timer_build[0].exists()
 
 
 def test_time_with_a_program_after_the_folder_stores_it_as_the_command(
@@ -97,6 +129,56 @@ def test_time_with_a_program_after_the_folder_stores_it_as_the_command(
     assert main(["time", str(folder), "--rounds", "2", "--", *command]) == 0
     assert kernel_times.read_stored_command(folder)[0] == command
     assert json.loads((folder / "kernel-times.json").read_text())["rounds"] == 2
+
+
+def test_time_takes_the_rounds_option_between_the_folders(tmp_path, no_timer_build, capsys):
+    first = stored_folder(tmp_path, "first", [{"k": kernel(1, 10)}])
+    second = stored_folder(tmp_path, "second", [{"k": kernel(1, 20)}])
+    assert main(["time", str(first), "--rounds", "2", str(second)]) == 0
+    for folder in (first, second):
+        assert json.loads((folder / "kernel-times.json").read_text())["rounds"] == 2
+
+
+def test_a_failed_timing_of_a_new_program_keeps_the_stored_command_and_its_times(
+    tmp_path, no_timer_build, capsys
+):
+    folder = stored_folder(tmp_path, "run", [{"k": kernel(1, 10)}])
+    assert main(["time", str(folder), "--rounds", "1"]) == 0
+    stored = {name: (folder / name).read_text() for name in ("run.json", "kernel-times.json")}
+    failing = [sys.executable, "-c", "import sys; sys.exit(3)"]
+    assert main(["time", str(folder), "--rounds", "1", "--", *failing]) == 2
+    assert "exited with status 3" in capsys.readouterr().err
+    assert {path.name: path.read_text() for path in folder.iterdir()} == stored
+
+
+def test_a_failed_timing_of_a_program_stores_no_command_in_a_new_folder(
+    tmp_path, no_timer_build, capsys
+):
+    folder = tmp_path / "fresh"
+    assert main(["time", str(folder), "--", sys.executable, "-c", "import sys; sys.exit(3)"]) == 2
+    assert not folder.exists()
+
+
+def test_time_warns_when_a_process_ended_without_its_exit_handlers(
+    tmp_path, no_timer_build, capsys
+):
+    script = tmp_path / "unfinished.py"
+    script.write_text(
+        "import json, os\n"
+        "times = {'k': {'launches': 1, 'nanoseconds': 5, 'shortest': 5, 'longest': 5}}\n"
+        "base = os.environ['LANESCOPE_KERNEL_TIMES']\n"
+        "for pid, exited in ((11, True), (12, False)):\n"
+        "    written = {'exited': exited, 'kernels': times}\n"
+        "    open(f'{base}.{pid}', 'w').write(json.dumps(written))\n"
+    )
+    folder = tmp_path / "run"
+    assert main(["time", str(folder), "--rounds", "2", "--", sys.executable, str(script)]) == 0
+    err = capsys.readouterr().err
+    assert (
+        f"lanescope: 2 processes in the 2 rounds of {folder} ended through _exit or a signal, "
+        "without the exit handler of the timer. Their kernel times stop at the last flush of "
+        "the timer, which runs every 0.1 s." in err
+    )
 
 
 def test_time_with_a_program_takes_exactly_one_folder(tmp_path, no_timer_build, capsys):

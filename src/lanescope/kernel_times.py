@@ -19,6 +19,8 @@ PROCESS_TIMES = "times"
 PROCESS_FILE = re.compile(re.escape(PROCESS_TIMES) + r"\.\d+")
 # A failed run quotes this many of the last lines of its error output.
 QUOTED_LINES = 5
+# The period of the kernel timer, kFlushPeriod, on which each process writes its times.
+FLUSH_SECONDS = 0.1
 
 
 @dataclasses.dataclass(frozen=True)
@@ -39,8 +41,8 @@ def write_stored_command(
     """Store the command of a folder and remove the kernel times of an earlier command."""
     folder.mkdir(parents=True, exist_ok=True)
     run = {"format": FILE_FORMAT, "command": list(command), "cwd": str(cwd or pathlib.Path.cwd())}
-    (folder / RUN_FILE).write_text(json.dumps(run, indent=1) + "\n")
     (folder / TIMES_FILE).unlink(missing_ok=True)
+    _replace_json(folder / RUN_FILE, run)
 
 
 def read_stored_command(folder: pathlib.Path) -> tuple[list[str], pathlib.Path]:
@@ -73,36 +75,46 @@ def time_folders(
     timer: pathlib.Path,
     rounds: int,
     report: Callable[[int, pathlib.Path, float], None] | None = None,
+    commands: Sequence[Sequence[str]] | None = None,
 ) -> list[dict]:
     """Run the stored command of each folder in turns, write the kernel times of each, and
     return them.
 
     Each round runs every folder once, in the given order. A drift of the GPU clock then
     hits every folder alike. A run that fails or leaves no times raises ValueError
-    before any folder gets its times.
+    before any folder gets its times. Commands, one per folder, run in the current folder in
+    place of the stored ones, and each folder stores its command with its times.
     """
-    runs = [read_stored_command(folder) for folder in folders]
+    if commands is None:
+        runs = [read_stored_command(folder) for folder in folders]
+    else:
+        runs = [(list(command), pathlib.Path.cwd()) for command in commands]
     seconds: list[list[float]] = [[] for _ in folders]
     measured: list[list[dict[str, dict]]] = [[] for _ in folders]
     untimed: list[list[int]] = [[] for _ in folders]
+    unfinished: list[list[int]] = [[] for _ in folders]
     for round_index in range(rounds):
         for index, (folder, (command, cwd)) in enumerate(zip(folders, runs, strict=True)):
-            wall, kernels, without = _time_one_run(folder, command, cwd, timer, round_index)
-            seconds[index].append(wall)
-            measured[index].append(kernels)
-            untimed[index].append(without)
+            run = _time_one_run(folder, command, cwd, timer, round_index)
+            seconds[index].append(run.wall_seconds)
+            measured[index].append(run.kernels)
+            untimed[index].append(run.untimed_launches)
+            unfinished[index].append(run.unfinished_processes)
             if report is not None:
-                report(round_index, folder, wall)
+                report(round_index, folder, run.wall_seconds)
     results = []
-    for folder, walls, per_round, without in zip(folders, seconds, measured, untimed, strict=True):
+    for index, (folder, (command, cwd)) in enumerate(zip(folders, runs, strict=True)):
         result = {
             "format": FILE_FORMAT,
             "rounds": rounds,
-            "wall_seconds": walls,
-            "untimed_launches": without,
-            "kernels": _times_by_kernel(per_round),
+            "wall_seconds": seconds[index],
+            "untimed_launches": untimed[index],
+            "unfinished_processes": unfinished[index],
+            "kernels": _times_by_kernel(measured[index]),
         }
-        (folder / TIMES_FILE).write_text(json.dumps(result, indent=1) + "\n")
+        if commands is not None:
+            write_stored_command(folder, command, cwd)
+        _replace_json(folder / TIMES_FILE, result)
         results.append(result)
     return results
 
@@ -133,6 +145,11 @@ def round_totals(result: dict, names: Iterable[str] | None = None) -> list[int]:
     ]
 
 
+def median_total(result: dict) -> float:
+    """Return the median over the rounds of a timing of the time of all its kernels."""
+    return statistics.median(round_totals(result))
+
+
 def ranked(result: dict) -> list[KernelTime]:
     """Return the kernels of a timing by their median time over the rounds, longest first."""
     medians = {
@@ -152,13 +169,38 @@ def ranked(result: dict) -> list[KernelTime]:
     return sorted(found, key=lambda kernel: (-kernel.median_ns, kernel.name))
 
 
+@dataclasses.dataclass(frozen=True)
+class _TimedRun:
+    wall_seconds: float
+    kernels: dict[str, dict]
+    untimed_launches: int
+    unfinished_processes: int
+
+
+@dataclasses.dataclass
+class _ProcessTimes:
+    kernels: dict[str, dict] = dataclasses.field(default_factory=dict)
+    untimed_launches: int = 0
+    unfinished_processes: int = 0
+
+
+def _replace_json(path: pathlib.Path, value: object) -> None:
+    """Write a JSON file through a temporary file, which an interrupt leaves behind whole."""
+    staged = path.with_name(f".{path.name}.{os.getpid()}.part")
+    try:
+        staged.write_text(json.dumps(value, indent=1) + "\n")
+        os.replace(staged, path)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
 def _time_one_run(
     folder: pathlib.Path,
     command: Sequence[str],
     cwd: pathlib.Path,
     timer: pathlib.Path,
     round_index: int,
-) -> tuple[float, dict[str, dict], int]:
+) -> _TimedRun:
     with tempfile.TemporaryDirectory(prefix="lanescope-times-") as scratch:
         env = dict(os.environ)
         env[INJECTION_VARIABLE] = str(timer)
@@ -190,39 +232,43 @@ def _time_one_run(
                 else f"exited with status {done.returncode}"
             )
             raise ValueError(f"{where} {ending}{tail}")
-        kernels, untimed = _merge_process_times(pathlib.Path(scratch))
-        if not kernels:
+        merged = _merge_process_times(pathlib.Path(scratch))
+        if not merged.kernels:
             raise ValueError(
                 f"{where} exited with status 0 and left no kernel times. It launched no CUDA "
-                f"kernel, or CUPTI could not time its kernels{tail}"
+                "kernel, or CUPTI could not time its kernels. A process that ends through _exit "
+                "or a signal, such as a worker of a multiprocessing Pool, may also have lost the "
+                f"times of the kernels it launched in its last {FLUSH_SECONDS:g} s{tail}"
             )
-    return wall, kernels, untimed
+    return _TimedRun(wall, merged.kernels, merged.untimed_launches, merged.unfinished_processes)
 
 
-def _merge_process_times(scratch: pathlib.Path) -> tuple[dict[str, dict], int]:
-    """Return the times of every process of one run by kernel name, and the launches that
-    CUPTI gave no time."""
-    kernels: dict[str, dict] = {}
-    untimed = 0
+def _merge_process_times(scratch: pathlib.Path) -> _ProcessTimes:
+    """Return the times of every process of one run by kernel name, the launches that CUPTI
+    gave no time, and the processes that ended without the exit handler of the timer."""
+    merged = _ProcessTimes()
     for path in sorted(scratch.iterdir()):
         if not PROCESS_FILE.fullmatch(path.name):
             continue
         try:
             written = json.loads(path.read_text())
             found = written["kernels"]
-            untimed += int(written.get("skipped", 0)) + int(written.get("dropped", 0))
+            merged.untimed_launches += int(written.get("skipped", 0)) + int(
+                written.get("dropped", 0)
+            )
+            merged.unfinished_processes += int(not written.get("exited", True))
         except (AttributeError, KeyError, TypeError, ValueError) as error:
             raise ValueError(f"the kernel timer wrote an unreadable file ({error})") from error
         for name, times in found.items():
-            if name not in kernels:
-                kernels[name] = dict(times)
+            if name not in merged.kernels:
+                merged.kernels[name] = dict(times)
                 continue
-            kept = kernels[name]
+            kept = merged.kernels[name]
             kept["launches"] += times["launches"]
             kept["nanoseconds"] += times["nanoseconds"]
             kept["shortest"] = min(kept["shortest"], times["shortest"])
             kept["longest"] = max(kept["longest"], times["longest"])
-    return kernels, untimed
+    return merged
 
 
 def _valid_times(result: object) -> bool:

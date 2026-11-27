@@ -1,6 +1,7 @@
 import argparse
 import pathlib
 import sys
+import tempfile
 
 from lanescope import kernel_names, kernel_times
 from lanescope.commands import argument_types
@@ -47,16 +48,14 @@ def _time(args: argparse.Namespace) -> int:
     folders_parser = argparse.ArgumentParser(prog="lanescope time", usage=USAGE)
     folders_parser.add_argument("folders", nargs="+", type=pathlib.Path)
     _add_rounds(folders_parser, args.rounds)
-    parsed = folders_parser.parse_args(args.arguments[:split])
+    parsed = folders_parser.parse_intermixed_args(args.arguments[:split])
     command = args.arguments[split + 1 :]
     folders: list[pathlib.Path] = parsed.folders
-    if command:
-        if len(folders) != 1:
-            raise ValueError("a program after -- takes exactly one folder, which stores it")
-        kernel_times.write_stored_command(folders[0], command)
-    for folder in folders:
-        kernel_times.read_stored_command(folder)
-    timer = build_kernel_timer(folders[0] / "build", cache=cache_folder())
+    if command and len(folders) != 1:
+        raise ValueError("a program after -- takes exactly one folder, which stores it")
+    if not command:
+        for folder in folders:
+            kernel_times.read_stored_command(folder)
 
     def report(round_index: int, folder: pathlib.Path, seconds: float) -> None:
         print(
@@ -64,7 +63,12 @@ def _time(args: argparse.Namespace) -> int:
             flush=True,
         )
 
-    results = kernel_times.time_folders(folders, timer, parsed.rounds, report)
+    # The timer builds outside the folders, which a failed timing leaves as they were.
+    with tempfile.TemporaryDirectory(prefix="lanescope-timer-") as build:
+        timer = build_kernel_timer(pathlib.Path(build), cache=cache_folder())
+        results = kernel_times.time_folders(
+            folders, timer, parsed.rounds, report, [command] if command else None
+        )
     for folder, result in zip(folders, results, strict=True):
         print()
         _print_kernel_times(folder, result)
@@ -75,11 +79,11 @@ def _time(args: argparse.Namespace) -> int:
 def _print_kernel_times(folder: pathlib.Path, result: dict) -> None:
     kernels = kernel_times.ranked(result)
     names = kernel_names.readable(kernel.name for kernel in kernels)
-    total = sum(kernel.median_ns for kernel in kernels)
+    total = kernel_times.median_total(result)
     rounds = result["rounds"]
     print(
-        f"{printable(folder)}: {len(kernels):,} kernels, {duration(total)} of kernel time, "
-        f"median of {rounds} round{'' if rounds == 1 else 's'}"
+        f"{printable(folder)}: {len(kernels):,} kernel{'' if len(kernels) == 1 else 's'}, "
+        f"{duration(total)} of kernel time, median of {rounds} round{'' if rounds == 1 else 's'}"
     )
     print(TABLE_HEADER.format("median", "of time", "launches", "range over rounds"))
     for kernel in kernels:
@@ -87,7 +91,7 @@ def _print_kernel_times(folder: pathlib.Path, result: dict) -> None:
             f"{duration(kernel.median_ns):>12}  "
             f"{percent(round(kernel.median_ns), round(total)):>7}  "
             f"{kernel.launches:>8,}  "
-            f"{duration_range(kernel.fastest_round_ns, kernel.slowest_round_ns):>18}  "
+            f"{_rounds_range(kernel):>18}  "
             f"{printable(kernel_names.short_name(names[kernel.name]))}"
         )
         if not kernel.even_launches:
@@ -105,3 +109,16 @@ def _print_kernel_times(folder: pathlib.Path, result: dict) -> None:
             "which its times leave out.",
             file=sys.stderr,
         )
+    if unfinished := sum(result.get("unfinished_processes", [])):
+        print(
+            f"lanescope: {unfinished:,} process{'' if unfinished == 1 else 'es'} in the "
+            f"{rounds} round{'' if rounds == 1 else 's'} of {printable(folder)} ended through "
+            "_exit or a signal, without the exit handler of the timer. Their kernel times stop "
+            f"at the last flush of the timer, which runs every {kernel_times.FLUSH_SECONDS:g} s.",
+            file=sys.stderr,
+        )
+
+
+def _rounds_range(kernel: kernel_times.KernelTime) -> str:
+    """Return the fastest and the slowest round of a kernel in the unit of its median."""
+    return duration_range(kernel.fastest_round_ns, kernel.slowest_round_ns, kernel.median_ns)

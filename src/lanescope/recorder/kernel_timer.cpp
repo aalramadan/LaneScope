@@ -2,12 +2,15 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -15,6 +18,8 @@ using u64 = unsigned long long;
 
 constexpr int kFormatVersion = 1;
 constexpr size_t kBufferBytes = size_t{8} << 20;
+// A process that ends without exit handlers keeps the times of its last flush.
+constexpr auto kFlushPeriod = std::chrono::milliseconds(100);
 
 // Every kernel record since CUpti_ActivityKernel4 starts with the same fields up to the
 // name, so this view reads the records of older and newer CUPTI versions alike.
@@ -27,11 +32,13 @@ struct KernelTimes {
     u64 longest = 0;
 };
 
-std::mutex times_lock;
-std::map<std::string, KernelTimes> kernels;
+// Never destroyed, since the flush thread can still run while the process exits.
+std::mutex& times_lock = *new std::mutex;
+std::map<std::string, KernelTimes>& kernels = *new std::map<std::string, KernelTimes>;
 u64 skipped = 0;
 u64 dropped = 0;
 pid_t owner_pid = 0;
+std::atomic<bool> exiting{false};
 
 void Warn(const std::string& message) {
     std::fprintf(stderr, "lanescope kernel timer: %s\n", message.c_str());
@@ -60,38 +67,13 @@ void CUPTIAPI BufferRequested(uint8_t** buffer, size_t* size, size_t* max_record
     *max_records = 0;
 }
 
-void CUPTIAPI BufferCompleted(CUcontext context, uint32_t stream, uint8_t* buffer, size_t,
-                              size_t valid) {
-    std::lock_guard<std::mutex> guard(times_lock);
-    CUpti_Activity* record = nullptr;
-    while (cuptiActivityGetNextRecord(buffer, valid, &record) == CUPTI_SUCCESS) {
-        if (record->kind != CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL) continue;
-        const auto* kernel = reinterpret_cast<const KernelRecord*>(record);
-        if (kernel->end == 0 || kernel->end < kernel->start || kernel->name == nullptr) {
-            ++skipped;
-            continue;
-        }
-        const u64 duration = kernel->end - kernel->start;
-        KernelTimes& times = kernels[kernel->name];
-        times.shortest = times.launches ? std::min(times.shortest, duration) : duration;
-        times.longest = std::max(times.longest, duration);
-        times.nanoseconds += duration;
-        ++times.launches;
-    }
-    size_t lost = 0;
-    if (cuptiActivityGetNumDroppedRecords(context, stream, &lost) == CUPTI_SUCCESS) dropped += lost;
-    std::free(buffer);
-}
-
-void WriteTimes() {
-    // A forked child holds a copy of the times of its parent, which the parent writes.
-    if (getpid() != owner_pid) return;
-    cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED);
+// The caller holds times_lock. A file without "exited": true ends at the last flush.
+void WriteTimesLocked(bool exited) {
     const char* base = std::getenv("LANESCOPE_KERNEL_TIMES");
     if (base == nullptr || *base == '\0') return;
-    std::lock_guard<std::mutex> guard(times_lock);
     std::string text = "{\"format\": " + std::to_string(kFormatVersion) +
                        ", \"pid\": " + std::to_string(owner_pid) +
+                       ", \"exited\": " + (exited ? "true" : "false") +
                        ", \"skipped\": " + std::to_string(skipped) +
                        ", \"dropped\": " + std::to_string(dropped) + ", \"kernels\": {";
     bool first = true;
@@ -117,6 +99,49 @@ void WriteTimes() {
     }
 }
 
+void CUPTIAPI BufferCompleted(CUcontext context, uint32_t stream, uint8_t* buffer, size_t,
+                              size_t valid) {
+    std::lock_guard<std::mutex> guard(times_lock);
+    bool changed = false;
+    CUpti_Activity* record = nullptr;
+    while (cuptiActivityGetNextRecord(buffer, valid, &record) == CUPTI_SUCCESS) {
+        if (record->kind != CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL) continue;
+        changed = true;
+        const auto* kernel = reinterpret_cast<const KernelRecord*>(record);
+        if (kernel->end == 0 || kernel->end < kernel->start || kernel->name == nullptr) {
+            ++skipped;
+            continue;
+        }
+        const u64 duration = kernel->end - kernel->start;
+        KernelTimes& times = kernels[kernel->name];
+        times.shortest = times.launches ? std::min(times.shortest, duration) : duration;
+        times.longest = std::max(times.longest, duration);
+        times.nanoseconds += duration;
+        ++times.launches;
+    }
+    size_t lost = 0;
+    if (cuptiActivityGetNumDroppedRecords(context, stream, &lost) == CUPTI_SUCCESS) dropped += lost;
+    std::free(buffer);
+    // A forked child holds a copy of the times of its parent, which the parent writes.
+    if ((changed || lost) && !exiting && getpid() == owner_pid) WriteTimesLocked(false);
+}
+
+// The periodic flush of CUPTI returns only full buffers, which a short run never fills.
+void FlushOnPeriod() {
+    while (!exiting) {
+        std::this_thread::sleep_for(kFlushPeriod);
+        if (!exiting) cuptiActivityFlushAll(0);
+    }
+}
+
+void WriteTimes() {
+    if (getpid() != owner_pid) return;
+    exiting = true;
+    cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED);
+    std::lock_guard<std::mutex> guard(times_lock);
+    WriteTimesLocked(true);
+}
+
 }  // namespace
 
 extern "C" int InitializeInjection(void) {
@@ -130,5 +155,6 @@ extern "C" int InitializeInjection(void) {
         return 0;
     }
     std::atexit(WriteTimes);
+    std::thread(FlushOnPeriod).detach();
     return 1;
 }

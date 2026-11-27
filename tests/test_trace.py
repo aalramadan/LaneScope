@@ -146,6 +146,11 @@ def test_load_names_a_missing_column(tmp_path):
         ('{"format": 1, "source": "one line"}', "list of lines"),
         ('{"format": 1, "kernel": 7}', "kernel must be text"),
         ('{"format": 1, "opcodes": {"0x10": 7}}', "opcodes must map"),
+        ('{"format": 1, "origin_files": "/a.cuh"}', "origin_files must be a list"),
+        ('{"format": 1, "origins": {"0x10": [0, 9]}}', "origins must map"),
+        ('{"format": 1, "origin_files": ["/a.cuh"], "origins": {"0x10": [0]}}', "origins must"),
+        ('{"format": 1, "origin_files": ["/a.cuh"], "origins": {"0x10": [true, 9]}}', "origins"),
+        ('{"format": 1, "origin_text": [{"9": 1}]}', "origin_text must hold"),
     ],
 )
 def test_load_rejects_malformed_metadata(tmp_path, metadata, message):
@@ -381,3 +386,32 @@ def test_a_subset_of_a_trace_keeps_the_shared_side_of_each_copy():
         trace.addr + np.uint64(16) * (trace.space == Space.SHARED)[:, None]
     )
     assert moved.copy_destinations == {0: tuple(address + 16 for address in apart)}
+
+
+ORIGINS = {
+    "origin_files": ["/cccl/block_merge_sort.cuh", "/cccl/block_exchange.cuh"],
+    "origins": {"0x40": [0, 839], "0x50": [1, 299]},
+    "origin_text": [
+        {"839": "    keys_shared[ItemsPerThread * linear_tid + item] = keys[item];"},
+        {},
+    ],
+}
+
+
+def test_origin_gives_the_file_line_and_text_that_an_inlined_pc_comes_from(tmp_path):
+    rows = tuple(4 * lane for lane in range(WARP_SIZE))
+    accesses = [Access(pc, Space.SHARED, Kind.STORE, 4, rows) for pc in (0x40, 0x50, 0x60)]
+    Trace.from_accesses(accesses, ORIGINS).save(tmp_path / "t.npz")
+    trace = Trace.load(tmp_path / "t.npz")
+    assert trace.origin(0x40) == (
+        "/cccl/block_merge_sort.cuh",
+        839,
+        "keys_shared[ItemsPerThread * linear_tid + item] = keys[item];",
+    )
+    assert trace.origin(0x50) == ("/cccl/block_exchange.cuh", 299, "")
+    assert trace.origin(0x60) is None
+
+
+def test_a_trace_without_origins_gives_none_for_every_pc():
+    access = Access(0x40, Space.SHARED, Kind.LOAD, 4, tuple(4 * lane for lane in range(WARP_SIZE)))
+    assert Trace.from_accesses([access], {"lines": {"0x40": 3}}).origin(0x40) is None

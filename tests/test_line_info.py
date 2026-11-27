@@ -1,4 +1,5 @@
 import json
+import pathlib
 import re
 import struct
 import subprocess
@@ -189,14 +190,28 @@ def test_metadata_reads_only_absolute_paths_of_source_files(tmp_path, monkeypatc
     TOOLS.nvrtc is None or TOOLS.nvdisasm is None, reason="NVRTC and nvdisasm are needed"
 )
 def test_a_store_inlined_from_a_header_takes_the_line_of_its_call(tmp_path):
+    listing, store = inlined_store_listing(tmp_path)
+    assert line_info.parse(listing)["inlined"][store] == (str(tmp_path / "inlined.cu"), 4)
+
+
+@pytest.mark.skipif(
+    TOOLS.nvrtc is None or TOOLS.nvdisasm is None, reason="NVRTC and nvdisasm are needed"
+)
+def test_a_store_inlined_from_a_header_comes_from_its_line_in_the_header(tmp_path):
+    listing, store = inlined_store_listing(tmp_path)
+    assert line_info.origins(listing)["inlined"][store] == (str(tmp_path / "helper.cuh"), 2)
+
+
+def inlined_store_listing(folder):
+    """Compile the kernel that inlines a header and return its listing and the offset of its STS."""
     assert TOOLS.nvrtc is not None and TOOLS.nvdisasm is not None
-    (tmp_path / "helper.cuh").write_text(HELPER)
-    source = tmp_path / "inlined.cu"
+    (folder / "helper.cuh").write_text(HELPER)
+    source = folder / "inlined.cu"
     source.write_text(INLINED)
-    options = ["--gpu-architecture=sm_89", "-lineinfo", f"-I{tmp_path}"]
+    options = ["--gpu-architecture=sm_89", "-lineinfo", f"-I{folder}"]
     program = nvrtc.compile_cuda(INLINED, str(source), options, TOOLS.nvrtc)
     assert program.cubin is not None
-    cubin = tmp_path / "inlined.cubin"
+    cubin = folder / "inlined.cubin"
     cubin.write_bytes(program.cubin)
     code = subprocess.run(
         [str(TOOLS.nvdisasm), "--print-code", str(cubin)],
@@ -206,8 +221,7 @@ def test_a_store_inlined_from_a_header_takes_the_line_of_its_call(tmp_path):
     ).stdout
     found = re.search(r"/\*([0-9a-f]{4})\*/\s+STS\b", code)
     assert found is not None
-    table = line_info.parse(line_info.module_listing(TOOLS.disassemblers, cubin))["inlined"]
-    assert table[int(found.group(1), 16)] == (str(source), 4)
+    return line_info.module_listing(TOOLS.disassemblers, cubin), int(found.group(1), 16)
 
 
 def test_module_listing_turns_to_the_next_nvdisasm_when_one_fails(tmp_path):
@@ -313,3 +327,59 @@ def test_an_inlined_instruction_keeps_its_own_line_inside_the_file_of_its_call()
 def test_opcodes_keep_shared_atomics_for_their_counting_rule():
     listing = ".text.k:\n        /*0040*/                   ATOMS.CAS RZ, [R2], R4, R5 ;\n"
     assert line_info.opcodes(listing) == {"k": {0x40: "ATOMS.CAS"}}
+
+
+# Cut from the CUB merge sort of CCCL 3.7.0 for sm_120, with /opt/cccl for its folder.
+MERGE_SORT_LISTING = (pathlib.Path(__file__).parent / "data" / "merge_sort_listing.txt").read_text()
+MERGE_SORT_KERNEL = "/opt/cccl/cub/cub/device/dispatch/kernels/kernel_merge_sort.cuh"
+BLOCK_MERGE_SORT = "/opt/cccl/cub/cub/block/block_merge_sort.cuh"
+
+
+def test_parse_keeps_the_call_line_in_the_kernel_file_for_each_inlined_cub_store():
+    (table,) = line_info.parse(MERGE_SORT_LISTING).values()
+    assert table[0x0] == (MERGE_SORT_KERNEL, 149)
+    assert {table[offset] for offset in (0x11A0, 0x11B0, 0x11D0, 0x11F0)} == {
+        (MERGE_SORT_KERNEL, 194)
+    }
+
+
+def test_origins_give_the_innermost_cub_line_of_each_inlined_instruction():
+    (table,) = line_info.origins(MERGE_SORT_LISTING).values()
+    assert table == {
+        0x11A0: (BLOCK_MERGE_SORT, 43),
+        0x11B0: (BLOCK_MERGE_SORT, 839),
+        0x11C0: (BLOCK_MERGE_SORT, 46),
+        0x11D0: (BLOCK_MERGE_SORT, 839),
+        0x11E0: (BLOCK_MERGE_SORT, 839),
+        0x11F0: (BLOCK_MERGE_SORT, 839),
+    }
+
+
+def test_origins_leave_out_an_instruction_whose_kept_line_is_its_innermost_one():
+    origin = ("/src/h.cuh", 2)
+    assert line_info.origins(INLINED_LISTING) == {"k": {0x10: origin, 0x20: origin}}
+    assert line_info.origins(LISTING) == {"first": {}, "second": {}}
+
+
+def test_metadata_carries_each_origin_with_its_file_and_the_text_of_its_line(tmp_path):
+    kernel = tmp_path / "kernel.cu"
+    kernel.write_text("a\nb\n")
+    header = tmp_path / "block.cuh"
+    header.write_text("x\n  y = 1;\nz\n")
+    lines = {0x0: (str(kernel), 1), 0x10: (str(kernel), 2), 0x20: (str(kernel), 2)}
+    inlined = {0x10: (str(header), 2), 0x20: ("/missing/warp.cuh", 7)}
+    data = line_info.metadata(lines, inlined)
+    assert data["origin_files"] == ["/missing/warp.cuh", str(header)]
+    assert data["origins"] == {"0x10": [1, 2], "0x20": [0, 7]}
+    assert data["origin_text"] == [{}, {"2": "  y = 1;"}]
+    trace = Trace.from_accesses([], data)
+    assert trace.origin(0x10) == (str(header), 2, "y = 1;")
+    assert "origins" not in line_info.metadata(lines)
+
+
+def test_metadata_reads_origin_text_only_from_absolute_paths_of_source_files(tmp_path):
+    notes = tmp_path / "notes.txt"
+    notes.write_text("key = 1")
+    data = line_info.metadata({0x0: ("/src/k.cu", 1)}, {0x0: (str(notes), 1)})
+    assert data["origin_files"] == [str(notes)]
+    assert data["origin_text"] == [{}]

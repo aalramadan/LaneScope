@@ -19,6 +19,10 @@ export function renderLanes() {
   $("lanes-title").textContent = `${selected.pc}${line}`;
   const source = selected.source ? `: ${selected.source}` : "";
   $("lanes-subtitle").textContent = `${format.instructionLabel(selected)}${source}`;
+  const origin = $("lanes-origin");
+  origin.hidden = !selected.origin;
+  origin.textContent = selected.origin ? originLabel(selected.origin) : "";
+  origin.title = selected.origin?.file ?? "";
   const stats = $("access-stats");
   stats.replaceChildren(
     stat(
@@ -41,6 +45,11 @@ export function renderLanes() {
   renderPatterns(patterns);
   renderGrids();
   $("text-view").textContent = access.text;
+}
+
+function originLabel({ file, line, text }) {
+  const name = file.split(/[\\/]/).pop();
+  return `inlined from ${name}:${line}${text ? `: ${text}` : ""}`;
 }
 
 function renderPatterns(patterns) {

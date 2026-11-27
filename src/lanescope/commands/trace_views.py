@@ -80,6 +80,8 @@ def print_explanation(args: argparse.Namespace) -> int:
             f"{record['kind']:6}{record['width']:5d}{record['requests']:10d}  {record['unit']:11}"
             f"{record['achieved']:9d}{record['ideal']:7d}{record['excessive']:10d}{share:>11}{mark}"
         )
+        if origin := text_view.describe_origin(trace, int(record["pc"], 16)):
+            print(f"{'':15}{text_view.printable(origin)}")
     if any(record["data_dependent"] for record in data["instructions"]):
         print()
         print(f"{summary_text.MARK} {text_view.DATA_DEPENDENT}")

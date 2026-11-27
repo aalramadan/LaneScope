@@ -165,12 +165,14 @@ def measure(trace: Trace, row: int) -> tuple[int, int, int, int]:
 
 
 def as_record(trace: Trace, counter: InstructionCounters) -> dict:
-    """Return the counters of one instruction as JSON-ready data, with its source line."""
+    """Return the counters of one instruction as JSON-ready data, with its line and its origin."""
     line = trace.source_line(counter.pc)
+    origin = trace.origin(counter.pc)
     return {
         "pc": f"{counter.pc:#x}",
         "line": line[0] if line else None,
         "source": line[1] if line else None,
+        "origin": dict(zip(("file", "line", "text"), origin, strict=True)) if origin else None,
         "space": counter.space.name.lower(),
         "kind": counter.kind.name.lower(),
         "width": counter.width,

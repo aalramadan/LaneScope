@@ -1,3 +1,5 @@
+import dataclasses
+
 from lanescope import demos, text_view
 from lanescope.model import global_memory, shared_memory
 from lanescope.model.counters import count
@@ -77,3 +79,19 @@ def test_describe_row_names_the_sass_opcode_that_the_trace_keeps():
     assert header == "pc 0x0040, shared load of 16 bytes (LDSM.16.M88.4), CTA 0, warp 0"
     plain = text_view.describe_row(Trace.from_accesses([access]), 0).splitlines()[0]
     assert plain == "pc 0x0040, shared load of 16 bytes, CTA 0, warp 0"
+
+
+def test_the_lane_view_names_the_header_line_an_inlined_access_comes_from(inlined_transpose):
+    worst = {counter.pc: counter.worst_row for counter in count(inlined_transpose)}
+    lines = text_view.describe_row(inlined_transpose, worst[0x120]).splitlines()
+    assert lines[1] == "inlined from tile_copy.cuh:3: return tile[c][r];"
+    assert "inlined" not in text_view.describe_row(inlined_transpose, worst[0xA0])
+
+
+def test_the_lane_view_replaces_control_characters_of_the_origin(inlined_transpose):
+    metadata = inlined_transpose.metadata | {"origin_text": [{"3": "x\x1b[2J"}]}
+    trace = dataclasses.replace(inlined_transpose, metadata=metadata)
+    worst = {counter.pc: counter.worst_row for counter in count(trace)}
+    text = text_view.describe_row(trace, worst[0x120])
+    assert "\x1b" not in text
+    assert "inlined from tile_copy.cuh:3: x?[2J" in text

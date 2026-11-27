@@ -1,3 +1,4 @@
+import pathlib
 import string
 
 from lanescope.model import global_memory, shared_memory
@@ -24,6 +25,15 @@ def printable(value: object) -> str:
     return "".join(char if char.isprintable() else "?" for char in str(value))
 
 
+def describe_origin(trace: Trace, pc: int) -> str:
+    """Return where an inlined PC comes from, such as "inlined from a.cuh:9: x = 1;", or ""."""
+    origin = trace.origin(pc)
+    if origin is None:
+        return ""
+    file, line, text = origin
+    return f"inlined from {pathlib.PurePath(file).name}:{line}{f': {text}' if text else ''}"
+
+
 def describe_row(trace: Trace, row: int) -> str:
     """Return the lane-by-lane view of one row of the trace."""
     access = trace.access(row)
@@ -33,6 +43,8 @@ def describe_row(trace: Trace, row: int) -> str:
         f"of {access.width} bytes{f' ({opcode})' if opcode else ''}, "
         f"CTA {access.cta}, warp {access.warp}"
     )
+    if origin := describe_origin(trace, access.pc):
+        header += "\n" + printable(origin)
     if access.space == Space.SHARED:
         return header + "\n" + bank_grid(shared_memory.analyze_row(trace, row), access.addresses)
     return header + "\n" + sector_table(global_memory.analyze_row(trace, row))

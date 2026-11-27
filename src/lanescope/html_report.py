@@ -105,10 +105,13 @@ def _instruction_table(trace: Trace, counters: list[InstructionCounters], drawn:
         if _anchor(counter) in drawn:
             pc = f'<a href="#{_anchor(counter)}">{pc}</a>'
         conflicts = counter.conflicts if counter.space == Space.SHARED else ""
+        origin = text_view.describe_origin(trace, counter.pc)
         cells = [
             f"<td>{pc}</td>",
             f"<td>{line[0] if line else ''}</td>",
-            f"<td><code>{html.escape(line[1]) if line else ''}</code></td>",
+            f"<td><code>{html.escape(line[1]) if line else ''}</code>"
+            + (f'<br><span class="sub">{html.escape(origin)}</span>' if origin else "")
+            + "</td>",
             f"<td>{counter.space.name.lower()}</td>",
             f"<td>{counter.kind.name.lower()}</td>",
             f'<td class="num">{counter.width}</td>',
@@ -133,6 +136,8 @@ def _section(trace: Trace, counter: InstructionCounters) -> str:
     parts = [f'<section id="{_anchor(counter)}"><h3>{title}</h3>']
     if line and line[1]:
         parts.append(f"<p><code>{html.escape(line[1])}</code></p>")
+    if origin := text_view.describe_origin(trace, counter.pc):
+        parts.append(f'<p class="sub">{html.escape(origin)}</p>')
     if access.space == Space.SHARED:
         result = shared_memory.analyze_row(trace, counter.worst_row)
         parts.append(

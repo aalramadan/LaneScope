@@ -170,6 +170,7 @@ function showNoAccesses() {
   $("lanes-title").textContent = "No memory accesses";
   $("diagnosis").hidden = true;
   $("lanes-subtitle").textContent = "This trace holds no shared or global load or store.";
+  $("lanes-origin").hidden = true;
   for (const id of ["access-stats", "patterns", "grids", "legend"]) {
     $(id).replaceChildren();
   }

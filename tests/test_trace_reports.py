@@ -1,4 +1,5 @@
 import json
+import pathlib
 
 import pytest
 
@@ -160,3 +161,21 @@ def test_suggest_gives_the_excess_global_sectors_of_each_change():
     data = trace_reports.suggest(demos.matmul_tile_trace(), limit=50)
     padding = next(c for c in data["changes"] if c["change"] == "pad each 128-byte row by 16 bytes")
     assert (padding["excessive_sectors_before"], padding["excessive_sectors_after"]) == (0, 256)
+
+
+def test_explain_gives_the_origin_of_an_inlined_instruction_beside_its_line(inlined_transpose):
+    data = trace_reports.explain(inlined_transpose)
+    records = {item["pc"]: item for item in data["instructions"]}
+    assert records["0x120"]["line"] == 10
+    assert records["0x120"]["origin"] == {
+        "file": "/src/include/tile_copy.cuh",
+        "line": 3,
+        "text": "return tile[c][r];",
+    }
+    assert records["0xa0"]["origin"] is None
+
+
+def test_explain_of_a_bundled_recording_without_origins_gives_none():
+    path = pathlib.Path(trace_reports.__file__).parent / "recordings" / "llama_cpp_indexer.npz"
+    records = trace_reports.explain(Trace.load(path))["instructions"]
+    assert records and all(record["origin"] is None for record in records)

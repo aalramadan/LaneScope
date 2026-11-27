@@ -666,3 +666,20 @@ def test_a_launch_that_fails_to_open_leaves_the_picker_on_the_summary(browser, t
         expect(page.locator("#summary-view")).to_be_visible()
         assert page.locator("#trace-select").input_value() == ""
         context.close()
+
+
+def test_the_card_names_the_header_line_of_an_inlined_instruction(
+    browser, tmp_path, serve, inlined_transpose
+):
+    inlined_transpose.save(tmp_path / "inlined.npz")
+    with serve([tmp_path]) as server:
+        context = browser.new_context(viewport={"width": 1600, "height": 1000})
+        page = context.new_page()
+        page.goto(f"http://localhost:{server.server_address[1]}/")
+        origin = page.locator("#lanes-origin")
+        expect(origin).to_have_text("inlined from tile_copy.cuh:3: return tile[c][r];")
+        expect(origin).to_have_attribute("title", "/src/include/tile_copy.cuh")
+        page.locator('#instruction-rows tr[data-key="0xa0/global"]').click()
+        expect(page.locator("#lanes-title")).to_have_text("0xa0, line 5")
+        expect(origin).to_be_hidden()
+        context.close()

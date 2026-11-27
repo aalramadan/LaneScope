@@ -694,3 +694,27 @@ def test_record_with_a_disassembler_but_no_line_tables_advises_lineinfo(
     err = capsys.readouterr().err
     assert "no source lines in 1 of 1 launch, since their kernels were built without" in err
     assert "nvcc -lineinfo" in err
+
+
+def test_explain_prints_the_origin_of_an_inlined_instruction_under_its_row(
+    inlined_transpose, tmp_path, capsys
+):
+    path = tmp_path / "inlined.npz"
+    inlined_transpose.save(path)
+    assert main(["explain", str(path)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    row = next(index for index, line in enumerate(lines) if line.startswith("0x0120"))
+    assert lines[row + 1] == f"{'':15}inlined from tile_copy.cuh:3: return tile[c][r];"
+    assert sum("inlined from" in line for line in lines) == 1
+
+
+def test_explain_json_gives_the_origin_for_tools(inlined_transpose, tmp_path, capsys):
+    path = tmp_path / "inlined.npz"
+    inlined_transpose.save(path)
+    assert main(["explain", str(path), "--json"]) == 0
+    first = json.loads(capsys.readouterr().out)["instructions"][0]
+    assert first["origin"] == {
+        "file": "/src/include/tile_copy.cuh",
+        "line": 3,
+        "text": "return tile[c][r];",
+    }

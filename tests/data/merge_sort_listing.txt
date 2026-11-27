@@ -1,0 +1,45 @@
+//--------------------- .text._ZN3cub17_V_300700_SM_12006detail10merge_sort30DeviceMergeSortBlockSortKernelINS2_26policy_selector_from_typesIN6thrust17_V_300700_SM_120010device_ptrImEEEES8_S8_S8_S8_j10CustomLessmmEEvbT0_T1_T2_T3_T4_PT6_PT7_T5_NS1_7vsmem_tE --------------------------
+	.section	.text._ZN3cub17_V_300700_SM_12006detail10merge_sort30DeviceMergeSortBlockSortKernelINS2_26policy_selector_from_typesIN6thrust17_V_300700_SM_120010device_ptrImEEEES8_S8_S8_S8_j10CustomLessmmEEvbT0_T1_T2_T3_T4_PT6_PT7_T5_NS1_7vsmem_tE,"ax",@progbits
+	.align	128
+        .global         _ZN3cub17_V_300700_SM_12006detail10merge_sort30DeviceMergeSortBlockSortKernelINS2_26policy_selector_from_typesIN6thrust17_V_300700_SM_120010device_ptrImEEEES8_S8_S8_S8_j10CustomLessmmEEvbT0_T1_T2_T3_T4_PT6_PT7_T5_NS1_7vsmem_tE
+        .type           _ZN3cub17_V_300700_SM_12006detail10merge_sort30DeviceMergeSortBlockSortKernelINS2_26policy_selector_from_typesIN6thrust17_V_300700_SM_120010device_ptrImEEEES8_S8_S8_S8_j10CustomLessmmEEvbT0_T1_T2_T3_T4_PT6_PT7_T5_NS1_7vsmem_tE,@function
+        .size           _ZN3cub17_V_300700_SM_12006detail10merge_sort30DeviceMergeSortBlockSortKernelINS2_26policy_selector_from_typesIN6thrust17_V_300700_SM_120010device_ptrImEEEES8_S8_S8_S8_j10CustomLessmmEEvbT0_T1_T2_T3_T4_PT6_PT7_T5_NS1_7vsmem_tE,(.L_x_33 - _ZN3cub17_V_300700_SM_12006detail10merge_sort30DeviceMergeSortBlockSortKernelINS2_26policy_selector_from_typesIN6thrust17_V_300700_SM_120010device_ptrImEEEES8_S8_S8_S8_j10CustomLessmmEEvbT0_T1_T2_T3_T4_PT6_PT7_T5_NS1_7vsmem_tE)
+        .other          _ZN3cub17_V_300700_SM_12006detail10merge_sort30DeviceMergeSortBlockSortKernelINS2_26policy_selector_from_typesIN6thrust17_V_300700_SM_120010device_ptrImEEEES8_S8_S8_S8_j10CustomLessmmEEvbT0_T1_T2_T3_T4_PT6_PT7_T5_NS1_7vsmem_tE,@"STO_CUDA_ENTRY STV_DEFAULT"
+_ZN3cub17_V_300700_SM_12006detail10merge_sort30DeviceMergeSortBlockSortKernelINS2_26policy_selector_from_typesIN6thrust17_V_300700_SM_120010device_ptrImEEEES8_S8_S8_S8_j10CustomLessmmEEvbT0_T1_T2_T3_T4_PT6_PT7_T5_NS1_7vsmem_tE:
+.text._ZN3cub17_V_300700_SM_12006detail10merge_sort30DeviceMergeSortBlockSortKernelINS2_26policy_selector_from_typesIN6thrust17_V_300700_SM_120010device_ptrImEEEES8_S8_S8_S8_j10CustomLessmmEEvbT0_T1_T2_T3_T4_PT6_PT7_T5_NS1_7vsmem_tE:
+	//## File "/opt/cccl/cub/cub/device/dispatch/kernels/kernel_merge_sort.cuh", line 149
+        /*0000*/                   LDC R1, c[0x0][0x37c] ;
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 43 inlined at "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 989
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 989 inlined at "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 464
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 464 inlined at "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 391
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 391 inlined at "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 194
+	//## File "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 194 inlined at "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 139
+	//## File "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 139 inlined at "/opt/cccl/cub/cub/device/dispatch/kernels/kernel_merge_sort.cuh", line 194
+	//## File "/opt/cccl/cub/cub/device/dispatch/kernels/kernel_merge_sort.cuh", line 194
+        /*11a0*/                   IADD R41, R41, -UR7 ;
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 839 inlined at "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 951
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 951 inlined at "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 464
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 464 inlined at "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 391
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 391 inlined at "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 194
+	//## File "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 194 inlined at "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 139
+	//## File "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 139 inlined at "/opt/cccl/cub/cub/device/dispatch/kernels/kernel_merge_sort.cuh", line 194
+	//## File "/opt/cccl/cub/cub/device/dispatch/kernels/kernel_merge_sort.cuh", line 194
+        /*11b0*/                   STS.128 [R65+0x10], R8 ;
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 46 inlined at "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 989
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 989 inlined at "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 464
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 464 inlined at "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 391
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 391 inlined at "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 194
+	//## File "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 194 inlined at "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 139
+	//## File "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 139 inlined at "/opt/cccl/cub/cub/device/dispatch/kernels/kernel_merge_sort.cuh", line 194
+	//## File "/opt/cccl/cub/cub/device/dispatch/kernels/kernel_merge_sort.cuh", line 194
+        /*11c0*/                   ISETP.GE.U32.AND P1, PT, R41, R40, PT ;
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 839 inlined at "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 951
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 951 inlined at "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 464
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 464 inlined at "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 391
+	//## File "/opt/cccl/cub/cub/block/block_merge_sort.cuh", line 391 inlined at "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 194
+	//## File "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 194 inlined at "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 139
+	//## File "/opt/cccl/cub/cub/agent/agent_merge_sort.cuh", line 139 inlined at "/opt/cccl/cub/cub/device/dispatch/kernels/kernel_merge_sort.cuh", line 194
+	//## File "/opt/cccl/cub/cub/device/dispatch/kernels/kernel_merge_sort.cuh", line 194
+        /*11d0*/                   STS.128 [R65+0x20], R4 ;
+        /*11e0*/                   STS.128 [R65+0x30], R20 ;
+        /*11f0*/                   STS.128 [R65], R24 ;

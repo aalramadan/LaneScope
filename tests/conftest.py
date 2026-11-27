@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import json
 import re
 import threading
@@ -22,6 +23,18 @@ def served(paths, host="127.0.0.1", allowed_hosts=()):
     finally:
         server.shutdown()
         server.server_close()
+
+
+@pytest.fixture
+def inlined_transpose():
+    """Return the transpose with its conflicted load inlined from line 3 of a header."""
+    trace = demos.transpose_trace()
+    origins = {
+        "origin_files": ["/src/include/tile_copy.cuh"],
+        "origins": {"0x120": [0, 3]},
+        "origin_text": [{"3": "    return tile[c][r];"}],
+    }
+    return dataclasses.replace(trace, metadata=trace.metadata | origins)
 
 
 @pytest.fixture(scope="session")

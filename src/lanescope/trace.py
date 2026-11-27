@@ -173,6 +173,16 @@ class Trace:
         source = self.metadata.get("source", [])
         return line, source[line - 1].strip() if 0 < line <= len(source) else ""
 
+    def origin(self, pc: int) -> tuple[str, int, str] | None:
+        """Return the file, line, and text that an inlined PC comes from, or None."""
+        found = self.metadata.get("origins", {}).get(f"{pc:#x}")
+        if found is None:
+            return None
+        index, line = found
+        texts = self.metadata.get("origin_text", [])
+        text = texts[index].get(str(line), "") if index < len(texts) else ""
+        return self.metadata["origin_files"][index], line, text.strip()
+
     def opcode(self, pc: int) -> str:
         """Return the SASS opcode that the metadata keeps for a PC, or an empty string."""
         return str(self.metadata.get("opcodes", {}).get(f"{pc:#x}", ""))
@@ -351,6 +361,33 @@ def _check_metadata(metadata: Any) -> None:
         isinstance(pc, str) and isinstance(opcode, str) for pc, opcode in opcodes.items()
     ):
         raise ValueError("metadata field opcodes must map PC text such as 0x120 to SASS opcodes")
+    _check_origins(metadata)
+
+
+def _check_origins(metadata: dict) -> None:
+    files = metadata.get("origin_files", [])
+    if not isinstance(files, list) or not all(isinstance(file, str) for file in files):
+        raise ValueError("metadata field origin_files must be a list of paths")
+    origins = metadata.get("origins", {})
+    if not isinstance(origins, dict) or not all(
+        isinstance(pc, str)
+        and isinstance(place, list)
+        and len(place) == 2
+        and all(isinstance(value, int) and not isinstance(value, bool) for value in place)
+        and 0 <= place[0] < len(files)
+        for pc, place in origins.items()
+    ):
+        raise ValueError(
+            "metadata field origins must map PC text such as 0x120 to an index of "
+            "origin_files and a line number"
+        )
+    texts = metadata.get("origin_text", [])
+    if not isinstance(texts, list) or not all(
+        isinstance(lines, dict)
+        and all(isinstance(line, str) and isinstance(text, str) for line, text in lines.items())
+        for lines in texts
+    ):
+        raise ValueError("metadata field origin_text must hold the text of each line per file")
 
 
 def _validate(trace: Trace) -> None:

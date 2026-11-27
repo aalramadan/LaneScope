@@ -1,3 +1,4 @@
+import dataclasses
 import re
 import time
 from xml.etree import ElementTree
@@ -145,3 +146,16 @@ def test_a_conflict_that_follows_the_input_values_without_a_fix_says_why(monkeyp
     monkeypatch.setattr(html_report.trace_reports.ranking, "suggest", lambda trace, buffer: [])
     page = html_report.render(demos.histogram_trace())
     assert "No layout of the buffer removes them." in page
+
+
+def test_the_report_names_the_origin_under_the_source_line_of_an_inlined_instruction(
+    inlined_transpose,
+):
+    metadata = inlined_transpose.metadata | {"origin_text": [{"3": "a < b && c"}]}
+    page = html_report.render(dataclasses.replace(inlined_transpose, metadata=metadata))
+    origin = "inlined from tile_copy.cuh:3: a &lt; b &amp;&amp; c"
+    table = page.split("<table>")[1].split("</table>")[0]
+    assert f'<br><span class="sub">{origin}</span>' in table
+    section = page.split('<section id="pc-120-shared">')[1].split("</section>")[0]
+    assert f'<p class="sub">{origin}</p>' in section
+    assert page.count("inlined from") == 2

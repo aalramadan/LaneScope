@@ -151,6 +151,20 @@ def test_import_lists_only_the_kernels_that_ran_in_each_module(tmp_path, monkeyp
     assert [Trace.load(path).metadata["lines"] for path in paths] == [{"0x10": 3}] * 4
 
 
+def test_import_keeps_the_origin_of_an_inlined_access_with_its_header_line(tmp_path, monkeypatch):
+    header = tmp_path / "block.cuh"
+    header.write_text("// store\n  tile[i] = v;\n")
+    write_launch(tmp_path, 0, [row(0x10, [4 * lane for lane in range(WARP_SIZE)])], module=0)
+    (tmp_path / "module-0.cubin").write_bytes(b"cubin")
+    chain = f'\t//## File "{header}", line 2 inlined at "/src/k.cu", line 3\n'
+    listing = f'.text.k:\n{chain}\t//## File "/src/k.cu", line 3\n        /*0010*/ STS [R1], R0 ;\n'
+    monkeypatch.setattr(capture.line_info, "module_listing", lambda *_: listing)
+    (path,) = capture.import_recording(tmp_path, [tmp_path / "nvdisasm"])
+    trace = Trace.load(path)
+    assert trace.metadata["lines"] == {"0x10": 3}
+    assert trace.origin(0x10) == (str(header), 2, "tile[i] = v;")
+
+
 def test_import_takes_one_launch_at_a_time_when_records_fill_its_memory(tmp_path, monkeypatch):
     paths = [write_launch(tmp_path, index, [row(0x10, [0] * WARP_SIZE)]) for index in range(4)]
     assert capture._workers(paths) == min(capture.IMPORT_THREADS, os.cpu_count() or 1)

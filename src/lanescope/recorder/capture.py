@@ -32,8 +32,13 @@ LAUNCH_NAME = re.compile(r"launch-(\d+)\.json")
 # that import at once keep their records within this many bytes together.
 IMPORT_BYTES = 1 << 29
 IMPORT_THREADS = 8
-# The source lines and the counted opcodes of each kernel of a module.
-ModuleLines = tuple[dict[str, line_info.FunctionLines], dict[str, dict[int, str]]]
+# The source lines, the origins of inlined instructions, and the counted opcodes of each
+# kernel of a module.
+ModuleLines = tuple[
+    dict[str, line_info.FunctionLines],
+    dict[str, line_info.FunctionLines],
+    dict[str, dict[int, str]],
+]
 # The files that a recording and its import write, which the next recording replaces.
 RECORDING_FILE = re.compile(r"launch-\d+\.(json|bin)|module-\d+\.cubin|trace-\d+\.npz")
 # Without the SASS of each kernel, a trace cannot tell ldmatrix, cp.async, or the kind of an
@@ -218,7 +223,7 @@ def _module_listings(
             text = line_info.module_listing(disassemblers, cubin, kernels[module])
         except ValueError as error:
             return error
-        return line_info.parse(text), line_info.opcodes(text)
+        return line_info.parse(text), line_info.origins(text), line_info.opcodes(text)
 
     with concurrent.futures.ThreadPoolExecutor(min(len(kernels), os.cpu_count() or 1)) as pool:
         return dict(zip(kernels, pool.map(listing, kernels), strict=True))
@@ -237,8 +242,8 @@ def _save_trace(
         module = None
     elif not isinstance(found := modules[module], ValueError):
         kernel = str(info.get("kernel", ""))
-        lines, codes = found
-        data = line_info.metadata(lines.get(kernel, {}))
+        lines, inlined, codes = found
+        data = line_info.metadata(lines.get(kernel, {}), inlined.get(kernel))
         if kernel_codes := codes.get(kernel):
             data["opcodes"] = {f"{offset:#x}": opcode for offset, opcode in kernel_codes.items()}
         trace = dataclasses.replace(trace, metadata=trace.metadata | data)

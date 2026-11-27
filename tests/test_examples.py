@@ -91,6 +91,7 @@ def test_the_padded_tile_of_the_conflict_kinds_example_holds_one_float_more_per_
     for pad in ([], ["-DTILE_PAD=1"]):
         options = ["--gpu-architecture=sm_89", *pad]
         cubin = nvrtc.compile_cuda(source.read_text(), str(source), options, NVRTC).cubin
+        assert cubin is not None
         sizes.append(_shared_bytes(cubin, "transpose"))
     assert sizes == [32 * 32 * 4, 32 * 33 * 4]
 

@@ -116,7 +116,8 @@ def generated_accesses(rng, rows):
             pc = rng.choice(list(OPCODES))
             width = 16 if pc < 0x60 and rng.random() < 0.8 else rng.choice(WIDTHS)
             # Opcodes decide the rule over kinds, so every kind takes a turn.
-            kind = {0x50: Kind.STORE}.get(pc, rng.choice(list(Kind)))
+            drawn = rng.choice(list(Kind))
+            kind = Kind.STORE if pc == 0x50 else drawn
             if 0x60 <= pc < 0xA0 and rng.random() < 0.8:
                 kind = Kind.ATOMIC
             lanes = addresses(rng, width, shared_base(rng, width))

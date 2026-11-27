@@ -112,7 +112,7 @@ def test_the_qk_chunk_store_of_the_llama_cpp_recording_takes_four_times_its_idea
     stores = [
         counter
         for counter in count_instructions(trace)
-        if counter.space == Space.SHARED and trace.source_line(counter.pc)[0] == 147
+        if counter.space == Space.SHARED and (trace.source_line(counter.pc) or (0, ""))[0] == 147
     ]
     assert stores and all(counter.achieved == 4 * counter.ideal for counter in stores)
 

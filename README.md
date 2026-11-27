@@ -39,25 +39,28 @@ The demo opens on a summary that ranks the conflicts of the recordings below, la
 
 | Feature | Description |
 |---|---|
-| 📊 Run summary | Every kernel and source line of a recording, ranked by the extra passes it causes |
+| 📊 Run summary | Every kernel and source line of a recording, ranked by the extra passes it causes, with one row per kernel template |
 | 🔬 Thread view | Every shared and global memory access, thread by thread, beside its source line, with its cost and its best fix in plain words |
 | 📊 Nsight-matching counts | The wavefronts and sectors that Nsight Compute reports, computed from the recorded addresses |
 | 🛠️ Fix search | Paddings and swizzles ranked by the conflicts each removes, written as code, with a warning where the input values decide the conflicts |
+| ⚖️ Before and after | Two recordings side by side, with the passes and the time of each kernel before and after a fix |
+| ⏱️ Kernel times | The time of each kernel in a run without the recorder, beside its conflicts |
 | 🔌 No rebuild | Any CUDA program, including the Triton kernels that PyTorch compiles |
 | 🖥️ Three interfaces | A browser GUI, a command line, and a Model Context Protocol (MCP) server for coding agents |
 | 🎮 Tested GPUs | Counts checked against Nsight Compute on an RTX 4060 and an RTX 5070 Laptop GPU |
+
 ## 📦 Installation
 
 ```bash
 git clone https://github.com/aalramadan/LaneScope.git
 cd LaneScope
 pip install .                # analysis, command line, and GUI
-pip install ".[gpu]"         # recording on an NVIDIA GPU
-pip install ".[gpu-cuda13]"  # recording with the CUDA 13 tools, as on RTX 50 GPUs
+pip install ".[gpu]"         # recording and timing on an NVIDIA GPU
+pip install ".[gpu-cuda13]"  # the same with the CUDA 13 tools, as on RTX 50 GPUs
 ```
 
 > [!TIP]
-> The analysis and the GUI run without a GPU. Only recording needs an NVIDIA GPU and `g++`. The `gpu` extra brings the CUDA tools that recording uses, with no CUDA Toolkit to install. On a driver for CUDA 13 or later, as on RTX 50 GPUs, the `gpu-cuda13` extra brings the matching tools.
+> The analysis and the GUI run without a GPU. Only recording and timing need an NVIDIA GPU and `g++`. The `gpu` extra brings the CUDA tools that the two use, with no CUDA Toolkit to install. On a driver for CUDA 13 or later, as on RTX 50 GPUs, the `gpu-cuda13` extra brings the matching tools.
 
 ## 🚀 Quick Start
 
@@ -67,6 +70,8 @@ lanescope record --out run1 -- ./my_app       # record a CUDA program
 lanescope summary run1                        # rank the lines of every launch by their conflicts
 lanescope gui run1                            # explore the recording
 lanescope suggest run1/trace-0.npz            # rank the fixes in the terminal
+lanescope time run1                           # time each kernel without the recorder
+lanescope compare before after                # compare two recordings, such as before and after a fix
 ```
 
 ## 📖 Usage
@@ -119,7 +124,7 @@ lanescope gui run1
 ```
 
 > [!TIP]
-> `--kernel` records only the kernels whose names contain the given text. `--ctas` records a range of thread blocks. Compiling with `-lineinfo` adds source lines and is optional. A program that queues many launches without synchronizing gets every launch recorded, since each launch saves its records once its threads finish.
+> `--kernel` records only the kernels whose names contain the given text. `--ctas` records a range of thread blocks. Compiling with `-lineinfo` adds source lines and is optional. For code inlined from a header, each instruction also names the header line that it comes from. A program that queues many launches without synchronizing gets every launch recorded, since each launch saves its records once its threads finish.
 
 ### 📊 Rank Every Launch
 
@@ -141,10 +146,10 @@ Kernels by extra passes
 
 Lines by extra passes
   extra passes   ratio  of kernel  launches  line                              kernel
-        31,744   32.0x      93.9%         2  conflict_kinds.cu:23 load         transpose
+        31,744   32.0x      93.9%         2  conflict_kinds.cu:27 load         transpose
         15,563    3.5x      67.0%         3  conflict_kinds.cu:8 atomic *      histogram
-         1,120    4.2x      46.7%         2  conflict_kinds.cu:35 load         tree_sum
-           560    4.2x      23.3%         2  conflict_kinds.cu:35 store        tree_sum
+         1,120    4.2x      46.7%         2  conflict_kinds.cu:39 load         tree_sum
+           560    4.2x      23.3%         2  conflict_kinds.cu:39 store        tree_sum
 
 * The conflicts of this line follow the values that the kernel reads, such as the bins of a histogram. No padding or swizzle removes them.
 
@@ -152,6 +157,47 @@ Worst line: lanescope suggest run1/trace-3.npz --pc 0x1b0 ranks its fixes, and l
 ```
 
 The column `of kernel` gives the extra passes of a line as a part of all the passes of its kernel. A fix of the line cuts the passes of the kernel by this part. A star marks a line whose banks follow the values that the kernel reads, such as the bins of a histogram. No padding or swizzle removes such conflicts. `lanescope gui run1` opens on the same ranking. A click on a line opens the launch where the line wastes the most passes.
+
+A program built on a template library, such as CUB, launches one kernel per template instance. The summary adds these instances up in one row per template. `lanescope summary --instances` lists every instance, while a row of the GUI opens into its instances.
+
+### ⚖️ Check a Fix
+
+A fix counts only when its kernel runs faster. `lanescope time` runs each recorded program again without the recorder, which slows the kernels down, and stores the time of each kernel. It takes five rounds by default, each round with every given recording once. `lanescope summary` then also shows the time of each kernel and its part of the kernel time of the run, while `lanescope compare` sets the passes and the median kernel times of two recordings side by side. In the example, `--width 4096` sets the side of the transposed matrix. The option `--padded` pads each row of the tile of the transpose by one float.
+
+```console
+$ lanescope record --out before -- python examples/conflict_kinds.py --width 4096
+$ lanescope record --out after -- python examples/conflict_kinds.py --width 4096 --padded
+$ lanescope time before after
+...
+$ lanescope compare before after
+before: before, kernel times of 5 rounds
+after: after, kernel times of 5 rounds
+Shared memory: 160,895 passes before and 33,919 after. Bank conflicts add 144,175 before and 17,199 after.
+Kernel time: 1.35 ms before and 1.13 ms after, a speedup of 1.20x.
+
+Extra passes by kernel
+ launches   passes before    passes after   extra before    extra after  kernel
+        2         135,168           8,192        126,976              0  transpose
+        3          23,199          23,199         15,519         15,519  histogram
+        2           2,400           2,400          1,680          1,680  tree_sum
+        1             128             128              0              0  scale
+        8         160,895          33,919        144,175         17,199  all kernels
+
+Kernel time by kernel
+time before  range over rounds   time after  range over rounds        speedup  kernel
+    1.33 ms       1.32-1.33 ms      1.10 ms       1.10-1.11 ms          1.20x  transpose
+    20.4 us       18.5-22.0 us      19.6 us       18.8-20.6 us  within spread  histogram
+    2.34 us       2.24-2.50 us      2.34 us       2.30-2.50 us  within spread  tree_sum
+     768 ns         736-832 ns       768 ns         767-800 ns  within spread  scale
+    1.35 ms       1.34-1.36 ms      1.13 ms       1.12-1.13 ms          1.20x  all kernels
+
+within spread: the rounds of the two sides lie apart by less than the larger of their spreads, the slowest round of a side minus its fastest. The difference can then come from the noise of the rounds, and it counts as neither a speedup nor a slowdown.
+```
+
+The padding removes every extra pass of the transpose and makes it 1.20 times faster on an RTX 5070 Laptop GPU. It leaves the three other kernels unchanged, with equal passes in the two recordings. Their speedup column reads `within spread`, a difference smaller than the variation between the rounds, which counts as no change.
+
+> [!TIP]
+> Time the two recordings in one `lanescope time` call, which runs them in turns. Kernel times depend on the clock frequency of the GPU. A laptop lowers that frequency to save power. In such a state of the same laptop, the transpose took 2.75 ms before the padding and 1.85 ms after, 1.49 times faster. Times from two separate calls therefore do not compare.
 
 ### 🤖 Use with Coding Agents
 
@@ -169,6 +215,8 @@ An MCP client adds the server with the command `lanescope` and the argument `mcp
 | `record` | Records the memory accesses of a CUDA or Python program |
 | `gui` | Opens the browser GUI |
 | `summary` | Ranks the kernels and source lines of a recording by their extra passes |
+| `time` | Times every kernel of a recorded program without the recorder |
+| `compare` | Compares the passes and the kernel times of two recordings |
 | `explain` | Lists the memory instructions of a trace, worst first |
 | `lanes` | Shows where each thread of a warp lands |
 | `suggest` | Ranks the paddings and swizzles of each buffer |
@@ -196,18 +244,18 @@ On the RTX 4060, the swizzle that LaneScope ranks first makes its built-in trans
 ## 📋 Requirements
 
 - Linux or WSL2 with Python 3.11 or later
-- For recording, `g++` and an NVIDIA GPU with a driver for CUDA 12.4 or later
+- For recording and timing, `g++` and an NVIDIA GPU with a driver for CUDA 12.4 or later
 - Counts validated on an RTX 4060 and an RTX 5070 Laptop GPU. `lanescope validate` checks them on any other GPU.
 
 ## ⚙️ How It Works
 
 | Step | Module | Description |
 |---|---|---|
-| 1 | `recorder/` | Records the address of each thread at every memory access, through Compute Sanitizer |
+| 1 | `recorder/` | Records the address of each thread at every memory access, through Compute Sanitizer, and times the kernels of a run without the recorder, through CUPTI |
 | 2 | `model/` | Counts wavefronts and sectors from the addresses and marks the conflicts that the input values decide |
-| 3 | `summary.py` | Adds up the counts of every launch by kernel and by source line |
+| 3 | `summary.py`, `recording_comparison.py` | Add up the counts of every launch by kernel and by source line, and compare two recordings |
 | 4 | `fixes/` | Tries paddings and swizzles on the recorded addresses and ranks them |
-| 5 | `gui/`, `cli.py`, `mcp_server.py` | Show the results |
+| 5 | `gui/`, `commands/`, `mcp_server.py` | Show the results |
 | 6 | `nsight/` | Checks the counts against Nsight Compute |
 
 ## 🧑‍💻 Development

@@ -53,7 +53,7 @@ def fake_command(tmp_path, name, rounds):
 
 def stored_folder(tmp_path, name, rounds):
     folder = tmp_path / name
-    kernel_times.write_run(folder, fake_command(tmp_path, name, rounds))
+    kernel_times.write_stored_command(folder, fake_command(tmp_path, name, rounds))
     return folder
 
 
@@ -95,7 +95,7 @@ def test_time_with_a_program_after_the_folder_stores_it_as_the_command(
     command = fake_command(tmp_path, "plan", [{"k": kernel(1, 10)}])
     folder = tmp_path / "fresh"
     assert main(["time", str(folder), "--rounds", "2", "--", *command]) == 0
-    assert kernel_times.read_run(folder)[0] == command
+    assert kernel_times.read_stored_command(folder)[0] == command
     assert json.loads((folder / "kernel-times.json").read_text())["rounds"] == 2
 
 
@@ -133,7 +133,7 @@ def test_time_without_cupti_names_the_missing_tools(tmp_path, monkeypatch, capsy
     folder = stored_folder(tmp_path, "run", [{"k": kernel(1, 10)}])
     empty = toolchain.Toolchain(*[None] * 9, disassemblers=())
     monkeypatch.setattr(time_program, "cache_folder", lambda: None)
-    monkeypatch.setattr("lanescope.recorder.build.find", lambda: empty)
+    monkeypatch.setattr("lanescope.recorder.build.find_toolchain", lambda: empty)
     assert main(["time", str(folder)]) == 2
     err = capsys.readouterr().err
     assert "missing CUDA tools: cupti_include, cupti_lib, cuda_include" in err

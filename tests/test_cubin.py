@@ -6,7 +6,7 @@ import pytest
 from lanescope.cuda import nvrtc, toolchain
 from lanescope.recorder import build
 
-TOOLS = toolchain.find()
+TOOLS = toolchain.find_toolchain()
 needs_compiler = pytest.mark.skipif(shutil.which("g++") is None, reason="g++ is needed")
 # The recorder reads the cubin of each module through this function of cubin.h.
 PROGRAM = r"""

@@ -19,7 +19,7 @@ import numpy as np
 
 from lanescope import __version__, kernel_names, summary, trace_reports
 from lanescope.fixes import codegen
-from lanescope.fixes.layouts import Buffer, apply, infer_buffer, lanes_inside
+from lanescope.fixes.layouts import Buffer, apply_layout_change, infer_buffer, lanes_inside
 from lanescope.fixes.ranking import divisors
 from lanescope.nsight import validate
 from lanescope.trace import Space, Trace, read_metadata
@@ -72,7 +72,7 @@ class Listed:
 
 
 @dataclasses.dataclass(frozen=True)
-class Summed:
+class SummaryFile:
     """One trace file of a summary, with its run and the stamp that its facts belong to."""
 
     id: str
@@ -130,7 +130,7 @@ class Library:
         names = kernel_names.readable(kernels)
         for _, facts in found.values():
             kernel = facts["kernel"]
-            facts["kernel_name"] = kernel_names.short(names[kernel]) if kernel else None
+            facts["kernel_name"] = kernel_names.short_name(names[kernel]) if kernel else None
         return {
             "traces": [
                 {"id": item.id, "name": item.name, "folder": item.folder} | facts
@@ -143,13 +143,15 @@ class Library:
         """Return the summary of every trace under the roots, or its progress while it runs."""
         files = self._summed_files()
         if not self._background:
-            self._sum(files)
+            self._read_pending_facts(files)
         with self._lock:
             missing = [file for file in files if file.stamp not in self._facts]
             if missing:
                 idle = self._summing is None or not self._summing.is_alive()
                 if idle and not self._closed.is_set():
-                    self._summing = threading.Thread(target=self._sum, args=(missing,), daemon=True)
+                    self._summing = threading.Thread(
+                        target=self._read_pending_facts, args=(missing,), daemon=True
+                    )
                     self._summing.start()
                 return {"state": "summing", "done": len(files) - len(missing), "total": len(files)}
             items = [(file.id, file.run, self._facts[file.stamp]) for file in files]
@@ -172,8 +174,8 @@ class Library:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
 
-    def _summed_files(self) -> list[Summed]:
-        found: list[Summed] = []
+    def _summed_files(self) -> list[SummaryFile]:
+        found: list[SummaryFile] = []
         bases = [root.parent if root.is_file() else root for root in self.roots]
         names = [base.name for base in bases]
         for index, (root, base) in enumerate(zip(self.roots, bases, strict=True)):
@@ -187,11 +189,11 @@ class Library:
                 run = _run_label(base, name, summary.run_of(path))
                 stamp = (str(path), stat.st_mtime_ns, stat.st_size)
                 found.append(
-                    Summed(f"{index}/{path.relative_to(base).as_posix()}", path, run, stamp)
+                    SummaryFile(f"{index}/{path.relative_to(base).as_posix()}", path, run, stamp)
                 )
         return found
 
-    def _sum(self, files: Sequence[Summed]) -> None:
+    def _read_pending_facts(self, files: Sequence[SummaryFile]) -> None:
         with self._lock:
             pending = [file for file in files if file.stamp not in self._facts]
         if self._background and self._processes:
@@ -286,7 +288,7 @@ class GuiServer(http.server.ThreadingHTTPServer):
         bound = address[0].strip("[]").lower()
         if ":" in bound:
             self.address_family = socket.AF_INET6
-        super().__init__((bound, address[1]), Handler)
+        super().__init__((bound, address[1]), GuiRequestHandler)
         self.library = library
         hosts = set(LOOPBACK_HOSTS) | {host.strip("[]").lower() for host in allowed_hosts}
         if bound not in WILDCARD_HOSTS:
@@ -306,7 +308,7 @@ class GuiServer(http.server.ThreadingHTTPServer):
         return f"http://{host}:{self.server_address[1]}/"
 
 
-class Handler(http.server.BaseHTTPRequestHandler):
+class GuiRequestHandler(http.server.BaseHTTPRequestHandler):
     """Routes of the GUI: the page, its static files, and the JSON API."""
 
     server_version = f"LaneScope/{__version__}"
@@ -333,7 +335,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return _static("index.html")
         if url.path.startswith("/static/"):
             return _static(url.path.removeprefix("/static/"))
-        return _json(answer_get(self.app.library, url.path, _query(url.query)))
+        return _json_answer(answer_get(self.app.library, url.path, _query(url.query)))
 
     def _post(self) -> tuple[int, str, bytes]:
         if urllib.parse.urlsplit(self.path).path != "/api/whatif":
@@ -347,7 +349,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ValueError(f"the request body is no JSON ({error})") from error
-        return _json(answer_post(self.app.library, "/api/whatif", body))
+        return _json_answer(answer_post(self.app.library, "/api/whatif", body))
 
     def _respond(self, route: Callable[[], tuple[int, str, bytes]]) -> None:
         if not self._host_allowed():
@@ -413,7 +415,7 @@ def answer_get(library: Library, path: str, query: dict[str, str]) -> dict:
     route = TRACE_ROUTES.get(path)
     if route is None:
         raise NotFound(f"no route {path}")
-    trace, overview = library.load(_text(query, "id"))
+    trace, overview = library.load(_required_parameter(query, "id"))
     return route(trace, overview, query)
 
 
@@ -434,7 +436,9 @@ def _trace_route(trace: Trace, overview: dict, query: dict[str, str]) -> dict:
 
 
 def _patterns_route(trace: Trace, overview: dict, query: dict[str, str]) -> dict:
-    return trace_reports.patterns(trace, _integer(query, "pc"), _space(_text(query, "space")))
+    return trace_reports.patterns(
+        trace, _integer(query, "pc"), _space(_required_parameter(query, "space"))
+    )
 
 
 def _access_route(trace: Trace, overview: dict, query: dict[str, str]) -> dict:
@@ -443,14 +447,16 @@ def _access_route(trace: Trace, overview: dict, query: dict[str, str]) -> dict:
 
 def _buffer_route(trace: Trace, overview: dict, query: dict[str, str]) -> dict:
     if "size" in query:
-        return _buffer_facts(trace, _buffer(_text(query, "start"), _text(query, "size")))
+        return _buffer_facts(
+            trace, _buffer(_required_parameter(query, "start"), _required_parameter(query, "size"))
+        )
     return _buffer_facts(trace, infer_buffer(trace, _integer(query, "pc")))
 
 
 def _suggest_route(trace: Trace, overview: dict, query: dict[str, str]) -> dict:
     buffer = None
     if "size" in query:
-        buffer = _buffer(_text(query, "start"), _text(query, "size"))
+        buffer = _buffer(_required_parameter(query, "start"), _required_parameter(query, "size"))
     pc = _integer(query, "pc") if "pc" in query else None
     return trace_reports.suggest(trace, buffer, pc, SUGGESTIONS)
 
@@ -509,13 +515,13 @@ def _whatif(trace: Trace, overview: dict, buffer: Buffer, body: dict) -> dict:
     data = trace_reports.whatif(trace, buffer, change)
     element = _element_bytes(_widths(trace, buffer))
     data["element_bytes"] = element
-    data["forms"] = codegen.forms(buffer, change, element)
+    data["forms"] = codegen.layout_change_code(buffer, change, element)
     data["totals"] = _totals(overview, data["instructions"])
     row = body.get("row")
     if row is not None:
         if not isinstance(row, int) or isinstance(row, bool):
             raise ValueError("row must be an integer")
-        data["access"] = trace_reports.access(apply(trace, buffer, change), row)
+        data["access"] = trace_reports.access(apply_layout_change(trace, buffer, change), row)
     return data
 
 
@@ -605,14 +611,14 @@ def _query(text: str) -> dict[str, str]:
     return dict(pairs)
 
 
-def _text(query: dict[str, str], name: str) -> str:
+def _required_parameter(query: dict[str, str], name: str) -> str:
     if name not in query:
         raise ValueError(f"the request needs the parameter {name}")
     return query[name]
 
 
 def _integer(query: dict[str, str], name: str) -> int:
-    return _as_integer(name, _text(query, name))
+    return _as_integer(name, _required_parameter(query, name))
 
 
 def _as_integer(name: str, value: object) -> int:
@@ -682,7 +688,7 @@ def _static(name: str) -> tuple[int, str, bytes]:
     return 200, STATIC_TYPES[path.suffix], path.read_bytes()
 
 
-def _json(data: object) -> tuple[int, str, bytes]:
+def _json_answer(data: object) -> tuple[int, str, bytes]:
     payload = json.dumps(data, allow_nan=False, separators=(",", ":")).encode()
     return 200, "application/json", payload
 

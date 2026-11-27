@@ -4,7 +4,7 @@ import { renderDiagnosis } from "./diagnosis.js";
 import { $ } from "./dom.js";
 import { readControls, writeControls } from "./fix-form.js";
 import * as format from "./format.js";
-import { fixCurrent, latest, sameBuffer, state } from "./state.js";
+import { fixControlsMatchSelection, latest, sameBuffer, state } from "./state.js";
 import { scheduleWhatif } from "./whatif.js";
 
 // The buffer of the running search. Instructions of one buffer share its ranked fixes,
@@ -29,7 +29,7 @@ export function abortSuggestions() {
 }
 
 export function applySuggestion(item) {
-  if (!fixCurrent()) {
+  if (!fixControlsMatchSelection()) {
     return;
   }
   state.touched = true;

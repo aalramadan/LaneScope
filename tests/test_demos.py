@@ -2,7 +2,7 @@ import numpy as np
 
 from lanescope import demos, trace_reports
 from lanescope.fixes import layouts
-from lanescope.model.counters import count
+from lanescope.model.counters import count_instructions
 from lanescope.trace import Kind, Space
 
 
@@ -72,7 +72,7 @@ def test_demo_traces_name_their_files_and_kernels():
 
 def test_matmul_tile_ldmatrix_puts_the_eight_rows_of_each_matrix_on_one_bank():
     trace = demos.matmul_tile_trace()
-    (read,) = [counter for counter in count(trace) if counter.pc == demos.PC_READ_TILE]
+    (read,) = [counter for counter in count_instructions(trace) if counter.pc == demos.PC_READ_TILE]
     assert (read.achieved, read.ideal) == (32 * read.requests, 4 * read.requests)
 
 
@@ -111,7 +111,7 @@ def test_the_qk_chunk_store_of_the_llama_cpp_recording_takes_four_times_its_idea
     trace = demos.recorded_traces()["6_llama_cpp_indexer.npz"]
     stores = [
         counter
-        for counter in count(trace)
+        for counter in count_instructions(trace)
         if counter.space == Space.SHARED and trace.source_line(counter.pc)[0] == 147
     ]
     assert stores and all(counter.achieved == 4 * counter.ideal for counter in stores)
@@ -123,7 +123,7 @@ def test_the_gallery_lists_the_demo_traces_before_the_recordings():
 
 def test_the_histogram_demo_takes_extra_passes_that_follow_its_values():
     trace = demos.histogram_trace()
-    (atomic,) = [counter for counter in count(trace) if counter.pc == demos.PC_ADD_BIN]
+    (atomic,) = [counter for counter in count_instructions(trace) if counter.pc == demos.PC_ADD_BIN]
     assert atomic.excessive > 0
     assert atomic.levels >= 3
     same = demos.histogram_trace()

@@ -8,7 +8,7 @@ import pytest
 from lanescope.cuda import nvrtc, toolchain
 from lanescope.recorder import build
 
-TOOLS = toolchain.find()
+TOOLS = toolchain.find_toolchain()
 needs_tools = pytest.mark.skipif(
     TOOLS.sanitizer_include is None or TOOLS.compiler is None or TOOLS.nvrtc is None,
     reason="the Sanitizer API, a C++ compiler, and NVRTC are needed",
@@ -46,7 +46,9 @@ def test_the_patches_split_records_by_pc_from_sm_70_on(digits, splits):
 @needs_tools
 def test_a_cached_build_serves_a_new_folder_without_a_compile(tmp_path, monkeypatch):
     first = build.build_recorder(tmp_path / "first", "sm_89", TOOLS, cache=tmp_path / "cache")
-    monkeypatch.setattr(build, "_compile", lambda *args: pytest.fail("the build ran again"))
+    monkeypatch.setattr(
+        build, "_compile_recorder_files", lambda *args: pytest.fail("the build ran again")
+    )
     second = build.build_recorder(tmp_path / "second", "sm_89", TOOLS, cache=tmp_path / "cache")
     assert second.library == tmp_path / "second" / build.LIBRARY_NAME
     assert second.library.read_bytes() == first.library.read_bytes()
@@ -179,7 +181,7 @@ def test_a_cache_entry_that_another_recording_fills_first_serves_the_build(tmp_p
         return mine(out_dir, arch, number, tools)
 
     (entry.parent / "theirs").mkdir(parents=True)
-    monkeypatch.setattr(build, "_compile", racing_compile)
+    monkeypatch.setattr(build, "_compile_recorder_files", racing_compile)
     result = build.build_recorder(tmp_path / "out", "sm_89", tools, cache=cache)
     assert result.library.read_text() == "theirs"
     assert sorted(path.name for path in entry.iterdir()) == [
@@ -191,7 +193,9 @@ def test_a_cache_entry_that_another_recording_fills_first_serves_the_build(tmp_p
 
 def test_a_failed_compile_leaves_neither_an_entry_nor_its_staging_folder(tmp_path, monkeypatch):
     tools, cache = stand_in_tools(tmp_path), tmp_path / "cache"
-    monkeypatch.setattr(build, "_compile", stand_in_compile("", fails_under=tmp_path))
+    monkeypatch.setattr(
+        build, "_compile_recorder_files", stand_in_compile("", fails_under=tmp_path)
+    )
     with pytest.raises(build.BuildError, match="No space left"):
         build.build_recorder(tmp_path / "out", "sm_89", tools, cache=cache)
     assert list((cache / "recorder").iterdir()) == []
@@ -199,7 +203,9 @@ def test_a_failed_compile_leaves_neither_an_entry_nor_its_staging_folder(tmp_pat
 
 def test_a_compile_that_fails_in_the_cache_falls_back_to_the_folder(tmp_path, monkeypatch):
     tools, cache = stand_in_tools(tmp_path), tmp_path / "cache"
-    monkeypatch.setattr(build, "_compile", stand_in_compile("local", fails_under=cache))
+    monkeypatch.setattr(
+        build, "_compile_recorder_files", stand_in_compile("local", fails_under=cache)
+    )
     result = build.build_recorder(tmp_path / "out", "sm_89", tools, cache=cache)
     assert result.library == tmp_path / "out" / build.LIBRARY_NAME
     assert result.library.read_text() == "local"
@@ -211,7 +217,7 @@ def test_a_cache_entry_with_an_empty_library_is_built_again(tmp_path, monkeypatc
     entry = cache / "recorder" / build._build_key("sm_89", tools)
     entry.mkdir(parents=True)
     (entry / build.LIBRARY_NAME).write_text("")
-    monkeypatch.setattr(build, "_compile", stand_in_compile("fresh"))
+    monkeypatch.setattr(build, "_compile_recorder_files", stand_in_compile("fresh"))
     result = build.build_recorder(tmp_path / "out", "sm_89", tools, cache=cache)
     assert result.library.read_text() == "fresh"
     assert result.patches.read_text() == "fresh"
@@ -220,7 +226,7 @@ def test_a_cache_entry_with_an_empty_library_is_built_again(tmp_path, monkeypatc
 
 def test_a_build_from_the_cache_puts_a_new_file_in_place_of_the_library(tmp_path, monkeypatch):
     tools, cache, out = stand_in_tools(tmp_path), tmp_path / "cache", tmp_path / "out"
-    monkeypatch.setattr(build, "_compile", stand_in_compile("library"))
+    monkeypatch.setattr(build, "_compile_recorder_files", stand_in_compile("library"))
     first = build.build_recorder(out, "sm_89", tools, cache=cache)
     with open(first.library) as mapped:
         inode = os.fstat(mapped.fileno()).st_ino
@@ -281,7 +287,7 @@ def make_toolkit(root):
 
 def test_find_takes_every_tool_from_one_complete_toolkit(tmp_path):
     make_toolkit(tmp_path)
-    found = toolchain.find({"CUDA_HOME": str(tmp_path), "PATH": ""})
+    found = toolchain.find_toolchain({"CUDA_HOME": str(tmp_path), "PATH": ""})
     assert found.nvcc == tmp_path / "bin" / "nvcc"
     assert found.sanitizer_lib == tmp_path / "compute-sanitizer"
     assert found.nvrtc == tmp_path / "lib64" / "libnvrtc.so.12"
@@ -314,8 +320,8 @@ def test_find_takes_the_wheels_over_a_complete_toolkit_on_request(tmp_path, monk
         toolchain, "_wheel_dirs", lambda package: [wheels[package]] if package in wheels else []
     )
     environ = {"CUDA_HOME": str(tmp_path / "toolkit"), "PATH": ""}
-    assert toolchain.find(environ).nvcc == tmp_path / "toolkit" / "bin" / "nvcc"
-    found = toolchain.find(environ | {"LANESCOPE_USE_WHEELS": "1"})
+    assert toolchain.find_toolchain(environ).nvcc == tmp_path / "toolkit" / "bin" / "nvcc"
+    found = toolchain.find_toolchain(environ | {"LANESCOPE_USE_WHEELS": "1"})
     assert found.nvcc is None
     assert found.sanitizer_lib == wheels["nvidia.cuda_sanitizer_api"] / "lib"
     assert found.nvrtc == wheels["nvidia.cuda_nvrtc"] / "lib" / "libnvrtc.so.12"
@@ -340,8 +346,8 @@ def test_find_takes_the_cuda_13_wheels_as_one_toolkit_after_a_complete_toolkit(
         toolchain, "_wheel_dirs", lambda package: [wheel] if package == "nvidia.cu13" else []
     )
     environ = {"CUDA_HOME": str(tmp_path / "toolkit"), "PATH": ""}
-    assert toolchain.find(environ).nvcc == tmp_path / "toolkit" / "bin" / "nvcc"
-    found = toolchain.find(environ | {"LANESCOPE_USE_WHEELS": "1"})
+    assert toolchain.find_toolchain(environ).nvcc == tmp_path / "toolkit" / "bin" / "nvcc"
+    found = toolchain.find_toolchain(environ | {"LANESCOPE_USE_WHEELS": "1"})
     assert found.nvcc == wheel / "bin" / "nvcc"
     assert found.sanitizer_lib == wheel / "compute-sanitizer"
     assert found.nvrtc == wheel / "lib" / "libnvrtc.so.13"
@@ -355,7 +361,9 @@ def test_find_skips_an_incomplete_toolkit_and_an_nvcc_on_the_path(tmp_path, monk
     stray = tmp_path / "path" / "nvcc"
     stray.write_text("")
     stray.chmod(0o755)
-    found = toolchain.find({"CUDA_HOME": str(tmp_path / "toolkit"), "PATH": str(tmp_path / "path")})
+    found = toolchain.find_toolchain(
+        {"CUDA_HOME": str(tmp_path / "toolkit"), "PATH": str(tmp_path / "path")}
+    )
     assert found.nvcc is None
 
 
@@ -374,7 +382,7 @@ def test_find_takes_cupti_from_the_cuda_13_wheel(tmp_path, monkeypatch):
     monkeypatch.setattr(
         toolchain, "_wheel_dirs", lambda package: [wheel] if package == "nvidia.cu13" else []
     )
-    found = toolchain.find({"PATH": ""})
+    found = toolchain.find_toolchain({"PATH": ""})
     assert found.cupti_include == wheel / "include"
     assert found.cupti_lib == wheel / "lib" / "libcupti.so.13"
 
@@ -385,7 +393,7 @@ def test_find_takes_cupti_from_the_extras_of_a_toolkit(tmp_path, monkeypatch):
     for part in ("extras/CUPTI/include/cupti.h", "extras/CUPTI/lib64/libcupti.so.12"):
         (tmp_path / part).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / part).write_text("")
-    found = toolchain.find({"CUDA_HOME": str(tmp_path), "PATH": ""})
+    found = toolchain.find_toolchain({"CUDA_HOME": str(tmp_path), "PATH": ""})
     assert found.cupti_include == tmp_path / "extras" / "CUPTI" / "include"
     assert found.cupti_lib == tmp_path / "extras" / "CUPTI" / "lib64" / "libcupti.so.12"
 
@@ -400,7 +408,7 @@ def test_find_takes_cupti_from_the_cuda_12_wheel_beside_the_other_wheels(tmp_pat
     monkeypatch.setattr(
         toolchain, "_wheel_dirs", lambda package: [wheels[package]] if package in wheels else []
     )
-    found = toolchain.find({"PATH": ""})
+    found = toolchain.find_toolchain({"PATH": ""})
     assert found.cupti_include == cupti / "include"
     assert found.cupti_lib == cupti / "lib" / "libcupti.so.12"
 
@@ -410,7 +418,7 @@ def test_find_leaves_cupti_out_when_its_headers_or_its_library_are_missing(tmp_p
     make_toolkit(tmp_path)
     (tmp_path / "extras" / "CUPTI" / "include").mkdir(parents=True)
     (tmp_path / "extras" / "CUPTI" / "include" / "cupti.h").write_text("")
-    found = toolchain.find({"CUDA_HOME": str(tmp_path), "PATH": ""})
+    found = toolchain.find_toolchain({"CUDA_HOME": str(tmp_path), "PATH": ""})
     assert (found.cupti_include, found.cupti_lib) == (None, None)
 
 
@@ -431,13 +439,13 @@ def test_find_takes_nvdisasm_from_the_wheel_before_a_toolkit(tmp_path, monkeypat
     for copy in (tmp_path / "toolkit" / "bin" / "nvdisasm", wheel / "bin" / "nvdisasm"):
         copy.chmod(0o755)
     monkeypatch.setattr(toolchain, "_wheel_dirs", wheels(True))
-    found = toolchain.find(environ)
+    found = toolchain.find_toolchain(environ)
     assert found.nvdisasm == wheel / "bin" / "nvdisasm"
     assert found.disassemblers == (
         wheel / "bin" / "nvdisasm",
         tmp_path / "toolkit" / "bin" / "nvdisasm",
     )
     monkeypatch.setattr(toolchain, "_wheel_dirs", wheels(False))
-    assert toolchain.find(environ).nvdisasm == tmp_path / "toolkit" / "bin" / "nvdisasm"
+    assert toolchain.find_toolchain(environ).nvdisasm == tmp_path / "toolkit" / "bin" / "nvdisasm"
     (tmp_path / "toolkit" / "bin" / "nvdisasm").chmod(0o644)
-    assert toolchain.find(environ).disassemblers == ()
+    assert toolchain.find_toolchain(environ).disassemblers == ()

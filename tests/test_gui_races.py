@@ -71,7 +71,7 @@ def test_a_prediction_from_before_a_trace_switch_never_lands(page, monkeypatch, 
 
 
 def test_an_abort_while_the_answer_arrives_shows_no_error(page, monkeypatch):
-    send = gui.Handler._send
+    send = gui.GuiRequestHandler._send
 
     def slow_body(handler, status, kind, payload):
         if not handler.path.startswith("/api/patterns"):
@@ -88,7 +88,7 @@ def test_an_abort_while_the_answer_arrives_shows_no_error(page, monkeypatch):
         except (BrokenPipeError, ConnectionResetError):
             handler.close_connection = True
 
-    monkeypatch.setattr(gui.Handler, "_send", slow_body)
+    monkeypatch.setattr(gui.GuiRequestHandler, "_send", slow_body)
     page.locator('#instruction-rows tr[data-key="0xb0/shared"]').click()
     page.wait_for_timeout(300)
     page.locator('#instruction-rows tr[data-key="0xa0/global"]').click()

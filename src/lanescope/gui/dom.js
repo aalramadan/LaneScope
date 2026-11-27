@@ -11,7 +11,7 @@ export function stat(label, value, title = "") {
   return wrapper;
 }
 
-export function cell(content, className) {
+export function tableCell(content, className) {
   const element = document.createElement("td");
   element.className = className;
   element.textContent = content;
@@ -29,7 +29,7 @@ export function meter(value, peak) {
 }
 
 // A second, smaller line of a table cell, such as the ideal count under a count.
-export function detail(text, className = "where") {
+export function cellSubline(text, className = "where") {
   const element = document.createElement("span");
   element.className = className;
   element.textContent = text;

@@ -56,7 +56,9 @@ def fake_folder(tmp_path, name, rounds, **plan):
     plan_path.write_text(
         json.dumps({"name": name, "log": str(tmp_path / "log.txt"), "rounds": rounds} | plan)
     )
-    kernel_times.write_run(folder, [sys.executable, str(script), str(plan_path)], tmp_path)
+    kernel_times.write_stored_command(
+        folder, [sys.executable, str(script), str(plan_path)], tmp_path
+    )
     return folder
 
 
@@ -65,24 +67,27 @@ def logged_runs(tmp_path):
 
 
 def test_write_run_stores_the_command_and_its_folder(tmp_path):
-    kernel_times.write_run(tmp_path / "run1", ["./app", "--size", "64"], tmp_path)
+    kernel_times.write_stored_command(tmp_path / "run1", ["./app", "--size", "64"], tmp_path)
     assert json.loads((tmp_path / "run1" / "run.json").read_text()) == {
         "format": 1,
         "command": ["./app", "--size", "64"],
         "cwd": str(tmp_path),
     }
-    assert kernel_times.read_run(tmp_path / "run1") == (["./app", "--size", "64"], tmp_path)
+    assert kernel_times.read_stored_command(tmp_path / "run1") == (
+        ["./app", "--size", "64"],
+        tmp_path,
+    )
 
 
 def test_write_run_removes_the_times_of_an_earlier_command(tmp_path):
     (tmp_path / "kernel-times.json").write_text("{}")
-    kernel_times.write_run(tmp_path, ["./app"])
+    kernel_times.write_stored_command(tmp_path, ["./app"])
     assert not (tmp_path / "kernel-times.json").exists()
 
 
 def test_read_run_of_a_folder_without_a_stored_command_names_both_remedies(tmp_path):
     with pytest.raises(ValueError, match="holds no run.json") as error:
-        kernel_times.read_run(tmp_path)
+        kernel_times.read_stored_command(tmp_path)
     assert "lanescope record" in str(error.value)
     assert f"lanescope time {tmp_path} -- ./my_app" in str(error.value)
 
@@ -102,7 +107,7 @@ def test_read_run_of_a_folder_without_a_stored_command_names_both_remedies(tmp_p
 def test_read_run_rejects_a_stored_command_of_another_shape(tmp_path, text):
     (tmp_path / "run.json").write_text(text)
     with pytest.raises(ValueError, match="is no stored command"):
-        kernel_times.read_run(tmp_path)
+        kernel_times.read_stored_command(tmp_path)
 
 
 def test_timing_runs_the_folders_in_turns_once_per_round(tmp_path):
@@ -139,8 +144,8 @@ def test_timing_writes_the_launches_and_nanoseconds_of_each_round(tmp_path):
 
 def test_timing_runs_each_command_in_its_stored_folder(tmp_path):
     folder = fake_folder(tmp_path, "run", [{"k": times(1, 10)}])
-    command, _ = kernel_times.read_run(folder)
-    kernel_times.write_run(folder, command, folder)
+    command, _ = kernel_times.read_stored_command(folder)
+    kernel_times.write_stored_command(folder, command, folder)
     kernel_times.time_folders([folder], tmp_path / "timer.so", 1)
     assert (tmp_path / "log.txt").read_text() == f"run {folder}\n"
 
@@ -165,7 +170,7 @@ def test_the_times_of_every_process_of_a_run_add_up(tmp_path):
         "        json.dump({'format': 1, 'skipped': 1, 'dropped': 2, 'kernels': kernels}, file)\n"
         "open(f'{base}.103.part', 'w').write('half written')\n"
     )
-    kernel_times.write_run(folder, [sys.executable, str(script)])
+    kernel_times.write_stored_command(folder, [sys.executable, str(script)])
     (result,) = kernel_times.time_folders([folder], tmp_path / "timer.so", 1)
     assert result["kernels"]["k"] == {
         "launches": [2],
@@ -183,7 +188,7 @@ def test_a_failing_command_names_its_folder_and_status_and_writes_no_times(
     first = fake_folder(tmp_path, "first", [{"k": times(1, 10)}])
     failing = fake_folder(tmp_path, "failing", [{"k": times(1, 10)}], stderr="out of memory\n")
     if status < 0:
-        kernel_times.write_run(failing, ["sh", "-c", f"kill -{-status} $$"], tmp_path)
+        kernel_times.write_stored_command(failing, ["sh", "-c", f"kill -{-status} $$"], tmp_path)
     else:
         plan = json.loads((tmp_path / "failing-plan.json").read_text())
         (tmp_path / "failing-plan.json").write_text(json.dumps(plan | {"status": status}))
@@ -206,7 +211,7 @@ def test_a_command_that_leaves_no_times_stops_the_timing(tmp_path):
 
 
 def test_a_command_that_cannot_start_names_its_folder(tmp_path):
-    kernel_times.write_run(tmp_path, [str(tmp_path / "missing-program")])
+    kernel_times.write_stored_command(tmp_path, [str(tmp_path / "missing-program")])
     with pytest.raises(ValueError, match=f"the command of {tmp_path} cannot start"):
         kernel_times.time_folders([tmp_path], tmp_path / "timer.so", 1)
 
@@ -216,7 +221,7 @@ def test_a_timer_file_that_is_no_json_stops_the_timing(tmp_path):
     script.write_text(
         "import os\nopen(os.environ['LANESCOPE_KERNEL_TIMES'] + '.7', 'w').write('{')\n"
     )
-    kernel_times.write_run(tmp_path, [sys.executable, str(script)])
+    kernel_times.write_stored_command(tmp_path, [sys.executable, str(script)])
     with pytest.raises(ValueError, match="unreadable file"):
         kernel_times.time_folders([tmp_path], tmp_path / "timer.so", 1)
 
@@ -230,7 +235,7 @@ def test_the_timed_program_gets_the_timer_and_the_file_for_its_times(tmp_path):
         "times = {'launches': 1, 'nanoseconds': 1, 'shortest': 1, 'longest': 1}\n"
         "open(f'{base}.1', 'w').write(json.dumps({'kernels': {kernel: times}}))\n"
     )
-    kernel_times.write_run(tmp_path, [sys.executable, str(script)])
+    kernel_times.write_stored_command(tmp_path, [sys.executable, str(script)])
     (result,) = kernel_times.time_folders([tmp_path], tmp_path / "timer.so", 1)
     assert list(result["kernels"]) == [str(tmp_path / "timer.so")]
 
@@ -300,7 +305,7 @@ def _has_gpu() -> bool:
     return True
 
 
-TOOLS = toolchain.find()
+TOOLS = toolchain.find_toolchain()
 needs_gpu = pytest.mark.skipif(
     TOOLS.nvrtc is None or TOOLS.cupti_lib is None or shutil.which("g++") is None or not _has_gpu(),
     reason="NVRTC, CUPTI, g++, and a GPU are needed",
@@ -317,12 +322,12 @@ def test_the_timer_times_every_kernel_that_a_recording_of_the_bench_traces(tmp_p
     command = [sys.executable, "-m", "lanescope", "bench", "run", "--cubin", str(cubin)]
     recording = tmp_path / "recording"
     built = build_recorder(tmp_path / "build", arch, TOOLS)
-    assert capture.record(command, built, recording) == 0
+    assert capture.record_command(command, built, recording) == 0
     traced: dict[str, int] = {}
     for path in capture.import_recording(recording, TOOLS.disassemblers):
         kernel = read_metadata(path)["kernel"]
         traced[kernel] = traced.get(kernel, 0) + 1
-    kernel_times.write_run(recording, command)
+    kernel_times.write_stored_command(recording, command)
     timer = build_kernel_timer(tmp_path / "build", TOOLS)
     (result,) = kernel_times.time_folders([recording], timer, 2)
     assert set(result["kernels"]) == set(traced)

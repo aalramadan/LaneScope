@@ -9,7 +9,7 @@ import tempfile
 from collections.abc import Sequence
 
 from lanescope.cuda import nvrtc
-from lanescope.cuda.toolchain import Toolchain, find
+from lanescope.cuda.toolchain import Toolchain, find_toolchain
 
 RECORDER_DIR = pathlib.Path(__file__).parent
 LIBRARY_NAME = "liblanescope_recorder.so"
@@ -53,15 +53,15 @@ def build_recorder(
     the same architecture are copied in place of a new compile, which takes a second or more.
     """
     number = check_arch(arch)
-    tools = tools or find()
+    tools = tools or find_toolchain()
     tools.require("sanitizer_include", "sanitizer_lib", "cuda_include", "compiler")
     assert tools.sanitizer_lib and tools.sanitizer_include and tools.cuda_include and tools.compiler
     out_dir.mkdir(parents=True, exist_ok=True)
     if cache is None:
-        return _compile(out_dir, arch, number, tools)
+        return _compile_recorder_files(out_dir, arch, number, tools)
     entry = cache / "recorder" / _build_key(arch, tools)
     try:
-        _fill(entry, arch, number, tools)
+        _build_cache_entry(entry, arch, number, tools)
         for path in entry.iterdir():
             # A new file in place of the old one spares a program that still maps the library.
             staged = out_dir / f".{path.name}.part"
@@ -70,7 +70,7 @@ def build_recorder(
     except (OSError, BuildError):
         # A cache that cannot serve the build, such as one on a full disk, leaves the
         # compile to out_dir, where a real compiler error shows again.
-        return _compile(out_dir, arch, number, tools)
+        return _compile_recorder_files(out_dir, arch, number, tools)
     patches = out_dir / _patches_name(arch, tools)
     return RecorderBuild(out_dir / LIBRARY_NAME, patches, tools.sanitizer_lib / SANITIZER_LIBRARY)
 
@@ -83,7 +83,7 @@ def build_kernel_timer(
     With a cache folder, a library from the same sources and tools is copied in place of a
     new compile, as for the recorder.
     """
-    tools = tools or find()
+    tools = tools or find_toolchain()
     tools.require("cupti_include", "cupti_lib", "cuda_include", "compiler")
     out_dir.mkdir(parents=True, exist_ok=True)
     library = out_dir / TIMER_LIBRARY
@@ -162,7 +162,7 @@ def _add_files(digest, paths: Sequence[pathlib.Path | None]) -> None:
             digest.update(f"{path.resolve()} {info.st_size} {info.st_mtime_ns}".encode())
 
 
-def _fill(entry: pathlib.Path, arch: str, number: str, tools: Toolchain) -> None:
+def _build_cache_entry(entry: pathlib.Path, arch: str, number: str, tools: Toolchain) -> None:
     built = (entry / LIBRARY_NAME, entry / _patches_name(arch, tools))
     if all(path.is_file() and path.stat().st_size > 0 for path in built):
         return
@@ -173,7 +173,7 @@ def _fill(entry: pathlib.Path, arch: str, number: str, tools: Toolchain) -> None
     # recording sees half of one.
     staging = pathlib.Path(tempfile.mkdtemp(prefix=".build-", dir=entry.parent))
     try:
-        _compile(staging, arch, number, tools)
+        _compile_recorder_files(staging, arch, number, tools)
         for path in (*staging.iterdir(), staging):
             descriptor = os.open(path, os.O_RDONLY)
             try:
@@ -190,7 +190,9 @@ def _fill(entry: pathlib.Path, arch: str, number: str, tools: Toolchain) -> None
         shutil.rmtree(staging, ignore_errors=True)
 
 
-def _compile(out_dir: pathlib.Path, arch: str, number: str, tools: Toolchain) -> RecorderBuild:
+def _compile_recorder_files(
+    out_dir: pathlib.Path, arch: str, number: str, tools: Toolchain
+) -> RecorderBuild:
     assert tools.sanitizer_lib and tools.sanitizer_include and tools.cuda_include and tools.compiler
     library = out_dir / LIBRARY_NAME
     _run([

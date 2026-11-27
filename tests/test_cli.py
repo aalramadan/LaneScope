@@ -172,10 +172,10 @@ def test_suggest_json_gives_the_inferred_buffer(trace_path, capsys):
 
 def test_bench_list_prints_every_case(capsys):
     assert main(["bench", "list"]) == 0
-    assert len(capsys.readouterr().out.splitlines()) == len(calibration.launches())
+    assert len(capsys.readouterr().out.splitlines()) == len(calibration.launch_order_cases())
 
 
-@pytest.mark.skipif(toolchain.find().nvrtc is None, reason="NVRTC is needed")
+@pytest.mark.skipif(toolchain.find_toolchain().nvrtc is None, reason="NVRTC is needed")
 def test_bench_build_writes_the_cubin_and_its_source_without_the_driver(
     tmp_path, monkeypatch, capsys
 ):
@@ -234,9 +234,9 @@ def fake_recorder(monkeypatch, status, launches):
         return status
 
     monkeypatch.setattr(record_program, "build_recorder", lambda out, arch, cache: None)
-    monkeypatch.setattr(capture, "record", run)
+    monkeypatch.setattr(capture, "record_command", run)
     tools = toolchain.Toolchain(*[None] * 9, disassemblers=())
-    monkeypatch.setattr(record_program, "find", lambda: tools)
+    monkeypatch.setattr(record_program, "find_toolchain", lambda: tools)
     return settings
 
 
@@ -475,7 +475,7 @@ def test_import_reads_lines_with_the_next_nvdisasm_when_one_fails(tmp_path, monk
     (tmp_path / "launch-0.json").write_text(json.dumps(info))
     (tmp_path / "module-0.cubin").write_bytes(b"")
     tools = toolchain.Toolchain(*[None] * 9, disassemblers=(failing, working))
-    monkeypatch.setattr(record_program, "find", lambda: tools)
+    monkeypatch.setattr(record_program, "find_toolchain", lambda: tools)
     assert main(["import", str(tmp_path)]) == 0
     assert Trace.load(tmp_path / "trace-0.npz").metadata["lines"] == {"0x10": 3}
 
@@ -489,7 +489,7 @@ def test_import_without_nvdisasm_says_that_instruction_rules_fall_back(
     info = {"format": 1, "kernel": "k", "module": 0, "function_pc": 0x1000, "record_bytes": 280}
     (tmp_path / "launch-0.json").write_text(json.dumps(info))
     tools = toolchain.Toolchain(*[None] * 9, disassemblers=())
-    monkeypatch.setattr(record_program, "find", lambda: tools)
+    monkeypatch.setattr(record_program, "find_toolchain", lambda: tools)
     assert main(["import", str(tmp_path)]) == 0
     assert "nvdisasm was not found" in capsys.readouterr().err
 
@@ -738,7 +738,7 @@ def test_record_with_a_disassembler_but_no_line_tables_advises_lineinfo(
 ):
     fake_recorder(monkeypatch, status=0, launches=1)
     tools = toolchain.Toolchain(*[None] * 9, disassemblers=(pathlib.Path("nvdisasm"),))
-    monkeypatch.setattr(record_program, "find", lambda: tools)
+    monkeypatch.setattr(record_program, "find_toolchain", lambda: tools)
     assert run_record(tmp_path) == 0
     err = capsys.readouterr().err
     assert "no source lines in 1 of 1 launch, since their kernels were built without" in err

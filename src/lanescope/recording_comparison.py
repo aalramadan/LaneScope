@@ -26,7 +26,7 @@ def times_folder(path: pathlib.Path) -> pathlib.Path:
     return path if path.is_dir() else path.parent
 
 
-def compare(before: dict, after: dict) -> dict:
+def compare_summaries(before: dict, after: dict) -> dict:
     """Return two summaries of one run each, compared by kernel template.
 
     Each row gives the launches, the counts, and the time of each side, with the speedup
@@ -39,15 +39,19 @@ def compare(before: dict, after: dict) -> dict:
     rows = []
     for template, entry in first.items():
         if template in second:
-            row = {"template": template} | _row(entry, second[template])
+            row = {"template": template} | _kernel_row(entry, second[template])
             rows.append(row | {"instances": _instances(entry, second[template])})
     rows.sort(key=_row_order)
     return {
-        "timed": {"before": _rounds(before), "after": _rounds(after)},
+        "timed": {"before": _timed_rounds(before), "after": _timed_rounds(after)},
         "kernels": rows,
-        "only_before": [_named_side(entry) for name, entry in first.items() if name not in second],
-        "only_after": [_named_side(entry) for name, entry in second.items() if name not in first],
-        "total": _total(before, after),
+        "only_before": [
+            _unmatched_kernel(entry) for name, entry in first.items() if name not in second
+        ],
+        "only_after": [
+            _unmatched_kernel(entry) for name, entry in second.items() if name not in first
+        ],
+        "total": _total_row(before, after),
     }
 
 
@@ -57,19 +61,19 @@ def _instances(before: dict, after: dict) -> list[dict]:
         return []
     second = {instance["kernel"]: instance for instance in after["instances"]}
     return [
-        {"kernel": instance["kernel"]} | _row(instance, second[instance["kernel"]])
+        {"kernel": instance["kernel"]} | _kernel_row(instance, second[instance["kernel"]])
         for instance in before["instances"]
         if instance["kernel"] in second
     ]
 
 
-def _row(before: dict, after: dict) -> dict:
+def _kernel_row(before: dict, after: dict) -> dict:
     """Return the row of one template or one instance, named as both sides name it."""
-    first, second = _side(before), _side(after)
+    first, second = _side_summary(before), _side_summary(after)
     same = before["full_name"] == after["full_name"]
     template = kernel_names.template_name(before["full_name"])
     return {
-        "name": before["name"] if same else kernel_names.short(template),
+        "name": before["name"] if same else kernel_names.short_name(template),
         "full_name": before["full_name"] if same else template,
         "before": first,
         "after": second,
@@ -77,7 +81,7 @@ def _row(before: dict, after: dict) -> dict:
     }
 
 
-def _side(entry: dict) -> dict:
+def _side_summary(entry: dict) -> dict:
     """Return what a row gives of one side: the launches, the counts, and the time."""
     rounds = entry["round_ns"]
     return {
@@ -88,12 +92,12 @@ def _side(entry: dict) -> dict:
     }
 
 
-def _named_side(entry: dict) -> dict:
+def _unmatched_kernel(entry: dict) -> dict:
     return {
         "template": entry["template"],
         "name": entry["name"],
         "full_name": entry["full_name"],
-    } | _side(entry)
+    } | _side_summary(entry)
 
 
 def _time_change(before: dict, after: dict) -> dict:
@@ -111,7 +115,7 @@ def _time_change(before: dict, after: dict) -> dict:
     }
 
 
-def _total(before: dict, after: dict) -> dict:
+def _total_row(before: dict, after: dict) -> dict:
     sides = {}
     for name, data in (("before", before), ("after", after)):
         timed = data["times"][0] if data["times"] else None
@@ -125,7 +129,7 @@ def _total(before: dict, after: dict) -> dict:
     return sides | {"time": _time_change(sides["before"], sides["after"])}
 
 
-def _rounds(data: dict) -> int | None:
+def _timed_rounds(data: dict) -> int | None:
     return data["times"][0]["rounds"] if data["times"] else None
 
 

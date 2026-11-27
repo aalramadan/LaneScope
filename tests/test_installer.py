@@ -51,10 +51,10 @@ def test_releases_reads_every_manifest_name_once():
 
 def test_pick_takes_the_newest_release_the_driver_supports():
     found = installer.releases(INDEX)
-    assert installer.pick(found, (12, 9)) == (12, 9, 1)
-    assert installer.pick(found, (13, 2)) == (13, 0, 0)
+    assert installer.newest_supported_release(found, (12, 9)) == (12, 9, 1)
+    assert installer.newest_supported_release(found, (13, 2)) == (13, 0, 0)
     with pytest.raises(ValueError, match="at or below 12.4"):
-        installer.pick(found, (12, 4))
+        installer.newest_supported_release(found, (12, 4))
 
 
 @pytest.mark.parametrize(
@@ -73,7 +73,7 @@ def test_pick_takes_the_newest_release_the_driver_supports():
 )
 def test_archive_rejects_a_manifest_without_a_safe_entry(manifest):
     with pytest.raises(ValueError):
-        installer.archive(manifest)
+        installer.ncu_archive_entry(manifest)
 
 
 def test_install_unpacks_the_checked_archive_and_reuses_it(tmp_path, monkeypatch):
@@ -123,7 +123,7 @@ def test_toolchain_finds_the_installed_ncu_in_the_cache_of_home(tmp_path, monkey
     monkeypatch.setattr(installer, "_text", _local_text(redist))
     home = tmp_path / "home"
     found = installer.install((12, 9), home / ".cache" / "lanescope", base_url(redist))
-    assert toolchain.find({"HOME": str(home), "PATH": ""}).ncu == found
+    assert toolchain.find_toolchain({"HOME": str(home), "PATH": ""}).ncu == found
 
 
 def test_toolchain_prefers_the_downloaded_ncu_to_one_on_the_path(tmp_path, monkeypatch):
@@ -138,7 +138,7 @@ def test_toolchain_prefers_the_downloaded_ncu_to_one_on_the_path(tmp_path, monke
     other.write_text("#!/bin/sh\n")
     other.chmod(0o755)
     environ = {"LANESCOPE_CACHE": str(cache), "PATH": str(other.parent)}
-    assert toolchain.find(environ).ncu == found
+    assert toolchain.find_toolchain(environ).ncu == found
 
 
 def test_install_replaces_a_damaged_copy_on_request(tmp_path, monkeypatch):
@@ -156,7 +156,7 @@ def test_install_replaces_a_damaged_copy_on_request(tmp_path, monkeypatch):
 
 def test_get_ncu_reports_an_ncu_that_is_found_without_downloading(monkeypatch, capsys, tmp_path):
     ncu = tmp_path / "ncu"
-    monkeypatch.setattr(nsight_check, "find", lambda: _tools(ncu))
+    monkeypatch.setattr(nsight_check, "find_toolchain", lambda: _tools(ncu))
     monkeypatch.setattr(installer, "install", lambda *args: pytest.fail("no download expected"))
     assert main(["get-ncu"]) == 0
     assert str(ncu) in capsys.readouterr().out
@@ -164,7 +164,7 @@ def test_get_ncu_reports_an_ncu_that_is_found_without_downloading(monkeypatch, c
 
 def test_get_ncu_downloads_for_a_given_cuda_version_even_beside_another_ncu(monkeypatch, tmp_path):
     calls = []
-    monkeypatch.setattr(nsight_check, "find", lambda: _tools(tmp_path / "ncu"))
+    monkeypatch.setattr(nsight_check, "find_toolchain", lambda: _tools(tmp_path / "ncu"))
     monkeypatch.setattr(nsight_check, "cache_folder", lambda: tmp_path / "cache")
 
     def install(cuda, folder, replace=False):
@@ -241,4 +241,4 @@ def test_toolchain_takes_the_copy_of_the_last_install_over_a_newer_one(tmp_path,
     newer = installer.install((12, 9), cache, base_url(redist))
     older = installer.install((12, 4), cache, base_url(redist))
     assert newer != older
-    assert toolchain.find({"LANESCOPE_CACHE": str(cache), "PATH": ""}).ncu == older
+    assert toolchain.find_toolchain({"LANESCOPE_CACHE": str(cache), "PATH": ""}).ncu == older

@@ -54,11 +54,11 @@ export function selectionToken() {
 
 // The fix controls belong to the selection that drew them. A move made while another
 // instruction loads would send the old buffer for the new instruction.
-export function fixCurrent() {
+export function fixControlsMatchSelection() {
   return state.fixToken === selection && state.selected?.space === "shared";
 }
 
-export function current(token) {
+export function isCurrentSelection(token) {
   return token === selection;
 }
 

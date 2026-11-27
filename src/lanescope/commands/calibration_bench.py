@@ -10,19 +10,19 @@ def add_parsers(commands: argparse._SubParsersAction) -> None:
     bench = commands.add_parser("bench", help="calibration kernels with known lane patterns")
     steps = bench.add_subparsers(required=True, metavar="step")
     listing = steps.add_parser("list", help="print every case in launch order")
-    listing.set_defaults(run=_list)
+    listing.set_defaults(run=_list_cases)
     compiling = steps.add_parser("build", help="compile the kernels with NVRTC, without a GPU")
     compiling.add_argument("--arch", required=True, help="such as sm_89")
     compiling.add_argument(
         "--out", type=pathlib.Path, required=True, help="cubin file, with its .cu source beside it"
     )
-    compiling.set_defaults(run=_build)
+    compiling.set_defaults(run=_compile_kernels)
     running = steps.add_parser("run", help="run every case once on the local GPU")
     running.add_argument(
         "--cubin", type=pathlib.Path, required=True, help="kernels for this GPU from bench build"
     )
     add_random_options(running)
-    running.set_defaults(run=_run)
+    running.set_defaults(run=_run_cases)
     timing = steps.add_parser(
         "time", help="time the transposes and the matmuls with their plain and changed layouts"
     )
@@ -31,7 +31,7 @@ def add_parsers(commands: argparse._SubParsersAction) -> None:
     )
     timing.add_argument(
         "--size",
-        type=argument_types.size,
+        type=argument_types.positive_count,
         default=8192,
         help="rows and columns of the matrix, a multiple of 32",
     )
@@ -42,29 +42,32 @@ def add_parsers(commands: argparse._SubParsersAction) -> None:
         help="rows and columns of the matrices to multiply, a multiple of 64",
     )
     timing.add_argument(
-        "--repeats", type=argument_types.size, default=50, help="launches timed per kernel"
+        "--repeats",
+        type=argument_types.positive_count,
+        default=50,
+        help="launches timed per kernel",
     )
-    timing.set_defaults(run=_time)
+    timing.set_defaults(run=_time_layouts)
 
 
 def add_random_options(parser: argparse.ArgumentParser) -> None:
     """Add the options that append random lane patterns to the calibration cases."""
     parser.add_argument(
         "--random",
-        type=argument_types.count,
+        type=argument_types.nonnegative_count,
         default=0,
         help="random lane patterns to add after the fixed cases, as many for ldmatrix and cp.async",
     )
     parser.add_argument("--seed", type=int, default=0, help="seed of the random lane patterns")
 
 
-def _list(args: argparse.Namespace) -> int:
-    for launch, case in enumerate(calibration.launches()):
+def _list_cases(args: argparse.Namespace) -> int:
+    for launch, case in enumerate(calibration.launch_order_cases()):
         print(f"{launch:3d}  {case.name:40} {case.kernel}  mask {case.mask:#010x}")
     return 0
 
 
-def _build(args: argparse.Namespace) -> int:
+def _compile_kernels(args: argparse.Namespace) -> int:
     source = args.out.with_suffix(".cu")
     if source == args.out:
         raise ValueError(f"{source} names the source, so name the cubin such as bench.cubin")
@@ -74,12 +77,12 @@ def _build(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run(args: argparse.Namespace) -> int:
-    calibration.run(args.cubin, args.random, args.seed)
+def _run_cases(args: argparse.Namespace) -> int:
+    calibration.run_calibration(args.cubin, args.random, args.seed)
     return 0
 
 
-def _time(args: argparse.Namespace) -> int:
+def _time_layouts(args: argparse.Namespace) -> int:
     times = calibration.time_transposes(args.cubin, args.size, args.repeats)
     print(f"{args.size} x {args.size} float matrix, {args.repeats} launches per kernel")
     print(f"{'kernel':20} {'ms':>8} {'GB/s':>8} {'speedup':>8}")

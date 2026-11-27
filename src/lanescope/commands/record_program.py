@@ -5,7 +5,7 @@ import sys
 from lanescope import kernel_times
 from lanescope.commands import argument_types
 from lanescope.cuda.driver import Driver
-from lanescope.cuda.toolchain import cache_folder, find
+from lanescope.cuda.toolchain import cache_folder, find_toolchain
 from lanescope.recorder import capture
 from lanescope.recorder.build import build_recorder
 from lanescope.trace import read_metadata
@@ -19,7 +19,7 @@ def add_parsers(commands: argparse._SubParsersAction) -> None:
     recorder = commands.add_parser("build", help="build the recorder for a GPU architecture")
     recorder.add_argument("--out", type=pathlib.Path, required=True, help="folder for the build")
     recorder.add_argument("--arch", help="such as sm_89, the local GPU by default")
-    recorder.set_defaults(run=_build)
+    recorder.set_defaults(run=_build_recorder_files)
 
     run = commands.add_parser("record", help="run a CUDA program under the recorder")
     run.add_argument(
@@ -44,10 +44,10 @@ def add_parsers(commands: argparse._SubParsersAction) -> None:
 
     imports = commands.add_parser("import", help="turn the launch files of a recording into traces")
     imports.add_argument("folder", type=pathlib.Path)
-    imports.set_defaults(run=_import)
+    imports.set_defaults(run=_import_launch_files)
 
 
-def _build(args: argparse.Namespace) -> int:
+def _build_recorder_files(args: argparse.Namespace) -> int:
     built = build_recorder(args.out, args.arch or _local_arch())
     print(f"library {built.library}")
     print(f"patches {built.patches}")
@@ -59,8 +59,8 @@ def _record(args: argparse.Namespace) -> int:
     if not command:
         raise ValueError("give the program to record after --")
     built = build_recorder(args.out / "build", args.arch or _local_arch(), cache=cache_folder())
-    kernel_times.write_run(args.out, command)
-    status = capture.record(
+    kernel_times.write_stored_command(args.out, command)
+    status = capture.record_command(
         command, built, args.out, capacity=args.capacity, ctas=args.ctas, kernel=args.kernel
     )
     launches = capture.launch_files(args.out)
@@ -86,13 +86,13 @@ def _record(args: argparse.Namespace) -> int:
 
 
 def _import_traces(folder: pathlib.Path) -> tuple[list[pathlib.Path], bool]:
-    disassemblers = find().disassemblers
+    disassemblers = find_toolchain().disassemblers
     if not disassemblers:
         print(f"lanescope: {capture.NO_DISASSEMBLER}", file=sys.stderr)
     return capture.import_recording(folder, disassemblers), bool(disassemblers)
 
 
-def _import(args: argparse.Namespace) -> int:
+def _import_launch_files(args: argparse.Namespace) -> int:
     paths, disassembled = _import_traces(args.folder)
     if not paths:
         raise ValueError(f"{args.folder} holds no launch files")

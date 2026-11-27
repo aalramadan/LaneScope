@@ -6,7 +6,7 @@ import pytest
 
 from lanescope import demos
 from lanescope.model import batch_counts, global_memory
-from lanescope.model.counters import measure
+from lanescope.model.counters import count_row
 from lanescope.trace import WARP_SIZE, WIDTHS, Access, Kind, Space, Trace
 
 ARCHES = ("sm_89", "sm_90", "sm_120", "")
@@ -206,7 +206,7 @@ def test_generated_traces_hold_every_rule_of_the_model(trace):
 
 def test_row_counts_equal_the_scalar_model_on_every_row(trace):
     found = batch_counts.row_counts(trace)
-    expected = np.array([measure(trace, row) for row in range(len(trace))]).reshape(-1, 4)
+    expected = np.array([count_row(trace, row) for row in range(len(trace))]).reshape(-1, 4)
     assert len(trace) > 2000
     for column, name in enumerate(("achieved", "ideal", "excessive", "conflicts")):
         np.testing.assert_array_equal(getattr(found, name), expected[:, column], err_msg=name)
@@ -233,7 +233,7 @@ def test_row_counts_of_picked_rows_equal_those_of_every_row(trace):
 def test_row_counts_equal_the_scalar_model_on_the_gallery():
     for name, trace in demos.gallery_traces().items():
         found = batch_counts.row_counts(trace)
-        expected = np.array([measure(trace, row) for row in range(len(trace))]).reshape(-1, 4)
+        expected = np.array([count_row(trace, row) for row in range(len(trace))]).reshape(-1, 4)
         assert (
             np.column_stack(
                 [found.achieved, found.ideal, found.excessive, found.conflicts]
@@ -251,7 +251,7 @@ def test_a_pattern_moved_by_part_of_a_wavefront_keeps_its_own_count():
     ]
     trace = Trace.from_accesses(accesses, {"arch": "sm_89"})
     found = batch_counts.row_counts(trace)
-    assert found.achieved.tolist() == [measure(trace, row)[0] for row in range(3)]
+    assert found.achieved.tolist() == [count_row(trace, row)[0] for row in range(3)]
 
 
 def test_row_counts_of_no_rows_are_empty():

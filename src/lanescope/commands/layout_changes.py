@@ -31,20 +31,20 @@ def add_parsers(commands: argparse._SubParsersAction) -> None:
     search.add_argument("trace", type=pathlib.Path)
     search.add_argument(
         "--pc",
-        type=argument_types.number,
+        type=argument_types.prefixed_integer,
         help="instruction whose buffer to search, the worst by default",
     )
     search.add_argument(
         "--buffer", type=argument_types.buffer, help="START:SIZE in bytes, inferred by default"
     )
     search.add_argument(
-        "--limit", type=argument_types.count, default=5, help="most changes to list"
+        "--limit", type=argument_types.nonnegative_count, default=5, help="most changes to list"
     )
     search.add_argument("--json", action="store_true", help="print JSON for tools and agents")
     search.set_defaults(run=_suggest)
 
 
-def print_comparison(buffer: layouts.Buffer, data: dict) -> None:
+def print_layout_comparison(buffer: layouts.Buffer, data: dict) -> None:
     """Print the counters before and after a layout change, as whatif does."""
     print(
         f"{data['change']}, buffer {buffer.start:#x}+{buffer.size} "
@@ -70,7 +70,7 @@ def _whatif(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(data, indent=2))
     else:
-        print_comparison(args.buffer, data)
+        print_layout_comparison(args.buffer, data)
     return 0
 
 

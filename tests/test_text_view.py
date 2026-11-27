@@ -2,7 +2,7 @@ import dataclasses
 
 from lanescope import demos, text_view
 from lanescope.model import global_memory, shared_memory
-from lanescope.model.counters import count
+from lanescope.model.counters import count_instructions
 from lanescope.trace import WARP_SIZE, Access, Kind, Space, Trace
 
 
@@ -61,7 +61,7 @@ def test_sector_table_lists_the_lanes_of_each_sector():
 
 def test_describe_row_uses_the_view_of_the_space():
     trace = demos.transpose_trace()
-    worst = {counter.pc: counter.worst_row for counter in count(trace)}
+    worst = {counter.pc: counter.worst_row for counter in count_instructions(trace)}
     assert "bank conflicts" in text_view.describe_row(trace, worst[demos.PC_LOAD_TILE])
     assert "sectors against" in text_view.describe_row(trace, worst[demos.PC_LOAD_INPUT])
 
@@ -82,7 +82,7 @@ def test_describe_row_names_the_sass_opcode_that_the_trace_keeps():
 
 
 def test_the_lane_view_names_the_header_line_an_inlined_access_comes_from(inlined_transpose):
-    worst = {counter.pc: counter.worst_row for counter in count(inlined_transpose)}
+    worst = {counter.pc: counter.worst_row for counter in count_instructions(inlined_transpose)}
     lines = text_view.describe_row(inlined_transpose, worst[0x120]).splitlines()
     assert lines[1] == "inlined from tile_copy.cuh:3: return tile[c][r];"
     assert "inlined" not in text_view.describe_row(inlined_transpose, worst[0xA0])
@@ -91,7 +91,7 @@ def test_the_lane_view_names_the_header_line_an_inlined_access_comes_from(inline
 def test_the_lane_view_replaces_control_characters_of_the_origin(inlined_transpose):
     metadata = inlined_transpose.metadata | {"origin_text": [{"3": "x\x1b[2J"}]}
     trace = dataclasses.replace(inlined_transpose, metadata=metadata)
-    worst = {counter.pc: counter.worst_row for counter in count(trace)}
+    worst = {counter.pc: counter.worst_row for counter in count_instructions(trace)}
     text = text_view.describe_row(trace, worst[0x120])
     assert "\x1b" not in text
     assert "inlined from tile_copy.cuh:3: x?[2J" in text

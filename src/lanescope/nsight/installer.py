@@ -24,7 +24,7 @@ def releases(index: str) -> list[Release]:
     return sorted(found)
 
 
-def pick(found: list[Release], cuda: tuple[int, int]) -> Release:
+def newest_supported_release(found: list[Release], cuda: tuple[int, int]) -> Release:
     """Return the newest release at or below the CUDA version that the driver supports."""
     usable = [release for release in found if release[:2] <= cuda]
     if not usable:
@@ -32,7 +32,7 @@ def pick(found: list[Release], cuda: tuple[int, int]) -> Release:
     return max(usable)
 
 
-def archive(manifest: object) -> tuple[str, str, str]:
+def ncu_archive_entry(manifest: object) -> tuple[str, str, str]:
     """Return the version, the relative path, and the SHA-256 of the Nsight Compute archive."""
     entry = manifest.get("nsight_compute") if isinstance(manifest, dict) else None
     target = entry.get(PLATFORM) if isinstance(entry, dict) else None
@@ -59,9 +59,9 @@ def install(
     for a fresh download, such as after a damaged unpack. The old copy stays until
     the new one is checked and unpacked, so a failed download loses nothing.
     """
-    release = pick(releases(_text(base_url)), cuda)
+    release = newest_supported_release(releases(_text(base_url)), cuda)
     manifest = json.loads(_text(f"{base_url}redistrib_{'.'.join(map(str, release))}.json"))
-    version, path, digest = archive(manifest)
+    version, path, digest = ncu_archive_entry(manifest)
     target = folder / f"{PREFIX}{version}"
     found = None if replace else find_ncu(target)
     if found is None:

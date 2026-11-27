@@ -38,16 +38,16 @@ def compile_cuda(source: str, name: str, options: Sequence[str], library: pathli
         array = (ctypes.c_char_p * len(encoded))(*encoded)
         status = nvrtc.nvrtcCompileProgram(program, len(encoded), array)
         log = (
-            _read(nvrtc, program, "nvrtcGetProgramLogSize", "nvrtcGetProgramLog")
+            _read_program_output(nvrtc, program, "nvrtcGetProgramLogSize", "nvrtcGetProgramLog")
             .decode(errors="replace")
             .rstrip("\x00")
         )
         if status != _SUCCESS:
             raise CompileError(f"NVRTC could not compile {name}:\n{log}")
-        ptx = _read(nvrtc, program, "nvrtcGetPTXSize", "nvrtcGetPTX").rstrip(b"\x00")
+        ptx = _read_program_output(nvrtc, program, "nvrtcGetPTXSize", "nvrtcGetPTX").rstrip(b"\x00")
         cubin = None
         if any(option.startswith(("--gpu-architecture=sm_", "-arch=sm_")) for option in options):
-            cubin = _read(nvrtc, program, "nvrtcGetCUBINSize", "nvrtcGetCUBIN")
+            cubin = _read_program_output(nvrtc, program, "nvrtcGetCUBINSize", "nvrtcGetCUBIN")
         return Program(ptx, cubin, log)
     finally:
         nvrtc.nvrtcDestroyProgram(ctypes.byref(program))
@@ -75,7 +75,9 @@ def _check(nvrtc: ctypes.CDLL, status: int) -> None:
         raise CompileError(f"NVRTC error: {nvrtc.nvrtcGetErrorString(status).decode()}")
 
 
-def _read(nvrtc: ctypes.CDLL, program: ctypes.c_void_p, size_name: str, read_name: str) -> bytes:
+def _read_program_output(
+    nvrtc: ctypes.CDLL, program: ctypes.c_void_p, size_name: str, read_name: str
+) -> bytes:
     size = ctypes.c_size_t()
     _check(nvrtc, getattr(nvrtc, size_name)(program, ctypes.byref(size)))
     buffer = ctypes.create_string_buffer(size.value)

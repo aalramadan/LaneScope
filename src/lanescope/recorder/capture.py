@@ -88,7 +88,9 @@ def environment(
     return env
 
 
-def record(command: Sequence[str], build: RecorderBuild, out_dir: pathlib.Path, **settings) -> int:
+def record_command(
+    command: Sequence[str], build: RecorderBuild, out_dir: pathlib.Path, **settings
+) -> int:
     """Run a command under the recorder and return its exit status.
 
     The run first removes the launch files, modules, and traces of an earlier
@@ -188,7 +190,7 @@ def import_recording(
     paths = launch_files(out_dir)
     infos = [_launch_info(path) for path in paths]
     modules = _module_listings(out_dir, infos, disassemblers)
-    with concurrent.futures.ThreadPoolExecutor(_workers(paths)) as pool:
+    with concurrent.futures.ThreadPoolExecutor(_import_worker_count(paths)) as pool:
         saved = list(
             pool.map(lambda path, info: _save_trace(out_dir, path, info, modules), paths, infos)
         )
@@ -199,7 +201,7 @@ def import_recording(
     return [path for path, _ in saved]
 
 
-def _workers(info_paths: Sequence[pathlib.Path]) -> int:
+def _import_worker_count(info_paths: Sequence[pathlib.Path]) -> int:
     records = (path.with_suffix(".bin") for path in info_paths)
     largest = max((path.stat().st_size for path in records if path.is_file()), default=0)
     return max(1, min(IMPORT_THREADS, os.cpu_count() or 1, IMPORT_BYTES // max(largest, 1)))
@@ -223,7 +225,7 @@ def _module_listings(
             text = line_info.module_listing(disassemblers, cubin, kernels[module])
         except ValueError as error:
             return error
-        return line_info.parse(text), line_info.origins(text), line_info.opcodes(text)
+        return line_info.parse_line_listing(text), line_info.origins(text), line_info.opcodes(text)
 
     with concurrent.futures.ThreadPoolExecutor(min(len(kernels), os.cpu_count() or 1)) as pool:
         return dict(zip(kernels, pool.map(listing, kernels), strict=True))

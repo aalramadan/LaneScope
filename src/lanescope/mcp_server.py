@@ -111,13 +111,13 @@ def compare(before_path: str, after_path: str) -> dict:
     """
     before = recording_comparison.read_side(pathlib.Path(before_path))
     after = recording_comparison.read_side(pathlib.Path(after_path))
-    return recording_comparison.compare(before, after)
+    return recording_comparison.compare_summaries(before, after)
 
 
 TOOLS = (explain, lanes, whatif, suggest, summary, compare)
 
 
-def server():
+def build_mcp_server():
     """Return an MCP server with the LaneScope tools."""
     if MCPServer is None:
         raise ImportError("the MCP server needs pip install 'lanescope[mcp]'")
@@ -147,4 +147,4 @@ def _reported(tool: Callable) -> Callable:
 
 def serve() -> None:
     """Serve the tools over stdio."""
-    server().run("stdio")
+    build_mcp_server().run("stdio")

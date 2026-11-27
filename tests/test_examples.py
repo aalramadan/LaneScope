@@ -13,7 +13,7 @@ from lanescope.cuda.driver import Driver, DriverError
 
 EXAMPLE = pathlib.Path(__file__).parent.parent / "examples" / "triton_matmul.py"
 CONFLICT_KINDS = EXAMPLE.parent / "conflict_kinds.py"
-NVRTC = toolchain.find().nvrtc
+NVRTC = toolchain.find_toolchain().nvrtc
 
 
 def _python_headers() -> bool:

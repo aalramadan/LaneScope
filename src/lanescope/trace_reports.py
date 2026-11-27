@@ -7,7 +7,7 @@ from lanescope.fixes.layouts import (
     Change,
     Padding,
     XorSwizzle,
-    compare,
+    compare_layout_counters,
     infer_buffer,
     lanes_inside,
     later_shift,
@@ -17,9 +17,9 @@ from lanescope.model.counters import (
     InstructionCounters,
     InstructionKey,
     as_record,
-    count,
+    count_instructions,
+    count_row,
     distinct_rows,
-    measure,
     worst_first,
 )
 from lanescope.model.data_dependence import data_dependent
@@ -32,13 +32,13 @@ def explain(trace: Trace) -> dict:
     Each instruction also tells whether its bank conflicts follow the input values and
     gives the excess of its least and its most conflicted access.
     """
-    counters = count(trace)
+    counters = count_instructions(trace)
     dependent = data_dependent(trace, counters)
     kernel = trace.metadata.get("kernel")
     full = kernel_names.readable([kernel])[kernel] if isinstance(kernel, str) and kernel else None
     return {
         "kernel": kernel,
-        "name": kernel_names.short(full) if full else None,
+        "name": kernel_names.short_name(full) if full else None,
         "full_name": full,
         "arch": trace.metadata.get("arch"),
         "instructions": [
@@ -67,7 +67,7 @@ def overview(trace: Trace) -> dict:
 
 def lanes(trace: Trace, pc: int, row: int | None = None) -> str:
     """Return the lane view of the worst access of an instruction, or of one of its rows."""
-    matches = [counter for counter in count(trace) if counter.pc == pc]
+    matches = [counter for counter in count_instructions(trace) if counter.pc == pc]
     if not matches:
         raise ValueError(f"the trace has no access at pc {pc:#x}")
     # A generic instruction may access two spaces. The worse one is the one to show.
@@ -91,7 +91,7 @@ def patterns(trace: Trace, pc: int, space: Space, limit: int = 50) -> dict:
     found = []
     for start, weight in zip(first.tolist(), repeats.tolist(), strict=True):
         row = int(rows[start])
-        achieved, ideal, excessive, conflicts = measure(trace, row)
+        achieved, ideal, excessive, conflicts = count_row(trace, row)
         found.append(
             {
                 "row": row,
@@ -137,7 +137,7 @@ def access(trace: Trace, row: int) -> dict:
 
 def whatif(trace: Trace, buffer: Buffer, change: Change) -> dict:
     """Return the counters before and after a layout change of every instruction it affects."""
-    comparisons = compare(trace, buffer, change)
+    comparisons = compare_layout_counters(trace, buffer, change)
     if not comparisons:
         raise ValueError("no shared access of the trace falls inside the buffer")
     return {
@@ -163,7 +163,7 @@ def suggest(
         pc = worst_shared_pc(trace) if pc is None else pc
         buffer = infer_buffer(trace, pc)
     found = ranking.suggest(trace, buffer)
-    dependent = {key[0] for key in data_dependent(trace, count(trace))}
+    dependent = {key[0] for key in data_dependent(trace, count_instructions(trace))}
     # A given buffer takes the instructions whose lanes fall inside it.
     touched = (
         {pc} if pc is not None else set(trace.pc[lanes_inside(trace, buffer).any(axis=1)].tolist())
@@ -191,7 +191,11 @@ def suggest(
 
 def worst_shared_pc(trace: Trace) -> int:
     """Return the shared-memory instruction with the most excess wavefronts."""
-    shared = [counter for counter in worst_first(count(trace)) if counter.unit == "wavefronts"]
+    shared = [
+        counter
+        for counter in worst_first(count_instructions(trace))
+        if counter.unit == "wavefronts"
+    ]
     if not shared:
         raise ValueError("the trace has no shared access")
     return shared[0].pc

@@ -27,11 +27,11 @@ struct KernelTimes {
     u64 longest = 0;
 };
 
-std::mutex lock;
+std::mutex times_lock;
 std::map<std::string, KernelTimes> kernels;
 u64 skipped = 0;
 u64 dropped = 0;
-pid_t owner = 0;
+pid_t owner_pid = 0;
 
 void Warn(const std::string& message) {
     std::fprintf(stderr, "lanescope kernel timer: %s\n", message.c_str());
@@ -62,7 +62,7 @@ void CUPTIAPI BufferRequested(uint8_t** buffer, size_t* size, size_t* max_record
 
 void CUPTIAPI BufferCompleted(CUcontext context, uint32_t stream, uint8_t* buffer, size_t,
                               size_t valid) {
-    std::lock_guard<std::mutex> guard(lock);
+    std::lock_guard<std::mutex> guard(times_lock);
     CUpti_Activity* record = nullptr;
     while (cuptiActivityGetNextRecord(buffer, valid, &record) == CUPTI_SUCCESS) {
         if (record->kind != CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL) continue;
@@ -85,13 +85,13 @@ void CUPTIAPI BufferCompleted(CUcontext context, uint32_t stream, uint8_t* buffe
 
 void WriteTimes() {
     // A forked child holds a copy of the times of its parent, which the parent writes.
-    if (getpid() != owner) return;
+    if (getpid() != owner_pid) return;
     cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED);
     const char* base = std::getenv("LANESCOPE_KERNEL_TIMES");
     if (base == nullptr || *base == '\0') return;
-    std::lock_guard<std::mutex> guard(lock);
+    std::lock_guard<std::mutex> guard(times_lock);
     std::string text = "{\"format\": " + std::to_string(kFormatVersion) +
-                       ", \"pid\": " + std::to_string(owner) +
+                       ", \"pid\": " + std::to_string(owner_pid) +
                        ", \"skipped\": " + std::to_string(skipped) +
                        ", \"dropped\": " + std::to_string(dropped) + ", \"kernels\": {";
     bool first = true;
@@ -104,7 +104,7 @@ void WriteTimes() {
         first = false;
     }
     text += "}}\n";
-    const std::string path = std::string(base) + "." + std::to_string(owner);
+    const std::string path = std::string(base) + "." + std::to_string(owner_pid);
     const std::string staged = path + ".part";
     FILE* file = std::fopen(staged.c_str(), "w");
     if (file == nullptr) {
@@ -120,7 +120,7 @@ void WriteTimes() {
 }  // namespace
 
 extern "C" int InitializeInjection(void) {
-    owner = getpid();
+    owner_pid = getpid();
     const char* text = nullptr;
     CUptiResult result = cuptiActivityRegisterCallbacks(BufferRequested, BufferCompleted);
     if (result == CUPTI_SUCCESS) result = cuptiActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);

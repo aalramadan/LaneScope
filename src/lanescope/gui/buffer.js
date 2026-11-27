@@ -3,7 +3,7 @@ import { renderDiagnosis } from "./diagnosis.js";
 import { $ } from "./dom.js";
 import { renderFixPanel, writeBufferFields } from "./fix-form.js";
 import * as format from "./format.js";
-import { current, fixCurrent, latest, selectionToken, state } from "./state.js";
+import { fixControlsMatchSelection, isCurrentSelection, latest, selectionToken, state } from "./state.js";
 import { showSuggestions } from "./suggestions.js";
 import { scheduleWhatif, showFixError } from "./whatif.js";
 
@@ -17,7 +17,7 @@ export async function prepareBuffer(record, token) {
         getJSON("/api/buffer", { id: state.traceId, pc: record.pc }, signal),
       );
     } catch (error) {
-      if (!isAbort(error) && current(token)) {
+      if (!isAbort(error) && isCurrentSelection(token)) {
         state.buffer = null;
         state.suggestionError = error.message;
         renderFixPanel(error.message);
@@ -25,7 +25,7 @@ export async function prepareBuffer(record, token) {
       }
       return;
     }
-    if (!current(token)) {
+    if (!isCurrentSelection(token)) {
       return;
     }
     state.buffer = buffer;
@@ -49,7 +49,7 @@ function bufferHolds(buffer, access) {
 // The server checks a typed buffer and gives the row sizes that fit it.
 export async function onBufferEdited() {
   // Like the other fix controls, the buffer fields belong to the selection that drew them.
-  if (!fixCurrent()) {
+  if (!fixControlsMatchSelection()) {
     return;
   }
   const start = format.parseInteger($("buffer-start").value);
@@ -72,13 +72,13 @@ export async function onBufferEdited() {
       getJSON("/api/buffer", { id: state.traceId, start, size }, signal),
     );
   } catch (error) {
-    if (!isAbort(error) && current(token) && fixCurrent()) {
+    if (!isAbort(error) && isCurrentSelection(token) && fixControlsMatchSelection()) {
       restoreBufferFields();
       showFixError(error.message);
     }
     return;
   }
-  if (!current(token) || !fixCurrent()) {
+  if (!isCurrentSelection(token) || !fixControlsMatchSelection()) {
     return;
   }
   state.buffer = buffer;

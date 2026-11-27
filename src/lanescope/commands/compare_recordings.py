@@ -32,7 +32,7 @@ def add_parsers(commands: argparse._SubParsersAction) -> None:
         help="compare the extra sectors of global memory in place of the passes of shared memory",
     )
     comparing.add_argument(
-        "--limit", type=argument_types.size, default=10, help="most kernels to list"
+        "--limit", type=argument_types.positive_count, default=10, help="most kernels to list"
     )
     comparing.add_argument("--json", action="store_true", help="print JSON for tools and agents")
     comparing.set_defaults(run=_compare)
@@ -41,16 +41,16 @@ def add_parsers(commands: argparse._SubParsersAction) -> None:
 def _compare(args: argparse.Namespace) -> int:
     before = recording_comparison.read_side(args.before, processes=True)
     after = recording_comparison.read_side(args.after, processes=True)
-    data = recording_comparison.compare(before, after)
+    data = recording_comparison.compare_summaries(before, after)
     if args.json:
         print(json.dumps({"before": str(args.before), "after": str(args.after)} | data, indent=2))
         return 0
     unit = "sectors" if args.global_memory else "wavefronts"
-    print(render(data, args.before, args.after, unit, args.limit))
+    print(render_comparison(data, args.before, args.after, unit, args.limit))
     return 0
 
 
-def render(
+def render_comparison(
     data: dict,
     before: pathlib.Path,
     after: pathlib.Path,
@@ -61,8 +61,8 @@ def render(
     memory, noun, cause = UNITS[unit]
     timed = data["timed"]
     out = [
-        f"before: {printable(before)}{_timing(timed['before'])}",
-        f"after: {printable(after)}{_timing(timed['after'])}",
+        f"before: {printable(before)}{_rounds_suffix(timed['before'])}",
+        f"after: {printable(after)}{_rounds_suffix(timed['after'])}",
     ]
     total = data["total"]
     first, second = total["before"][unit], total["after"][unit]
@@ -71,7 +71,7 @@ def render(
         f"{cause} add {first['excessive']:,} before and {second['excessive']:,} after."
     )
     if total["time"]["speedup"] is not None:
-        out.append(f"Kernel time: {_change(total)}")
+        out.append(f"Kernel time: {_time_change_words(total)}")
     counted = [
         row
         for row in data["kernels"]
@@ -90,11 +90,11 @@ def render(
     for row in rows[:limit]:
         out.append(_counts_row(row, unit, row["name"]))
         out += [_counts_row(found, unit, f"  {found['name']}") for found in row["instances"]]
-    out += _more(len(rows) - limit)
+    out += _hidden_kernels_line(len(rows) - limit)
     out.append(_counts_row(total, unit, "all kernels"))
     if timed["before"] and timed["after"]:
         out += _times_table(data, limit)
-    out += _alone(data, unit, noun)
+    out += _one_sided_kernels(data, unit, noun)
     if not (timed["before"] and timed["after"]):
         folders = " ".join(
             printable(recording_comparison.times_folder(path)) for path in (before, after)
@@ -118,7 +118,7 @@ def _times_table(data: dict, limit: int) -> list[str]:
     for row in rows[:limit]:
         out.append(_times_row(row, row["name"]))
         out += [_times_row(found, f"  {found['name']}") for found in row["instances"]]
-    out += _more(len(rows) - limit)
+    out += _hidden_kernels_line(len(rows) - limit)
     out.append(_times_row(data["total"], "all kernels"))
     if any(row["time"]["within_spread"] for row in [*rows[:limit], data["total"]]):
         out += [
@@ -129,7 +129,7 @@ def _times_table(data: dict, limit: int) -> list[str]:
     return out
 
 
-def _alone(data: dict, unit: str, noun: str) -> list[str]:
+def _one_sided_kernels(data: dict, unit: str, noun: str) -> list[str]:
     alone = [("before only", entry) for entry in data["only_before"]]
     alone += [("after only", entry) for entry in data["only_after"]]
     if not alone:
@@ -164,12 +164,13 @@ def _counts_row(row: dict, unit: str, name: str) -> str:
 def _times_row(row: dict, name: str) -> str:
     first, second = row["before"], row["after"]
     return (
-        f"{_time(first):>11}  {_range(first):>17}  {_time(second):>11}  {_range(second):>17}  "
+        f"{_time_text(first):>11}  {_range_text(first):>17}  "
+        f"{_time_text(second):>11}  {_range_text(second):>17}  "
         f"{_speedup(row['time']):>13}  {printable(name)}"
     )
 
 
-def _change(row: dict) -> str:
+def _time_change_words(row: dict) -> str:
     """Return the change of the time of a row in words."""
     first, second = row["before"]["time_ns"], row["after"]["time_ns"]
     times = f"{duration(first)} before and {duration(second)} after"
@@ -184,19 +185,19 @@ def _speedup(change: dict) -> str:
     return WITHIN_SPREAD if change["within_spread"] else f"{change['speedup']:.2f}x"
 
 
-def _time(side: dict) -> str:
+def _time_text(side: dict) -> str:
     return "-" if side["time_ns"] is None else duration(side["time_ns"])
 
 
-def _range(side: dict) -> str:
+def _range_text(side: dict) -> str:
     return "-" if side["time_range_ns"] is None else duration_range(*side["time_range_ns"])
 
 
-def _timing(rounds: int | None) -> str:
+def _rounds_suffix(rounds: int | None) -> str:
     if rounds is None:
         return ", no kernel times"
     return f", kernel times of {rounds} round{'' if rounds == 1 else 's'}"
 
 
-def _more(count: int) -> list[str]:
+def _hidden_kernels_line(count: int) -> list[str]:
     return [f"{'':>9}  and {count:,} more kernel{'' if count == 1 else 's'}"] if count > 0 else []

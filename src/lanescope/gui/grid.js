@@ -168,35 +168,35 @@ export function renderBankGrid(phase, lanes, label) {
   root.append(bandsLayer(model.width, model.height));
   const peakBar = model.bars[model.worstBank];
   root.append(
-    text(peakBar.x + BAR_WIDTH / 2, model.baseline - peakBar.height - 4, String(model.peak), "value"),
+    svgText(peakBar.x + BAR_WIDTH / 2, model.baseline - peakBar.height - 4, String(model.peak), "value"),
   );
   for (const bar of model.bars) {
     if (bar.degree) {
-      const path = node("path", { class: "bar", d: barPath(bar.x, model.baseline, bar.height) });
+      const path = svgElement("path", { class: "bar", d: barPath(bar.x, model.baseline, bar.height) });
       path.dataset.bank = bar.bank;
       path.dataset.degree = bar.degree;
       root.append(path);
     }
   }
-  root.append(text(LEFT - 6, model.baseline + 12, "bank", "axis", "end"));
+  root.append(svgText(LEFT - 6, model.baseline + 12, "bank", "axis", "end"));
   for (const bank of [0, 8, 16, 24, BANKS - 1]) {
-    root.append(text(model.columns[bank] + CELL / 2, model.baseline + 12, String(bank), "axis"));
+    root.append(svgText(model.columns[bank] + CELL / 2, model.baseline + 12, String(bank), "axis"));
   }
-  const empty = node("g", { class: "empties" });
+  const empty = svgElement("g", { class: "empties" });
   for (const row of model.rows) {
     for (const x of model.columns) {
-      empty.append(node("rect", { class: "empty", x, y: row.y, width: CELL, height: CELL, rx: 2 }));
+      empty.append(svgElement("rect", { class: "empty", x, y: row.y, width: CELL, height: CELL, rx: 2 }));
     }
   }
   root.append(empty);
   model.rows.forEach((row, index) => {
     if (index % 4 === 0 || index === model.rows.length - 1) {
-      root.append(text(LEFT - 6, row.y + CELL - 1, `lane ${row.lane}`, "axis", "end"));
+      root.append(svgText(LEFT - 6, row.y + CELL - 1, `lane ${row.lane}`, "axis", "end"));
     }
   });
-  const data = node("g", { class: "cells" });
+  const data = svgElement("g", { class: "cells" });
   for (const cell of model.cells) {
-    const rect = node("rect", {
+    const rect = svgElement("rect", {
       class: `cell d${cell.step}`,
       x: cell.x,
       y: cell.y,
@@ -223,21 +223,21 @@ export function renderSectorGrid(access, label) {
   const root = svgRoot(model.width, model.height, label);
   root.append(bandsLayer(model.width, model.height));
   for (const line of model.lines.filter((item) => item.labeled)) {
-    root.append(text((line.start + line.end) / 2, model.baseline + 12, line.label, "axis"));
+    root.append(svgText((line.start + line.end) / 2, model.baseline + 12, line.label, "axis"));
   }
   for (const column of model.columns) {
-    const path = node("path", {
+    const path = svgElement("path", {
       class: "bar",
       d: barPath(column.x + (CELL - BAR_WIDTH) / 2, model.baseline, column.barHeight),
     });
     Object.assign(path.dataset, { offset: column.offset, used: column.used, lanes: column.lanes.length });
     root.append(path);
   }
-  const empty = node("g", { class: "empties" });
+  const empty = svgElement("g", { class: "empties" });
   for (const row of model.rows) {
     for (const column of model.columns) {
       empty.append(
-        node("rect", { class: "empty", x: column.x, y: row.y, width: CELL, height: CELL, rx: 2 }),
+        svgElement("rect", { class: "empty", x: column.x, y: row.y, width: CELL, height: CELL, rx: 2 }),
       );
     }
   }
@@ -245,13 +245,13 @@ export function renderSectorGrid(access, label) {
   for (const row of model.rows) {
     if (row.lane % 4 === 0 || row.lane === WARP_SIZE - 1) {
       root.append(
-        text(LEFT - 6, row.y + CELL - 1, `lane ${row.lane}`, row.active ? "axis" : "axis inactive", "end"),
+        svgText(LEFT - 6, row.y + CELL - 1, `lane ${row.lane}`, row.active ? "axis" : "axis inactive", "end"),
       );
     }
   }
-  const data = node("g", { class: "cells" });
+  const data = svgElement("g", { class: "cells" });
   for (const cell of model.cells) {
-    const rect = node("rect", {
+    const rect = svgElement("rect", {
       class: "cell touched",
       x: cell.x,
       y: cell.y,
@@ -277,18 +277,18 @@ export function renderSwizzleBits(params) {
   const root = svgRoot(width, box + 18, "Bits of the byte offset that the swizzle reads and flips");
   bits.forEach(({ bit, role }, index) => {
     const x = 1 + index * box;
-    root.append(node("rect", { class: `bit ${role}`, x, y: 1, width: box - 2, height: box - 2, rx: 3 }));
-    root.append(text(x + (box - 2) / 2, box + 13, String(bit), "axis"));
+    root.append(svgElement("rect", { class: `bit ${role}`, x, y: 1, width: box - 2, height: box - 2, rx: 3 }));
+    root.append(svgText(x + (box - 2) / 2, box + 13, String(bit), "axis"));
   });
   return root;
 }
 
 // Bands that follow the pointer through the row and the column of a cell.
 function bandsLayer(width, height) {
-  const layer = node("g", { class: "bands" });
-  layer.append(node("rect", { class: "band row-band", x: 0, y: 0, width, height: STEP, visibility: "hidden" }));
+  const layer = svgElement("g", { class: "bands" });
+  layer.append(svgElement("rect", { class: "band row-band", x: 0, y: 0, width, height: STEP, visibility: "hidden" }));
   layer.append(
-    node("rect", { class: "band column-band", x: 0, y: 0, width: STEP, height, visibility: "hidden" }),
+    svgElement("rect", { class: "band column-band", x: 0, y: 0, width: STEP, height, visibility: "hidden" }),
   );
   return layer;
 }
@@ -313,7 +313,7 @@ export function showBands(svg, cell) {
 }
 
 function svgRoot(width, height, label) {
-  const root = node("svg", {
+  const root = svgElement("svg", {
     viewBox: `0 0 ${width} ${height}`,
     width,
     height,
@@ -335,13 +335,13 @@ function barPath(x, baseline, height) {
   );
 }
 
-function text(x, y, content, className, anchor = "middle") {
-  const element = node("text", { x, y, class: className, "text-anchor": anchor });
+function svgText(x, y, content, className, anchor = "middle") {
+  const element = svgElement("text", { x, y, class: className, "text-anchor": anchor });
   element.textContent = content;
   return element;
 }
 
-function node(tag, attributes) {
+function svgElement(tag, attributes) {
   const element = document.createElementNS(SVG_NS, tag);
   for (const [name, value] of Object.entries(attributes)) {
     element.setAttribute(name, String(value));

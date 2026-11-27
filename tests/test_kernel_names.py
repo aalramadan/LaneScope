@@ -34,19 +34,19 @@ ELEMENTWISE = (
     ],
 )
 def test_short_names_drop_namespaces_return_types_parameters_and_long_arguments(name, short):
-    assert kernel_names.short(name) == short
+    assert kernel_names.short_name(name) == short
 
 
 def test_a_short_name_still_too_long_ends_in_an_ellipsis():
     name = "k" * 100
-    found = kernel_names.short(name)
+    found = kernel_names.short_name(name)
     assert len(found) == kernel_names.SHORT_LENGTH
     assert found.endswith(kernel_names.ELLIPSIS)
 
 
 def test_template_arguments_that_all_go_show_as_one_ellipsis():
     name = "kernel<" + ", ".join(f"ns::Type{index}<int>" for index in range(9)) + ">"
-    assert kernel_names.short(name) == "kernel<…>"
+    assert kernel_names.short_name(name) == "kernel<…>"
 
 
 @pytest.mark.skipif(shutil.which("c++filt") is None, reason="c++filt is needed")
@@ -111,4 +111,4 @@ def test_the_template_of_a_kernel_keeps_its_namespaces_and_drops_every_argument_
 def test_short_names_keep_the_plain_arguments_after_an_operator_argument():
     types = ", ".join(f"ns::T{index}<int>" for index in range(6))
     name = f"void ns::apply<4, &ns::Cmp::operator<, {types}, 8>(int)"
-    assert kernel_names.short(name) == "apply<4, …, 8>"
+    assert kernel_names.short_name(name) == "apply<4, …, 8>"

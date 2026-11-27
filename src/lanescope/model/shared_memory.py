@@ -127,7 +127,7 @@ def analyze(
         return _async_copy(
             tuple(addresses), width, tuple(lanes), "BYPASS" in opcode, _zero_pass(arch)
         )
-    return _analyze(tuple(addresses), width, store, _full_warp_merge(arch))
+    return _model_shared_access(tuple(addresses), width, store, _full_warp_merge(arch))
 
 
 def analyze_row(trace: Trace, row: int) -> SharedAccess:
@@ -149,7 +149,7 @@ def words(address: int, width: int) -> range:
 
 
 @functools.lru_cache(maxsize=1 << 16)
-def _analyze(
+def _model_shared_access(
     addresses: tuple[int | None, ...], width: int, store: bool, full_warp: bool
 ) -> SharedAccess:
     groups = _GROUPS[width]

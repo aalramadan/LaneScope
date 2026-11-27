@@ -53,7 +53,7 @@ def test_measured_random_patterns_come_from_the_calibration_run():
 
 def test_measurements_cover_every_calibration_case():
     measured = {name for group, name, *_ in MEASURED["cases"] if group == "calibration"}
-    assert measured == {case.name for case in calibration.cases()}
+    assert measured == {case.name for case in calibration.fixed_calibration_cases()}
 
 
 @pytest.mark.parametrize(("space", "kind", "width", "units", "measured"), list(cases()))

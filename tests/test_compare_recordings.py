@@ -19,7 +19,7 @@ CONFLICT_KINDS = pathlib.Path(__file__).parent.parent / "examples" / "conflict_k
 def padded_transpose():
     """Return the transpose with each row of its tile padded by one float, free of conflicts."""
     trace = demos.transpose_trace()
-    return layouts.apply(trace, layouts.infer_buffer(trace), layouts.Padding(128, 4))
+    return layouts.apply_layout_change(trace, layouts.infer_buffer(trace), layouts.Padding(128, 4))
 
 
 def write_times(folder, **kernels):
@@ -146,7 +146,7 @@ def _has_gpu() -> bool:
     return True
 
 
-TOOLS = toolchain.find()
+TOOLS = toolchain.find_toolchain()
 needs_gpu = pytest.mark.skipif(
     TOOLS.nvrtc is None or TOOLS.cupti_lib is None or shutil.which("g++") is None or not _has_gpu(),
     reason="NVRTC, CUPTI, g++, and a GPU are needed",
@@ -162,9 +162,9 @@ def test_two_recordings_of_one_program_timed_together_compare_kernel_by_kernel(t
     command = [sys.executable, str(CONFLICT_KINDS)]
     folders = [tmp_path / "first", tmp_path / "second"]
     for folder in folders:
-        assert capture.record(command, built, folder) == 0
+        assert capture.record_command(command, built, folder) == 0
         capture.import_recording(folder, TOOLS.disassemblers)
-        kernel_times.write_run(folder, command)
+        kernel_times.write_stored_command(folder, command)
     timer = build_kernel_timer(tmp_path / "build", TOOLS)
     kernel_times.time_folders(folders, timer, 2)
     assert main(["compare", *map(str, folders), "--json"]) == 0

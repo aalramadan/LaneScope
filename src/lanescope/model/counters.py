@@ -55,7 +55,7 @@ def instruction_key(trace: Trace, row: int) -> InstructionKey:
     return (int(trace.pc[row]), int(trace.space[row]), int(trace.kind[row]), int(trace.width[row]))
 
 
-def count(trace: Trace) -> list[InstructionCounters]:
+def count_instructions(trace: Trace) -> list[InstructionCounters]:
     """Return the counters of every instruction in the trace, ordered by PC and space."""
     if len(trace) == 0:
         return []
@@ -155,7 +155,7 @@ def row_hashes(keys: np.ndarray) -> np.ndarray:
     return hashes
 
 
-def measure(trace: Trace, row: int) -> tuple[int, int, int, int]:
+def count_row(trace: Trace, row: int) -> tuple[int, int, int, int]:
     """Return the achieved, ideal, and excess counts and the bank conflicts of one row."""
     if trace.space[row] == Space.SHARED:
         shared = shared_memory.analyze_row(trace, row)

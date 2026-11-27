@@ -23,7 +23,7 @@ def ranked_by_counting_every_row(trace, buffer):
     accesses = trace.select(picked)
 
     def totals(rows):
-        found = counters.count(rows)
+        found = counters.count_instructions(rows)
         shared = [c for c in found if c.space == Space.SHARED]
         reads = [c for c in found if c.space == Space.GLOBAL]
         return (
@@ -34,9 +34,9 @@ def ranked_by_counting_every_row(trace, buffer):
 
     wavefronts, excessive, sectors = totals(accesses)
     found = []
-    for change in ranking.candidates(buffer, int(accesses.width.max())):
+    for change in ranking.layout_candidates(buffer, int(accesses.width.max())):
         try:
-            after = totals(layouts.apply(accesses, buffer, change))
+            after = totals(layouts.apply_layout_change(accesses, buffer, change))
         except ValueError:
             continue
         extra = change.extra_bytes(buffer)
@@ -46,7 +46,7 @@ def ranked_by_counting_every_row(trace, buffer):
             )
         )
     better = [s for s in found if s.excessive_after < s.excessive_before]
-    return sorted(better, key=ranking._rank)
+    return sorted(better, key=ranking._suggestion_sort_key)
 
 
 def random_trace(seed, widths, arch, rows=4000):
@@ -125,9 +125,9 @@ def test_search_moves_each_distinct_access_once_per_change(monkeypatch):
 
     def apply(trace, buffer, change):
         sizes.append(len(trace))
-        return layouts.apply(trace, buffer, change)
+        return layouts.apply_layout_change(trace, buffer, change)
 
-    monkeypatch.setattr(ranking, "apply", apply)
+    monkeypatch.setattr(ranking, "apply_layout_change", apply)
     trace = demos.transpose_trace()
     ranking.suggest(trace, TILE_BUFFER)
     shared = trace.select(trace.space == Space.SHARED)
@@ -148,7 +148,7 @@ def test_every_suggestion_lowers_the_excess():
 
 
 def test_candidates_keep_16_byte_accesses_whole():
-    for change in ranking.candidates(layouts.Buffer(0, 8192), 16):
+    for change in ranking.layout_candidates(layouts.Buffer(0, 8192), 16):
         assert change.keeps_whole(16)
         if isinstance(change, layouts.Padding):
             assert change.pad_bytes % 16 == 0
@@ -189,7 +189,7 @@ def test_divisors_come_in_ascending_order_once_each():
 
 
 def test_candidates_of_a_huge_buffer_come_from_its_divisors_alone():
-    found = ranking.candidates(layouts.Buffer(0, 1 << 40), 4)
+    found = ranking.layout_candidates(layouts.Buffer(0, 1 << 40), 4)
     rows = {change.row_bytes for change in found if isinstance(change, layouts.Padding)}
     assert rows == {1 << power for power in range(4, 41)}
 

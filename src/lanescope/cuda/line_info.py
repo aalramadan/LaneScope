@@ -28,7 +28,7 @@ FUNCTION_SYMBOL = 2
 FunctionLines = dict[int, tuple[str, int]]
 
 
-def parse(listing: str) -> dict[str, FunctionLines]:
+def parse_line_listing(listing: str) -> dict[str, FunctionLines]:
     """Return the file and line of each instruction offset, for each function of a listing.
 
     An inlined instruction comes with its own line, then the lines of the calls that
@@ -44,7 +44,7 @@ def parse(listing: str) -> dict[str, FunctionLines]:
 def origins(listing: str) -> dict[str, FunctionLines]:
     """Return the innermost location of each inlined instruction, for each function of a listing.
 
-    An instruction appears only where that location differs from the line that `parse`
+    An instruction appears only where that location differs from the line that `parse_line_listing`
     keeps for it.
     """
     return {

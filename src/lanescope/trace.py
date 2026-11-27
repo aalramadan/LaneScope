@@ -79,7 +79,7 @@ class Trace:
         for name, dtype in _COLUMN_DTYPES.items():
             object.__setattr__(self, name, _column(name, getattr(self, name), dtype))
         _check_metadata(self.metadata)
-        _validate(self)
+        _check_trace_columns(self)
 
     def __len__(self) -> int:
         return int(self.pc.shape[0])
@@ -247,13 +247,13 @@ class Trace:
     @classmethod
     def load(cls, path: str | pathlib.Path) -> "Trace":
         """Read a trace from an .npz file, raising ValueError for a malformed file."""
-        metadata, columns = _read(path, tuple(_COLUMN_DTYPES))
+        metadata, columns = _read_trace_arrays(path, tuple(_COLUMN_DTYPES))
         return cls(metadata=metadata, **columns)
 
 
 def read_metadata(path: str | pathlib.Path) -> dict[str, Any]:
     """Return the metadata of a trace file without reading its columns."""
-    return _read(path, ())[0]
+    return _read_trace_arrays(path, ())[0]
 
 
 def check_lanes(addresses: Sequence[int | None], width: int) -> None:
@@ -296,7 +296,7 @@ def _column(name: str, values: Any, dtype: type[np.unsignedinteger]) -> np.ndarr
     return array.astype(dtype)
 
 
-def _read(
+def _read_trace_arrays(
     path: str | pathlib.Path, names: tuple[str, ...]
 ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     # NumPy reads any other file as a pickle and suggests loading it unsafely. The file
@@ -390,7 +390,7 @@ def _check_origins(metadata: dict) -> None:
         raise ValueError("metadata field origin_text must hold the text of each line per file")
 
 
-def _validate(trace: Trace) -> None:
+def _check_trace_columns(trace: Trace) -> None:
     rows = trace.pc.shape[0] if trace.pc.ndim == 1 else -1
     for name in _COLUMN_DTYPES:
         if name != "addr" and getattr(trace, name).shape != (rows,):

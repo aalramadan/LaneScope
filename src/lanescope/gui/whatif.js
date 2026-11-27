@@ -1,10 +1,17 @@
 import { isAbort, postJSON } from "./api.js";
 import { showError } from "./banner.js";
 import { renderDiagnosis } from "./diagnosis.js";
-import { $, cell } from "./dom.js";
+import { $, tableCell } from "./dom.js";
 import * as format from "./format.js";
 import { renderGrids } from "./lanes.js";
-import { current, delayWhatif, fixCurrent, latest, selectionToken, state } from "./state.js";
+import {
+  delayWhatif,
+  fixControlsMatchSelection,
+  isCurrentSelection,
+  latest,
+  selectionToken,
+  state,
+} from "./state.js";
 
 // Counts the what-if requests that mark the result as busy, so an older request that ends
 // never clears the mark of a newer one.
@@ -16,7 +23,7 @@ export function scheduleWhatif(delay) {
 
 async function runWhatif() {
   const change = state.change;
-  if (change.kind === "none" || !state.buffer || !fixCurrent()) {
+  if (change.kind === "none" || !state.buffer || !fixControlsMatchSelection()) {
     return;
   }
   const token = selectionToken();
@@ -49,21 +56,21 @@ async function runWhatif() {
     }
   }
   // The answer may belong to a change or an instruction that the page left meanwhile.
-  if (!current(token) || request !== whatifRequests || JSON.stringify(change) !== JSON.stringify(state.change)) {
+  if (!isCurrentSelection(token) || request !== whatifRequests || JSON.stringify(change) !== JSON.stringify(state.change)) {
     return;
   }
   state.result = result;
   if (failure) {
     showFixError(failure.message);
   } else {
-    renderResult();
-    renderCode();
+    renderWhatifResult();
+    renderCodeForms();
   }
   renderGrids();
   renderDiagnosis();
 }
 
-function renderResult() {
+function renderWhatifResult() {
   const { result } = state;
   const holder = $("result");
   holder.hidden = false;
@@ -117,12 +124,12 @@ function affectedTable(items) {
   table.append(head);
   for (const { before, after } of items) {
     const row = document.createElement("tr");
-    const name = cell(before.pc, "mono");
+    const name = tableCell(before.pc, "mono");
     const where = document.createElement("span");
     where.className = "where";
     where.textContent = `${before.kind}${before.line ? `, line ${before.line}` : ""}`;
     name.append(where);
-    row.append(name, cell(format.count(before.achieved), "num"), cell(format.count(after.achieved), "num"));
+    row.append(name, tableCell(format.count(before.achieved), "num"), tableCell(format.count(after.achieved), "num"));
     const badge = document.createElement("td");
     badge.className = "num";
     badge.append(deltaBadge(before.achieved, after.achieved, true));
@@ -148,7 +155,7 @@ function deltaBadge(before, after, compact = false) {
   return badge;
 }
 
-function renderCode() {
+function renderCodeForms() {
   const holder = $("code-forms");
   holder.replaceChildren();
   $("code").hidden = false;

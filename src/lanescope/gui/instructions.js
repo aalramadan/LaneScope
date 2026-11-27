@@ -1,5 +1,5 @@
 import { showError } from "./banner.js";
-import { $, cell, detail, meter } from "./dom.js";
+import { $, cellSubline, meter, tableCell } from "./dom.js";
 import * as format from "./format.js";
 import { state } from "./state.js";
 
@@ -21,7 +21,7 @@ export function renderInstructions() {
     row.dataset.key = format.instructionKey(record);
     row.tabIndex = -1;
     row.setAttribute("aria-selected", "false");
-    row.append(cell(record.pc, "mono"), accessCell(record), achievedCell(record), excessCell(record, peak));
+    row.append(tableCell(record.pc, "mono"), accessCell(record), achievedCell(record), excessCell(record, peak));
     row.title = `${format.plural(record.requests, "request")}, counted in ${record.unit}`;
     row.addEventListener("click", () => selectInstruction(record).catch(showError));
     body.append(row);
@@ -60,7 +60,7 @@ function accessCell(record) {
 }
 
 function achievedCell(record) {
-  const element = cell(format.count(record.achieved), "num");
+  const element = tableCell(format.count(record.achieved), "num");
   if (record.measured) {
     element.append(measuredMark(record));
   }
@@ -89,11 +89,11 @@ function measuredMark(record) {
 }
 
 function excessCell(record, peak) {
-  const element = cell(format.count(record.excessive), "num");
+  const element = tableCell(format.count(record.excessive), "num");
   element.append(meter(record.excessive, peak));
   if (record.excessive > 0) {
     const all = state.overview.totals[record.unit]?.achieved ?? 0;
-    const part = detail(`${format.percent(record.excessive, all)} of all`);
+    const part = cellSubline(`${format.percent(record.excessive, all)} of all`);
     part.title = format.TERMS.share;
     element.append(part);
   }

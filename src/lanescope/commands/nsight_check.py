@@ -4,9 +4,9 @@ import pathlib
 from lanescope.commands import argument_types, calibration_bench
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver, version_text
-from lanescope.cuda.toolchain import cache_folder, find
+from lanescope.cuda.toolchain import cache_folder, find_toolchain
 from lanescope.nsight import installer
-from lanescope.nsight.validate import validate, validate_program
+from lanescope.nsight.validate import validate_against_nsight, validate_program
 
 
 def add_parsers(commands: argparse._SubParsersAction) -> None:
@@ -60,7 +60,9 @@ def _validate(args: argparse.Namespace) -> int:
     if command:
         summary = validate_program(args.out, command, args.kernel, args.arch)
     else:
-        summary = validate(args.out, args.arch, random_count=args.random, seed=args.seed)
+        summary = validate_against_nsight(
+            args.out, args.arch, random_count=args.random, seed=args.seed
+        )
     print(summary.read_text())
     print(f"wrote {summary}")
     return 0
@@ -73,7 +75,7 @@ def _gpu_info(args: argparse.Namespace) -> int:
         print(version_text(version))
         return 0
     print(f"GPU {driver.name()}, {driver.arch()}, driver CUDA version {version_text(version)}")
-    tools = find()
+    tools = find_toolchain()
     names = (
         "compiler",
         "nvcc",
@@ -94,7 +96,7 @@ def _gpu_info(args: argparse.Namespace) -> int:
 
 
 def _get_ncu(args: argparse.Namespace) -> int:
-    found = find().ncu
+    found = find_toolchain().ncu
     if found is None or args.force or args.cuda_version is not None:
         folder = cache_folder()
         if folder is None:

@@ -79,7 +79,7 @@ def test_import_turns_records_into_a_trace_with_kernel_relative_pcs(tmp_path):
     trace = capture.Trace.load(path)
     assert int(trace.pc[0]) == 0x120
     assert trace.metadata["arch"] == "sm_89"
-    (counter,) = counters.count(trace)
+    (counter,) = counters.count_instructions(trace)
     assert (counter.achieved, counter.conflicts) == (32, 31)
 
 
@@ -167,9 +167,9 @@ def test_import_keeps_the_origin_of_an_inlined_access_with_its_header_line(tmp_p
 
 def test_import_takes_one_launch_at_a_time_when_records_fill_its_memory(tmp_path, monkeypatch):
     paths = [write_launch(tmp_path, index, [row(0x10, [0] * WARP_SIZE)]) for index in range(4)]
-    assert capture._workers(paths) == min(capture.IMPORT_THREADS, os.cpu_count() or 1)
+    assert capture._import_worker_count(paths) == min(capture.IMPORT_THREADS, os.cpu_count() or 1)
     monkeypatch.setattr(capture, "IMPORT_BYTES", capture.RECORD_DTYPE.itemsize)
-    assert capture._workers(paths) == 1
+    assert capture._import_worker_count(paths) == 1
 
 
 def test_record_replaces_the_files_of_an_earlier_recording(tmp_path):
@@ -187,7 +187,7 @@ def test_record_replaces_the_files_of_an_earlier_recording(tmp_path):
     build = RecorderBuild(
         tmp_path / "build" / "lib.so", tmp_path / "build" / "patches.cubin", tmp_path / "libsan.so"
     )
-    assert capture.record([sys.executable, "-c", one_launch], build, tmp_path) == 0
+    assert capture.record_command([sys.executable, "-c", one_launch], build, tmp_path) == 0
     assert sorted(path.name for path in tmp_path.iterdir()) == [
         "launch-0.json",
         "launch-1.orig.json",
@@ -212,7 +212,7 @@ def test_recorder_loads_from_folders_whose_paths_hold_spaces(tmp_path):
     build_probe(source, sanitizer, "sanitizer")
     out = tmp_path / "my project" / "record"
     build = RecorderBuild(library, library.parent / "patches.cubin", sanitizer)
-    assert capture.record([sys.executable, "-c", ""], build, out) == 0
+    assert capture.record_command([sys.executable, "-c", ""], build, out) == 0
     assert sorted((out / "loaded.txt").read_text().split()) == ["recorder", "sanitizer"]
 
 
@@ -286,7 +286,7 @@ def _has_gpu() -> bool:
     return True
 
 
-TOOLS = toolchain.find()
+TOOLS = toolchain.find_toolchain()
 needs_gpu = pytest.mark.skipif(
     TOOLS.nvrtc is None or shutil.which("g++") is None or not _has_gpu(),
     reason="NVRTC, g++, and a GPU are needed",
@@ -303,7 +303,7 @@ def record_script(tmp_path, text, **settings):
     script.write_text(text)
     out_dir = tmp_path / "record"
     settings.setdefault("ctas", (0, 1 << 30))
-    assert capture.record([sys.executable, str(script)], build, out_dir, **settings) == 0
+    assert capture.record_command([sys.executable, str(script)], build, out_dir, **settings) == 0
     paths = capture.import_recording(out_dir, TOOLS.disassemblers)
     return [Trace.load(path) for path in paths], out_dir
 
@@ -314,7 +314,7 @@ import sys
 
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver
-from lanescope.cuda.toolchain import find
+from lanescope.cuda.toolchain import find_toolchain
 
 SOURCE = """
 extern "C" __global__ void ldmatrix_x4(unsigned sink) {
@@ -329,7 +329,7 @@ extern "C" __global__ void ldmatrix_x4(unsigned sink) {
 """
 driver = Driver()
 options = [f"--gpu-architecture={driver.arch()}"]
-program = nvrtc.compile_cuda(SOURCE, "ldmatrix.cu", options, find().nvrtc)
+program = nvrtc.compile_cuda(SOURCE, "ldmatrix.cu", options, find_toolchain().nvrtc)
 module = driver.load(program.cubin)
 kernel = driver.function(module, "ldmatrix_x4")
 driver.launch(kernel, (1, 1, 1), (32, 1, 1), [ctypes.c_uint32(0xFFFFFFFF)])
@@ -355,7 +355,7 @@ import ctypes
 
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver
-from lanescope.cuda.toolchain import find
+from lanescope.cuda.toolchain import find_toolchain
 
 SOURCE = """
 // From sm_120 on, the compiler drops a plain read of shared memory that nothing wrote.
@@ -371,7 +371,7 @@ for _ in range(2):
     # Each pass releases the primary context, so the second pass runs in a new context.
     driver = Driver()
     options = [f"--gpu-architecture={driver.arch()}"]
-    program = nvrtc.compile_cuda(SOURCE, "read_tile.cu", options, find().nvrtc)
+    program = nvrtc.compile_cuda(SOURCE, "read_tile.cu", options, find_toolchain().nvrtc)
     kernel = driver.function(driver.load(program.cubin), "read_tile")
     driver.launch(kernel, (1, 1, 1), (32, 1, 1), [ctypes.c_uint32(0xFFFFFFFF)])
     driver.close()
@@ -389,7 +389,7 @@ import ctypes
 
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver
-from lanescope.cuda.toolchain import find
+from lanescope.cuda.toolchain import find_toolchain
 
 driver = Driver()
 options = [f"--gpu-architecture={driver.arch()}"]
@@ -400,7 +400,7 @@ extern "C" __global__ void {name}(unsigned sink) {{
     if (tile[threadIdx.x] == sink) asm volatile("trap;");
 }}
 """
-    program = nvrtc.compile_cuda(source, f"{name}.cu", options, find().nvrtc)
+    program = nvrtc.compile_cuda(source, f"{name}.cu", options, find_toolchain().nvrtc)
     kernel = driver.function(driver.load(program.cubin), name)
     driver.launch(kernel, (1, 1, 1), (32, 1, 1), [ctypes.c_uint32(0xFFFFFFFF)])
 driver.close()
@@ -420,7 +420,7 @@ import ctypes
 
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver
-from lanescope.cuda.toolchain import find
+from lanescope.cuda.toolchain import find_toolchain
 
 SOURCE = """
 extern "C" __global__ void copy_odd_lanes(const unsigned char* buffer) {
@@ -436,7 +436,7 @@ extern "C" __global__ void copy_odd_lanes(const unsigned char* buffer) {
 """
 driver = Driver()
 options = [f"--gpu-architecture={driver.arch()}"]
-program = nvrtc.compile_cuda(SOURCE, "copy.cu", options, find().nvrtc)
+program = nvrtc.compile_cuda(SOURCE, "copy.cu", options, find_toolchain().nvrtc)
 kernel = driver.function(driver.load(program.cubin), "copy_odd_lanes")
 buffer = driver.alloc(512)
 driver.launch(kernel, (1, 1, 1), (32, 1, 1), [ctypes.c_uint64(buffer)])
@@ -457,7 +457,7 @@ import ctypes
 
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver
-from lanescope.cuda.toolchain import find
+from lanescope.cuda.toolchain import find_toolchain
 
 SOURCE = """
 // From sm_120 on, the compiler drops a plain read of shared memory that nothing wrote.
@@ -471,7 +471,7 @@ extern "C" __global__ void read_tile(unsigned sink) {
 """
 driver = Driver()
 options = [f"--gpu-architecture={driver.arch()}"]
-program = nvrtc.compile_cuda(SOURCE, "read_tile.cu", options, find().nvrtc)
+program = nvrtc.compile_cuda(SOURCE, "read_tile.cu", options, find_toolchain().nvrtc)
 kernel = driver.function(driver.load(program.cubin), "read_tile")
 driver.launch(kernel, (8, 1, 1), (32, 1, 1), [ctypes.c_uint32(0xFFFFFFFF)])
 driver.close()
@@ -490,7 +490,7 @@ import time
 
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver, _pointers
-from lanescope.cuda.toolchain import find
+from lanescope.cuda.toolchain import find_toolchain
 
 SOURCE = """
 extern "C" __global__ void reverse(unsigned* out) {
@@ -502,16 +502,16 @@ extern "C" __global__ void reverse(unsigned* out) {
 """
 driver = Driver()
 options = [f"--gpu-architecture={driver.arch()}"]
-program = nvrtc.compile_cuda(SOURCE, "reverse.cu", options, find().nvrtc)
+program = nvrtc.compile_cuda(SOURCE, "reverse.cu", options, find_toolchain().nvrtc)
 kernel = driver.function(driver.load(program.cubin), "reverse")
 out = driver.alloc(4 * 32)
 arguments = _pointers([ctypes.c_uint64(out)])
 # The two launches queue on the stream without a synchronization between them. The first
 # has finished by the time the second starts.
-driver._call("cuLaunchKernel", kernel, 1, 1, 1, 32, 1, 1, 0, None, arguments, None)
+driver._call_driver_function("cuLaunchKernel", kernel, 1, 1, 1, 32, 1, 1, 0, None, arguments, None)
 time.sleep(0.5)
-driver._call("cuLaunchKernel", kernel, 1, 1, 1, 32, 1, 1, 0, None, arguments, None)
-driver._call("cuCtxSynchronize")
+driver._call_driver_function("cuLaunchKernel", kernel, 1, 1, 1, 32, 1, 1, 0, None, arguments, None)
+driver._call_driver_function("cuCtxSynchronize")
 driver.free(out)
 driver.close()
 '''
@@ -521,7 +521,7 @@ driver.close()
 def test_recorder_saves_a_finished_launch_that_waits_for_no_synchronization(tmp_path):
     driver = Driver()
     free, total = ctypes.c_size_t(), ctypes.c_size_t()
-    driver._call("cuMemGetInfo_v2", ctypes.byref(free), ctypes.byref(total))
+    driver._call_driver_function("cuMemGetInfo_v2", ctypes.byref(free), ctypes.byref(total))
     driver.close()
     # Each record buffer takes a sixth of the GPU, so the second queued launch would pass a
     # quarter if the first one kept its buffer.
@@ -538,7 +538,7 @@ import ctypes
 
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver, _pointers
-from lanescope.cuda.toolchain import find
+from lanescope.cuda.toolchain import find_toolchain
 
 SOURCE = """
 extern "C" __global__ void slow_reads(unsigned* out, unsigned rounds) {
@@ -557,18 +557,20 @@ extern "C" __global__ void slow_reads(unsigned* out, unsigned rounds) {
 """
 driver = Driver()
 options = [f"--gpu-architecture={driver.arch()}"]
-program = nvrtc.compile_cuda(SOURCE, "slow.cu", options, find().nvrtc)
+program = nvrtc.compile_cuda(SOURCE, "slow.cu", options, find_toolchain().nvrtc)
 kernel = driver.function(driver.load(program.cubin), "slow_reads")
 out = driver.alloc(4 * 32)
 stream = ctypes.c_void_p()
-driver._call("cuStreamCreate", ctypes.byref(stream), 0)
+driver._call_driver_function("cuStreamCreate", ctypes.byref(stream), 0)
 arguments = _pointers([ctypes.c_uint64(out), ctypes.c_uint32(20000)])
-driver._call("cuLaunchKernel", kernel, 1, 1, 1, 32, 1, 1, 0, stream, arguments, None)
+driver._call_driver_function(
+    "cuLaunchKernel", kernel, 1, 1, 1, 32, 1, 1, 0, stream, arguments, None
+)
 # The stream goes while its kernel still runs, and a second launch follows on another stream.
-driver._call("cuStreamDestroy_v2", stream)
+driver._call_driver_function("cuStreamDestroy_v2", stream)
 short = _pointers([ctypes.c_uint64(out), ctypes.c_uint32(1)])
-driver._call("cuLaunchKernel", kernel, 1, 1, 1, 32, 1, 1, 0, None, short, None)
-driver._call("cuCtxSynchronize")
+driver._call_driver_function("cuLaunchKernel", kernel, 1, 1, 1, 32, 1, 1, 0, None, short, None)
+driver._call_driver_function("cuCtxSynchronize")
 driver.free(out)
 driver.close()
 '''
@@ -588,7 +590,7 @@ import ctypes
 
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver
-from lanescope.cuda.toolchain import find
+from lanescope.cuda.toolchain import find_toolchain
 
 SOURCE = """
 // A call keeps the two sides of the branch apart, where the compiler would otherwise
@@ -625,7 +627,7 @@ extern "C" __global__ void diverged_loads(unsigned* out) {
 """
 driver = Driver()
 options = [f"--gpu-architecture={driver.arch()}"]
-program = nvrtc.compile_cuda(SOURCE, "diverged.cu", options, find().nvrtc)
+program = nvrtc.compile_cuda(SOURCE, "diverged.cu", options, find_toolchain().nvrtc)
 kernel = driver.function(driver.load(program.cubin), "diverged_loads")
 out = driver.alloc(4 * 128)
 driver.launch(kernel, (1, 1, 1), (128, 1, 1), [ctypes.c_uint64(out)])

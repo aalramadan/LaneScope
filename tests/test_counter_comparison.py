@@ -3,7 +3,7 @@ import pathlib
 import types
 
 from lanescope import demos
-from lanescope.nsight import compare
+from lanescope.nsight import counter_comparison
 
 KERNEL_START = 0x7FD4_A325_D200
 TIMESTAMP = 0x18E0_86DA_7F2B_1060
@@ -57,8 +57,10 @@ def read_stand_in(monkeypatch, action):
             num_actions=lambda: 1, action_by_idx=lambda index: action
         ),
     )
-    monkeypatch.setattr(compare, "ncu_report", types.SimpleNamespace(load_report=lambda p: report))
-    (kernel,) = compare.read_report(pathlib.Path("transposeCoalesced.ncu-rep"))
+    monkeypatch.setattr(
+        counter_comparison, "ncu_report", types.SimpleNamespace(load_report=lambda p: report)
+    )
+    (kernel,) = counter_comparison.read_report(pathlib.Path("transposeCoalesced.ncu-rep"))
     return kernel
 
 
@@ -124,7 +126,7 @@ TILE_SASS = {
 
 
 def counters_for_transpose(load_tile_wavefronts=4096):
-    return compare.KernelCounters(
+    return counter_comparison.KernelCounters(
         kernel="transpose",
         metrics={
             "memory_l1_wavefronts_shared": {
@@ -145,7 +147,9 @@ def counters_for_transpose(load_tile_wavefronts=4096):
 
 
 def test_matching_counts_give_matching_rows():
-    rows = compare.compare(0, demos.transpose_trace(), counters_for_transpose())
+    rows = counter_comparison.compare_launch_counters(
+        0, demos.transpose_trace(), counters_for_transpose()
+    )
     shared = [row for row in rows if row.quantity == "shared_wavefronts"]
     assert {row.offset: row.matches for row in shared} == {
         demos.PC_STORE_TILE: True,
@@ -154,7 +158,9 @@ def test_matching_counts_give_matching_rows():
 
 
 def test_a_different_count_is_a_mismatch():
-    rows = compare.compare(0, demos.transpose_trace(), counters_for_transpose(2048))
+    rows = counter_comparison.compare_launch_counters(
+        0, demos.transpose_trace(), counters_for_transpose(2048)
+    )
     (row,) = [
         r for r in rows if r.offset == demos.PC_LOAD_TILE and r.quantity == "shared_wavefronts"
     ]
@@ -167,11 +173,11 @@ def with_unseen_instruction(counters, offset=0x200):
     metrics["memory_l1_wavefronts_shared"][offset] = 4.0
     metrics["memory_l1_wavefronts_shared_ideal"][offset] = 4.0
     sass = counters.sass | {offset: "ATOMS.CAST.SPIN.64 P0, [R9], R4, R6"}
-    return compare.KernelCounters(kernel=counters.kernel, metrics=metrics, sass=sass)
+    return counter_comparison.KernelCounters(kernel=counters.kernel, metrics=metrics, sass=sass)
 
 
 def test_an_instruction_that_only_nsight_compute_counts_is_a_miss():
-    rows = compare.compare(
+    rows = counter_comparison.compare_launch_counters(
         0, demos.transpose_trace(), with_unseen_instruction(counters_for_transpose())
     )
     unseen = [row for row in rows if not row.seen]
@@ -185,7 +191,7 @@ def test_an_instruction_that_only_nsight_compute_counts_is_a_miss():
 
 def test_offsets_paired_by_rank_report_no_unseen_instruction():
     shifted = counters_for_transpose()
-    moved = compare.KernelCounters(
+    moved = counter_comparison.KernelCounters(
         kernel=shifted.kernel,
         metrics={
             name: {offset + 0x1000: value for offset, value in values.items()}
@@ -193,7 +199,9 @@ def test_offsets_paired_by_rank_report_no_unseen_instruction():
         },
         sass={offset + 0x1000: text for offset, text in shifted.sass.items()},
     )
-    rows = compare.compare(0, demos.transpose_trace(), with_unseen_instruction(moved, 0x1300))
+    rows = counter_comparison.compare_launch_counters(
+        0, demos.transpose_trace(), with_unseen_instruction(moved, 0x1300)
+    )
     assert all(row.seen for row in rows)
 
 
@@ -208,20 +216,22 @@ def test_missing_quantity_gives_no_metric():
 
 
 def test_opcode_drops_the_predicate():
-    assert compare.opcode("@P0 LDS.U.128 R4, [R2]") == "LDS.U.128"
-    assert compare.opcode("") == ""
+    assert counter_comparison.opcode("@P0 LDS.U.128 R4, [R2]") == "LDS.U.128"
+    assert counter_comparison.opcode("") == ""
 
 
 def test_summary_counts_matches_per_opcode_and_quantity():
-    rows = compare.compare(0, demos.transpose_trace(), counters_for_transpose(2048))
-    summary = compare.summarize(rows)
+    rows = counter_comparison.compare_launch_counters(
+        0, demos.transpose_trace(), counters_for_transpose(2048)
+    )
+    summary = counter_comparison.summarize(rows)
     assert summary["LDS shared_wavefronts"] == {"matched": 0, "total": 1}
     assert summary["STS shared_wavefronts"] == {"matched": 1, "total": 1}
 
 
 def test_dump_writes_every_metric_with_hex_offsets(tmp_path):
     path = tmp_path / "metrics.json"
-    compare.dump([counters_for_transpose()], path)
+    counter_comparison.dump_source_counters([counters_for_transpose()], path)
     (kernel,) = json.loads(path.read_text())
     assert kernel["sass"]["0x120"] == "@P0 LDS R7, [R6]"
     assert kernel["metrics"]["memory_l1_wavefronts_shared"]["0x120"] == 4096.0
@@ -229,7 +239,7 @@ def test_dump_writes_every_metric_with_hex_offsets(tmp_path):
 
 def test_offsets_on_another_base_pair_by_rank():
     shifted = counters_for_transpose()
-    moved = compare.KernelCounters(
+    moved = counter_comparison.KernelCounters(
         kernel=shifted.kernel,
         metrics={
             name: {offset + 0x1000: value for offset, value in values.items()}
@@ -237,13 +247,13 @@ def test_offsets_on_another_base_pair_by_rank():
         },
         sass={offset + 0x1000: text for offset, text in shifted.sass.items()},
     )
-    rows = compare.compare(0, demos.transpose_trace(), moved)
+    rows = counter_comparison.compare_launch_counters(0, demos.transpose_trace(), moved)
     assert all(row.matches for row in rows if row.quantity != "global_sectors_ideal")
     assert {row.sass for row in rows if row.offset == demos.PC_LOAD_TILE} == {"@P0 LDS R7, [R6]"}
 
 
 def test_counts_split_by_direction_are_added_up():
-    counters = compare.KernelCounters(
+    counters = counter_comparison.KernelCounters(
         kernel="k",
         metrics={
             "smsp__sass_wavefronts_mem_shared_op_ld": {0x10: 32.0},
@@ -271,17 +281,17 @@ def test_read_report_keeps_the_mangled_name_that_the_recorder_gives_a_kernel(mon
     module = types.SimpleNamespace(
         load_report=lambda p: report, IAction=types.SimpleNamespace(NameBase_MANGLED="mangled")
     )
-    monkeypatch.setattr(compare, "ncu_report", module)
-    (kernel,) = compare.read_report(pathlib.Path("transposeCoalesced.ncu-rep"))
+    monkeypatch.setattr(counter_comparison, "ncu_report", module)
+    (kernel,) = counter_comparison.read_report(pathlib.Path("transposeCoalesced.ncu-rep"))
     assert (kernel.kernel, kernel.mangled) == ("transposeCoalesced", "_Z18transposeCoalescedPfPKf")
 
 
 def test_rows_name_the_kernel_by_the_name_that_the_recorder_gives_it():
-    counters = compare.KernelCounters(
+    counters = counter_comparison.KernelCounters(
         kernel="transpose(float *)",
         metrics={"memory_l1_wavefronts_shared": {0x120: 4096.0}},
         sass={0x120: "LDS R0, [R1]"},
         mangled="_Z9transposePf",
     )
-    rows = compare.compare(0, demos.transpose_trace(), counters)
+    rows = counter_comparison.compare_launch_counters(0, demos.transpose_trace(), counters)
     assert {row.kernel for row in rows} == {"_Z9transposePf"}

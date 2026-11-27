@@ -9,7 +9,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterable, Sequence
 
-FORMAT = 1
+FILE_FORMAT = 1
 RUN_FILE = "run.json"
 TIMES_FILE = "kernel-times.json"
 # The timer writes the times of each process to this path with its process id appended.
@@ -33,17 +33,17 @@ class KernelTime:
     even_launches: bool
 
 
-def write_run(
+def write_stored_command(
     folder: pathlib.Path, command: Sequence[str], cwd: pathlib.Path | None = None
 ) -> None:
     """Store the command of a folder and remove the kernel times of an earlier command."""
     folder.mkdir(parents=True, exist_ok=True)
-    run = {"format": FORMAT, "command": list(command), "cwd": str(cwd or pathlib.Path.cwd())}
+    run = {"format": FILE_FORMAT, "command": list(command), "cwd": str(cwd or pathlib.Path.cwd())}
     (folder / RUN_FILE).write_text(json.dumps(run, indent=1) + "\n")
     (folder / TIMES_FILE).unlink(missing_ok=True)
 
 
-def read_run(folder: pathlib.Path) -> tuple[list[str], pathlib.Path]:
+def read_stored_command(folder: pathlib.Path) -> tuple[list[str], pathlib.Path]:
     """Return the stored command of a folder and the folder it runs in."""
     path = folder / RUN_FILE
     if not path.is_file():
@@ -58,13 +58,13 @@ def read_run(folder: pathlib.Path) -> tuple[list[str], pathlib.Path]:
     command = run.get("command") if isinstance(run, dict) else None
     if (
         not isinstance(run, dict)
-        or run.get("format") != FORMAT
+        or run.get("format") != FILE_FORMAT
         or not isinstance(command, list)
         or not command
         or not all(isinstance(part, str) for part in command)
         or not isinstance(run.get("cwd"), str)
     ):
-        raise ValueError(f"{path} is no stored command of format {FORMAT}")
+        raise ValueError(f"{path} is no stored command of format {FILE_FORMAT}")
     return command, pathlib.Path(run["cwd"])
 
 
@@ -81,13 +81,13 @@ def time_folders(
     hits every folder alike. A run that fails or leaves no times raises ValueError
     before any folder gets its times.
     """
-    runs = [read_run(folder) for folder in folders]
+    runs = [read_stored_command(folder) for folder in folders]
     seconds: list[list[float]] = [[] for _ in folders]
     measured: list[list[dict[str, dict]]] = [[] for _ in folders]
     untimed: list[list[int]] = [[] for _ in folders]
     for round_index in range(rounds):
         for index, (folder, (command, cwd)) in enumerate(zip(folders, runs, strict=True)):
-            wall, kernels, without = _run_once(folder, command, cwd, timer, round_index)
+            wall, kernels, without = _time_one_run(folder, command, cwd, timer, round_index)
             seconds[index].append(wall)
             measured[index].append(kernels)
             untimed[index].append(without)
@@ -96,11 +96,11 @@ def time_folders(
     results = []
     for folder, walls, per_round, without in zip(folders, seconds, measured, untimed, strict=True):
         result = {
-            "format": FORMAT,
+            "format": FILE_FORMAT,
             "rounds": rounds,
             "wall_seconds": walls,
             "untimed_launches": without,
-            "kernels": _by_kernel(per_round),
+            "kernels": _times_by_kernel(per_round),
         }
         (folder / TIMES_FILE).write_text(json.dumps(result, indent=1) + "\n")
         results.append(result)
@@ -118,7 +118,7 @@ def read_times(folder: pathlib.Path) -> dict | None:
         raise ValueError(f"{path} holds no kernel times ({error})") from error
     if not _valid_times(result):
         raise ValueError(
-            f"{path} holds no kernel times of format {FORMAT}. Time the folder again with "
+            f"{path} holds no kernel times of format {FILE_FORMAT}. Time the folder again with "
             f"lanescope time {folder}"
         )
     return result
@@ -152,7 +152,7 @@ def ranked(result: dict) -> list[KernelTime]:
     return sorted(found, key=lambda kernel: (-kernel.median_ns, kernel.name))
 
 
-def _run_once(
+def _time_one_run(
     folder: pathlib.Path,
     command: Sequence[str],
     cwd: pathlib.Path,
@@ -190,7 +190,7 @@ def _run_once(
                 else f"exited with status {done.returncode}"
             )
             raise ValueError(f"{where} {ending}{tail}")
-        kernels, untimed = _process_times(pathlib.Path(scratch))
+        kernels, untimed = _merge_process_times(pathlib.Path(scratch))
         if not kernels:
             raise ValueError(
                 f"{where} exited with status 0 and left no kernel times. It launched no CUDA "
@@ -199,7 +199,7 @@ def _run_once(
     return wall, kernels, untimed
 
 
-def _process_times(scratch: pathlib.Path) -> tuple[dict[str, dict], int]:
+def _merge_process_times(scratch: pathlib.Path) -> tuple[dict[str, dict], int]:
     """Return the times of every process of one run by kernel name, and the launches that
     CUPTI gave no time."""
     kernels: dict[str, dict] = {}
@@ -226,7 +226,7 @@ def _process_times(scratch: pathlib.Path) -> tuple[dict[str, dict], int]:
 
 
 def _valid_times(result: object) -> bool:
-    if not isinstance(result, dict) or result.get("format") != FORMAT:
+    if not isinstance(result, dict) or result.get("format") != FILE_FORMAT:
         return False
     rounds, kernels = result.get("rounds"), result.get("kernels")
     if not isinstance(rounds, int) or rounds < 1 or not isinstance(kernels, dict):
@@ -243,7 +243,7 @@ def _valid_times(result: object) -> bool:
     )
 
 
-def _by_kernel(per_round: Sequence[dict[str, dict]]) -> dict[str, dict]:
+def _times_by_kernel(per_round: Sequence[dict[str, dict]]) -> dict[str, dict]:
     names = sorted({name for kernels in per_round for name in kernels})
     result = {}
     for name in names:

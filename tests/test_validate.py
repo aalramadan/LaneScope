@@ -7,8 +7,8 @@ import pytest
 
 from lanescope import demos
 from lanescope.cuda.driver import DriverError
-from lanescope.cuda.toolchain import find
-from lanescope.nsight import calibration, compare, validate
+from lanescope.cuda.toolchain import find_toolchain
+from lanescope.nsight import calibration, counter_comparison, validate
 from lanescope.recorder.build import RecorderBuild
 from lanescope.trace import WARP_SIZE, Access, Kind, Space, Trace
 
@@ -21,7 +21,7 @@ def filler_trace():
 
 
 def kernel(name, store_wavefronts, load_wavefronts):
-    return compare.KernelCounters(
+    return counter_comparison.KernelCounters(
         kernel=name,
         metrics={"memory_l1_wavefronts_shared": {0x40: store_wavefronts, 0x80: load_wavefronts}},
         sass={0x40: "STS [R2], R3", 0x80: "LDS R4, [R5]"},
@@ -31,7 +31,7 @@ def kernel(name, store_wavefronts, load_wavefronts):
 def test_launch_names_cover_every_case_the_transposes_and_the_matmuls():
     names = validate.launch_names()
     fixed = list(calibration.TRANSPOSE_KERNELS) + list(calibration.MATMUL_KERNELS)
-    assert len(names) == len(calibration.launches()) + len(fixed)
+    assert len(names) == len(calibration.launch_order_cases()) + len(fixed)
     assert names[-len(fixed) :] == fixed
 
 
@@ -61,7 +61,7 @@ def traces_and_kernels():
     counters = [kernel(name, 0.0, 0.0) for name in kernels]
     counters[names.index("transpose_padded")] = kernel("transpose_padded", 128.0, 128.0)
     counters[names.index("transpose_swizzled")] = kernel("transpose_swizzled", 128.0, 4096.0)
-    counters[names.index("matmul_swizzled")] = compare.KernelCounters(
+    counters[names.index("matmul_swizzled")] = counter_comparison.KernelCounters(
         kernel="matmul_swizzled",
         metrics={"memory_l1_wavefronts_shared": {0x40: 4.0, 0x80: 4.0}},
         sass={0x40: "LDGSTS.E.BYPASS.128 [R1][R2.64]", 0x80: "LDSM.16.M88.4 R4, [R5]"},
@@ -112,7 +112,7 @@ def test_validation_stops_with_a_clear_error_without_a_gpu(tmp_path):
     else:
         pytest.skip("a CUDA driver is present")
     with pytest.raises(DriverError, match="cannot load the CUDA driver"):
-        validate.validate(tmp_path)
+        validate.validate_against_nsight(tmp_path)
 
 
 class StandInDriver:
@@ -143,15 +143,15 @@ def offline_check(monkeypatch, tmp_path):
     monkeypatch.setattr(validate, "check_versions", lambda tools, version: None)
     monkeypatch.setattr(validate, "build_recorder", lambda out_dir, arch, tools, cache: recorder)
     monkeypatch.setattr(validate.calibration, "compile_kernels", lambda arch, tools, source: b"")
-    monkeypatch.setattr(validate.capture, "record", lambda command, build, out, **kw: 0)
+    monkeypatch.setattr(validate.capture, "record_command", lambda command, build, out, **kw: 0)
     monkeypatch.setattr(validate.capture, "import_recording", lambda out, tools: list(traces))
     return traces
 
 
 def test_validation_stops_when_the_recorded_run_writes_no_launch_files(tmp_path, offline_check):
-    tools = dataclasses.replace(find(), ncu=None)
+    tools = dataclasses.replace(find_toolchain(), ncu=None)
     with pytest.raises(validate.ValidationError, match="no launch files"):
-        validate.validate(tmp_path / "check", tools=tools)
+        validate.validate_against_nsight(tmp_path / "check", tools=tools)
 
 
 def test_random_patterns_reach_the_recorded_run_and_the_launch_names(
@@ -163,21 +163,23 @@ def test_random_patterns_reach_the_recorded_run_and_the_launch_names(
         commands.append(command)
         return 0
 
-    monkeypatch.setattr(validate.capture, "record", record)
+    monkeypatch.setattr(validate.capture, "record_command", record)
     trace = tmp_path / "trace-0.npz"
     filler_trace().save(trace)
     offline_check.append(trace)
-    tools = dataclasses.replace(find(), ncu=None)
-    validate.validate(tmp_path / "check", tools=tools, random_count=5, seed=7)
+    tools = dataclasses.replace(find_toolchain(), ncu=None)
+    validate.validate_against_nsight(tmp_path / "check", tools=tools, random_count=5, seed=7)
     assert commands[0][-4:] == ["--random", "5", "--seed", "7"]
     names = validate.launch_names(5, 7)
     assert names[: -len(calibration.TRANSPOSE_KERNELS) - len(calibration.MATMUL_KERNELS)] == [
-        case.name for case in calibration.launches(5, 7)
+        case.name for case in calibration.launch_order_cases(5, 7)
     ]
 
 
 def summary_row(launch, nsight):
-    return compare.Row(launch, "k", 0x10, "LDS R0, [R0]", "shared_wavefronts", 1, nsight)
+    return counter_comparison.CounterComparison(
+        launch, "k", 0x10, "LDS R0, [R0]", "shared_wavefronts", 1, nsight
+    )
 
 
 def test_summary_gives_the_matched_counts_of_each_group_of_launches():
@@ -197,7 +199,7 @@ def test_summary_gives_the_matched_counts_of_each_group_of_launches():
 
 
 def test_summary_names_the_instructions_that_only_nsight_compute_counts():
-    unseen = compare.Row(
+    unseen = counter_comparison.CounterComparison(
         3, "k", 0x40, "ATOMS.CAST.SPIN.64 P0, [R9], R4, R6", "shared_wavefronts", 0, 4.0, seen=False
     )
     rows = [summary_row(0, 1.0), unseen, dataclasses.replace(unseen, launch=4)]
@@ -213,8 +215,8 @@ def test_validation_without_nsight_compute_says_how_to_get_it(tmp_path, offline_
     trace = tmp_path / "trace-0.npz"
     filler_trace().save(trace)
     offline_check.append(trace)
-    tools = dataclasses.replace(find(), ncu=None)
-    summary = validate.validate(tmp_path / "check", tools=tools).read_text()
+    tools = dataclasses.replace(find_toolchain(), ncu=None)
+    summary = validate.validate_against_nsight(tmp_path / "check", tools=tools).read_text()
     assert "`lanescope get-ncu`" in summary
     assert "install Nsight Compute" in summary
 
@@ -227,16 +229,18 @@ def program_check(monkeypatch, tmp_path, counters):
     calls = []
     monkeypatch.setattr(validate.capture, "import_recording", lambda out, tools: [trace])
     monkeypatch.setattr(
-        validate, "_profile", lambda tools, command, report, kernel="": calls.append(kernel)
+        validate,
+        "_profile_with_ncu",
+        lambda tools, command, report, kernel="": calls.append(kernel),
     )
-    monkeypatch.setattr(validate.compare, "read_report", lambda report: counters)
+    monkeypatch.setattr(validate.counter_comparison, "read_report", lambda report: counters)
     return calls
 
 
 def test_validating_a_program_compares_each_of_its_launches_with_its_counters(
     tmp_path, offline_check, monkeypatch
 ):
-    counters = compare.KernelCounters(
+    counters = counter_comparison.KernelCounters(
         kernel="k(float *)",
         metrics={
             "memory_l1_wavefronts_shared": {0x80: 32.0},
@@ -245,7 +249,7 @@ def test_validating_a_program_compares_each_of_its_launches_with_its_counters(
         sass={0x80: "LDS R0, [R1]"},
     )
     calls = program_check(monkeypatch, tmp_path, [counters])
-    tools = dataclasses.replace(find(), ncu=pathlib.Path("ncu"))
+    tools = dataclasses.replace(find_toolchain(), ncu=pathlib.Path("ncu"))
     summary = validate.validate_program(tmp_path / "check", ["./app"], "k", tools=tools)
     text = summary.read_text()
     assert "LaneScope matches Nsight Compute in 2 of 2 instruction counts." in text
@@ -255,9 +259,11 @@ def test_validating_a_program_compares_each_of_its_launches_with_its_counters(
 def test_validating_a_program_without_nvdisasm_says_that_instruction_rules_fall_back(
     tmp_path, offline_check, monkeypatch
 ):
-    counters = compare.KernelCounters(kernel="k", metrics={}, sass={})
+    counters = counter_comparison.KernelCounters(kernel="k", metrics={}, sass={})
     program_check(monkeypatch, tmp_path, [counters])
-    tools = dataclasses.replace(find(), ncu=pathlib.Path("ncu"), nvdisasm=None, disassemblers=())
+    tools = dataclasses.replace(
+        find_toolchain(), ncu=pathlib.Path("ncu"), nvdisasm=None, disassemblers=()
+    )
     summary = validate.validate_program(tmp_path / "check", ["./app"], "k", tools=tools)
     assert "nvdisasm was not found" in summary.read_text()
 
@@ -265,30 +271,32 @@ def test_validating_a_program_without_nvdisasm_says_that_instruction_rules_fall_
 def test_validating_a_program_names_a_launch_without_counters_of_its_kernel(
     tmp_path, offline_check, monkeypatch
 ):
-    other = compare.KernelCounters(kernel="other(float *)", metrics={}, sass={})
+    other = counter_comparison.KernelCounters(kernel="other(float *)", metrics={}, sass={})
     program_check(monkeypatch, tmp_path, [other])
-    tools = dataclasses.replace(find(), ncu=pathlib.Path("ncu"))
+    tools = dataclasses.replace(find_toolchain(), ncu=pathlib.Path("ncu"))
     text = validate.validate_program(tmp_path / "check", ["./app"], tools=tools).read_text()
     assert "Launch 0 (k) has Nsight Compute counters of other(float *)." in text
 
 
 def test_a_launch_pairs_with_counters_that_carry_its_mangled_name():
     trace = Trace.from_accesses([], {"kernel": "_Z1kPf"})
-    counters = compare.KernelCounters(kernel="k(float *)", metrics={}, sass={}, mangled="_Z1kPf")
-    launches, problems = validate._pair([trace], [counters], ["_Z1kPf"], ["_Z1kPf"])
+    counters = counter_comparison.KernelCounters(
+        kernel="k(float *)", metrics={}, sass={}, mangled="_Z1kPf"
+    )
+    launches, problems = validate._match_launch([trace], [counters], ["_Z1kPf"], ["_Z1kPf"])
     assert problems == []
     assert launches[0].counters is counters
 
 
 def test_validating_a_program_needs_nsight_compute(tmp_path, offline_check):
-    tools = dataclasses.replace(find(), ncu=None)
+    tools = dataclasses.replace(find_toolchain(), ncu=None)
     with pytest.raises(validate.ValidationError, match="lanescope get-ncu"):
         validate.validate_program(tmp_path / "check", ["./app"], tools=tools)
 
 
 def test_cuda_tools_newer_than_the_driver_name_the_switch_to_the_wheels(monkeypatch):
     monkeypatch.setattr(validate.nvrtc, "version", lambda path: (12, 9))
-    tools = dataclasses.replace(find(), nvrtc=pathlib.Path("libnvrtc.so.12"))
+    tools = dataclasses.replace(find_toolchain(), nvrtc=pathlib.Path("libnvrtc.so.12"))
     with pytest.raises(validate.ValidationError, match="LANESCOPE_USE_WHEELS=1"):
         validate.check_versions(tools, 12060)
 
@@ -310,7 +318,7 @@ def test_profile_finds_the_report_of_an_nsight_compute_that_compresses_by_defaul
     ncu.write_text(NCU_2026)
     ncu.chmod(0o755)
     report = tmp_path / "out" / "bench.ncu-rep"
-    validate._profile(dataclasses.replace(find(), ncu=ncu), ["true"], report)
+    validate._profile_with_ncu(dataclasses.replace(find_toolchain(), ncu=ncu), ["true"], report)
     assert report.exists()
 
 
@@ -328,7 +336,9 @@ def test_profile_collects_only_the_source_counters_by_the_mangled_kernel_name(tm
     ncu.write_text(NCU_ARGUMENTS)
     ncu.chmod(0o755)
     report = tmp_path / "out" / "program.ncu-rep"
-    validate._profile(dataclasses.replace(find(), ncu=ncu), ["true"], report, "cudnn")
+    validate._profile_with_ncu(
+        dataclasses.replace(find_toolchain(), ncu=ncu), ["true"], report, "cudnn"
+    )
     arguments = (tmp_path / "arguments.txt").read_text().splitlines()
     assert arguments[arguments.index("--kernel-name-base") + 1] == "mangled"
     assert arguments[arguments.index("--kernel-name") + 1] == "regex:.*cudnn.*"
@@ -337,7 +347,7 @@ def test_profile_collects_only_the_source_counters_by_the_mangled_kernel_name(tm
 
 
 def test_metric_table_names_a_metric_that_only_later_kernels_report():
-    global_kernel = compare.KernelCounters(
+    global_kernel = counter_comparison.KernelCounters(
         kernel="global_load_4",
         metrics={"memory_l2_theoretical_sectors_global": {0x80: 4.0}},
         sass={0x80: "LDG.E R2, [R2.64]"},

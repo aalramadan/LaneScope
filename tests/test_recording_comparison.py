@@ -13,7 +13,7 @@ TILE_8 = "void ns::tile<8>(float*)"
 def padded_transpose():
     """Return the transpose with each row of its tile padded by one float, free of conflicts."""
     trace = demos.transpose_trace()
-    return layouts.apply(trace, layouts.infer_buffer(trace), layouts.Padding(128, 4))
+    return layouts.apply_layout_change(trace, layouts.infer_buffer(trace), layouts.Padding(128, 4))
 
 
 def timing(**kernels):
@@ -43,7 +43,7 @@ def side(run, traces, times=None, kernel=None):
 def test_a_fix_shows_its_counts_before_and_after_and_its_speedup():
     before = side("a", [demos.transpose_trace()], timing(transpose=[1_600, 1_700, 1_650]))
     after = side("b", [padded_transpose()], timing(transpose=[400, 420, 410]))
-    data = recording_comparison.compare(before, after)
+    data = recording_comparison.compare_summaries(before, after)
     (row,) = data["kernels"]
     assert (row["template"], row["name"]) == ("transpose", "transpose")
     assert row["before"]["wavefronts"] == {"achieved": 4224, "ideal": 256, "excessive": 3968}
@@ -56,14 +56,14 @@ def test_a_fix_shows_its_counts_before_and_after_and_its_speedup():
 def test_times_whose_rounds_overlap_lie_within_the_spread():
     before = side("a", [demos.transpose_trace()], timing(transpose=[500, 520, 510]))
     after = side("b", [demos.transpose_trace()], timing(transpose=[505, 515, 500]))
-    (row,) = recording_comparison.compare(before, after)["kernels"]
+    (row,) = recording_comparison.compare_summaries(before, after)["kernels"]
     assert row["time"]["within_spread"] is True
 
 
 def test_a_side_without_times_gives_no_speedup():
     before = side("a", [demos.transpose_trace()], timing(transpose=[500]))
     after = side("b", [padded_transpose()])
-    data = recording_comparison.compare(before, after)
+    data = recording_comparison.compare_summaries(before, after)
     assert data["kernels"][0]["time"] == {"speedup": None, "within_spread": None}
     assert data["total"]["time"] == {"speedup": None, "within_spread": None}
     assert data["timed"] == {"before": 1, "after": None}
@@ -72,7 +72,7 @@ def test_a_side_without_times_gives_no_speedup():
 def test_the_templates_of_one_side_alone_are_listed_apart():
     before = side("a", [demos.transpose_trace(), demos.row_sums_trace()])
     after = side("b", [padded_transpose(), demos.histogram_trace()])
-    data = recording_comparison.compare(before, after)
+    data = recording_comparison.compare_summaries(before, after)
     assert [row["name"] for row in data["kernels"]] == ["transpose"]
     assert [entry["name"] for entry in data["only_before"]] == ["row_sums"]
     assert [entry["name"] for entry in data["only_after"]] == ["histogram"]
@@ -86,7 +86,7 @@ def test_the_total_adds_up_every_kernel_of_each_side_with_the_time_of_the_whole_
         timing(transpose=[1_000, 1_200], row_sums=[100, 100], untraced=[50, 50]),
     )
     after = side("b", [padded_transpose()], timing(transpose=[300, 320]))
-    total = recording_comparison.compare(before, after)["total"]
+    total = recording_comparison.compare_summaries(before, after)["total"]
     assert total["before"]["launches"] == 2
     assert total["before"]["wavefronts"]["excessive"] == before["totals"]["wavefronts"]["excessive"]
     assert (total["before"]["time_ns"], total["before"]["time_range_ns"]) == (1_250, [1_150, 1_350])
@@ -98,7 +98,7 @@ def test_the_instances_of_a_template_compare_where_their_names_agree():
     traces = [demos.transpose_trace(tiles_per_side=1), demos.transpose_trace()]
     before = side("a", traces, kernel=[TILE_4, TILE_8])
     after = side("b", traces, kernel=[TILE_4, "void ns::tile<16>(float*)"])
-    (row,) = recording_comparison.compare(before, after)["kernels"]
+    (row,) = recording_comparison.compare_summaries(before, after)["kernels"]
     assert row["template"] == "ns::tile"
     assert [(found["kernel"], found["name"]) for found in row["instances"]] == [(TILE_4, "tile<4>")]
 
@@ -106,7 +106,7 @@ def test_the_instances_of_a_template_compare_where_their_names_agree():
 def test_a_template_of_one_instance_whose_arguments_change_compares_under_its_template():
     before = side("a", [demos.transpose_trace()], kernel=[TILE_4])
     after = side("b", [padded_transpose()], kernel=[TILE_8])
-    (row,) = recording_comparison.compare(before, after)["kernels"]
+    (row,) = recording_comparison.compare_summaries(before, after)["kernels"]
     assert (row["name"], row["full_name"], row["instances"]) == ("tile", "ns::tile", [])
 
 

@@ -3,7 +3,7 @@ import pytest
 
 from lanescope import demos, trace_reports
 from lanescope.fixes.layouts import Buffer
-from lanescope.model.counters import count
+from lanescope.model.counters import count_instructions
 from lanescope.model.data_dependence import (
     MAX_PATTERNS,
     MIN_ACCESSES,
@@ -26,7 +26,7 @@ def random_bins(accesses, warps, seed=7):
 
 
 def flagged(trace):
-    return {key[0] for key in data_dependent(trace, count(trace))}
+    return {key[0] for key in data_dependent(trace, count_instructions(trace))}
 
 
 def test_the_bins_of_the_histogram_demo_follow_its_input_values():
@@ -76,7 +76,7 @@ def test_suggest_for_a_given_buffer_says_whether_its_conflicts_follow_the_input_
 
 def test_the_evidence_of_a_shared_instruction_gives_its_rows_patterns_and_excess_counts():
     trace = random_bins(24, 8)
-    (counter,) = count(trace)
+    (counter,) = count_instructions(trace)
     (found,) = input_evidence(trace, [counter]).values()
     assert found.rows == 24
     assert found.patterns is not None and len(found.patterns) == 24
@@ -86,14 +86,14 @@ def test_the_evidence_of_a_shared_instruction_gives_its_rows_patterns_and_excess
 
 def test_the_evidence_of_one_trace_keeps_no_patterns_past_its_limit():
     trace = random_bins(MAX_PATTERNS + 1, 8)
-    (found,) = input_evidence(trace, count(trace)).values()
+    (found,) = input_evidence(trace, count_instructions(trace)).values()
     assert found.patterns is None
     assert found.data_dependent is True
 
 
 def test_instructions_without_excess_and_global_ones_carry_no_evidence():
     trace = demos.transpose_trace()
-    keys = {key[0] for key in input_evidence(trace, count(trace))}
+    keys = {key[0] for key in input_evidence(trace, count_instructions(trace))}
     assert keys == {demos.PC_LOAD_TILE}
 
 

@@ -2,7 +2,7 @@ import html
 
 from lanescope import __version__, text_view, trace_reports
 from lanescope.model import global_memory, shared_memory
-from lanescope.model.counters import InstructionCounters, count, worst_first
+from lanescope.model.counters import InstructionCounters, count_instructions, worst_first
 from lanescope.trace import WARP_SIZE, Space, Trace
 
 CELL = 14
@@ -41,11 +41,11 @@ DARK = {
 }
 
 
-def render(trace: Trace, limit: int = 20) -> str:
+def render_trace_report(trace: Trace, limit: int = 20) -> str:
     """Return the HTML report of a trace, with grids for at most `limit` instructions."""
     if limit < 0:
         raise ValueError("the report needs a limit of zero or more instructions")
-    counters = worst_first(count(trace))
+    counters = worst_first(count_instructions(trace))
     worst = [counter for counter in counters if counter.excessive > 0]
     drawn = {_anchor(counter) for counter in worst[:limit]}
     kernel = html.escape(str(trace.metadata.get("kernel", "kernel")))
@@ -66,7 +66,7 @@ def render(trace: Trace, limit: int = 20) -> str:
     if not worst:
         parts.append("<p>No instruction exceeds its ideal count.</p>")
     for counter in worst[:limit]:
-        parts.append(_section(trace, counter))
+        parts.append(_instruction_section(trace, counter))
     if len(worst) > limit:
         parts.append(
             f"<p>{len(worst) - limit} more instructions exceed their ideal count. "
@@ -126,7 +126,7 @@ def _instruction_table(trace: Trace, counters: list[InstructionCounters], drawn:
     return f'<div class="scroll"><table><tr>{head}</tr>{"".join(rows)}</table></div>'
 
 
-def _section(trace: Trace, counter: InstructionCounters) -> str:
+def _instruction_section(trace: Trace, counter: InstructionCounters) -> str:
     access = trace.access(counter.worst_row)
     line = trace.source_line(counter.pc)
     title = (

@@ -26,7 +26,7 @@ def call(name, arguments):
     client_type = Client
 
     async def run():
-        async with client_type(mcp_server.server()) as client:
+        async with client_type(mcp_server.build_mcp_server()) as client:
             tools = await client.list_tools()
             result = await client.call_tool(name, arguments)
             return [tool.name for tool in tools.tools], result
@@ -165,7 +165,7 @@ def test_server_reports_the_version_of_lanescope():
     client_type = Client
 
     async def run():
-        async with client_type(mcp_server.server()) as client:
+        async with client_type(mcp_server.build_mcp_server()) as client:
             return client.server_info
 
     info = asyncio.run(run())

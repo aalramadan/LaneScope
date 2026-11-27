@@ -63,7 +63,7 @@ def template_name(full: str) -> str:
     return "".join(kept).strip()
 
 
-def short(name: str, length: int = SHORT_LENGTH) -> str:
+def short_name(name: str, length: int = SHORT_LENGTH) -> str:
     """Return a kernel name without its namespaces, return type, and parameters.
 
     Template arguments that are no plain number or word become an ellipsis once the

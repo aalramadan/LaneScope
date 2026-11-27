@@ -4,7 +4,7 @@ import pathlib
 import re
 from collections.abc import Iterable
 
-from lanescope.model.counters import count
+from lanescope.model.counters import count_instructions
 from lanescope.trace import Space, Trace
 
 try:
@@ -84,7 +84,7 @@ class KernelCounters:
 
 
 @dataclasses.dataclass(frozen=True)
-class Row:
+class CounterComparison:
     """One quantity of one instruction, from LaneScope and from Nsight Compute."""
 
     launch: int
@@ -131,7 +131,7 @@ def read_report(path: pathlib.Path) -> list[KernelCounters]:
 def lanescope_counts(trace: Trace) -> dict[int, dict[str, int]]:
     """Return the LaneScope quantities of each instruction offset of a trace."""
     found: dict[int, dict[str, int]] = {}
-    for counter in count(trace):
+    for counter in count_instructions(trace):
         prefix = "shared_wavefronts" if counter.space == Space.SHARED else "global_sectors"
         entry = found.setdefault(counter.pc, {})
         entry[prefix] = entry.get(prefix, 0) + counter.achieved
@@ -139,21 +139,23 @@ def lanescope_counts(trace: Trace) -> dict[int, dict[str, int]]:
     return found
 
 
-def compare(launch: int, trace: Trace, counters: KernelCounters) -> list[Row]:
+def compare_launch_counters(
+    launch: int, trace: Trace, counters: KernelCounters
+) -> list[CounterComparison]:
     """Return one row per quantity of each instruction that the trace or Nsight Compute counts.
 
     An instruction that Nsight Compute counts and the trace never holds, such as one that
     Compute Sanitizer does not report, gets a LaneScope count of zero.
     """
     ours = lanescope_counts(trace)
-    aligned = align(sorted(ours), counters)
+    aligned = align_instruction_offsets(sorted(ours), counters)
     name = counters.mangled or counters.kernel
     rows = []
     for offset, quantities in sorted(ours.items()):
         theirs_offset = aligned[offset]
         for quantity, value in quantities.items():
             rows.append(
-                Row(
+                CounterComparison(
                     launch,
                     name,
                     offset,
@@ -170,11 +172,15 @@ def compare(launch: int, trace: Trace, counters: KernelCounters) -> list[Row]:
             for offset, value in sorted(counters.quantity(quantity)[1].items()):
                 if offset not in ours and value > 0:
                     sass = counters.sass.get(offset, "")
-                    rows.append(Row(launch, name, offset, sass, quantity, 0, value, seen=False))
+                    rows.append(
+                        CounterComparison(
+                            launch, name, offset, sass, quantity, 0, value, seen=False
+                        )
+                    )
     return rows
 
 
-def align(offsets: list[int], counters: KernelCounters) -> dict[int, int]:
+def align_instruction_offsets(offsets: list[int], counters: KernelCounters) -> dict[int, int]:
     """Map LaneScope instruction offsets to Nsight Compute offsets.
 
     Equal offsets match directly. When the recorder reports PCs on another base,
@@ -191,7 +197,7 @@ def _offsets(counters: KernelCounters) -> list[int]:
     return sorted({o for quantity in QUANTITIES for o in counters.quantity(quantity)[1]})
 
 
-def summarize(rows: Iterable[Row]) -> dict[str, dict[str, int]]:
+def summarize(rows: Iterable[CounterComparison]) -> dict[str, dict[str, int]]:
     """Return the matched and total rows per opcode and quantity."""
     summary: dict[str, dict[str, int]] = {}
     for row in rows:
@@ -201,7 +207,7 @@ def summarize(rows: Iterable[Row]) -> dict[str, dict[str, int]]:
     return dict(sorted(summary.items()))
 
 
-def dump(kernels: list[KernelCounters], path: pathlib.Path) -> None:
+def dump_source_counters(kernels: list[KernelCounters], path: pathlib.Path) -> None:
     """Write every source counter of every launch as JSON."""
     payload = [
         {

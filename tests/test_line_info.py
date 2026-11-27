@@ -12,7 +12,7 @@ from lanescope.cuda import line_info, nvrtc, toolchain
 from lanescope.recorder import capture
 from lanescope.trace import WARP_SIZE, Kind, Space, Trace
 
-TOOLS = toolchain.find()
+TOOLS = toolchain.find_toolchain()
 LISTING = """
 //--------------------- .text.first               --------------------------
 	.section	.text.first,"ax",@progbits
@@ -71,7 +71,7 @@ def test_opcodes_keep_the_instructions_that_need_their_own_counting_rule():
 
 
 def test_parse_maps_each_offset_to_the_last_location_before_it():
-    functions = line_info.parse(LISTING)
+    functions = line_info.parse_line_listing(LISTING)
     assert functions["first"] == {
         0x00: ("/src/kernel.cu", 5),
         0x10: ("/src/kernel.cu", 7),
@@ -115,7 +115,7 @@ def test_import_maps_a_recorded_shared_load_to_its_source_line(tmp_path):
     folder.mkdir()
     (folder / "module-0.cubin").write_bytes(program.cubin)
     listing = line_info.module_listing(TOOLS.disassemblers, folder / "module-0.cubin")
-    table = line_info.parse(listing)["probe"]
+    table = line_info.parse_line_listing(listing)["probe"]
     offset = max(offset for offset, (_, line) in table.items() if line == 5)
     base = 0x7F00_0000_0000
     records = np.zeros(1, dtype=capture.RECORD_DTYPE)
@@ -191,7 +191,10 @@ def test_metadata_reads_only_absolute_paths_of_source_files(tmp_path, monkeypatc
 )
 def test_a_store_inlined_from_a_header_takes_the_line_of_its_call(tmp_path):
     listing, store = inlined_store_listing(tmp_path)
-    assert line_info.parse(listing)["inlined"][store] == (str(tmp_path / "inlined.cu"), 4)
+    assert line_info.parse_line_listing(listing)["inlined"][store] == (
+        str(tmp_path / "inlined.cu"),
+        4,
+    )
 
 
 @pytest.mark.skipif(
@@ -235,7 +238,7 @@ def test_module_listing_turns_to_the_next_nvdisasm_when_one_fails(tmp_path):
     cubin = tmp_path / "module.cubin"
     cubin.write_bytes(b"")
     listing = line_info.module_listing([failing, working], cubin)
-    assert line_info.parse(listing) == {"k": {0: ("/src/k.cu", 3)}}
+    assert line_info.parse_line_listing(listing) == {"k": {0: ("/src/k.cu", 3)}}
     with pytest.raises(ValueError, match="CUDA architecture is deprecated"):
         line_info.module_listing([failing], cubin)
 
@@ -270,8 +273,10 @@ def two_kernel_cubin(folder):
 )
 def test_module_listing_of_named_kernels_holds_these_kernels_alone(tmp_path):
     cubin = two_kernel_cubin(tmp_path)
-    whole = line_info.parse(line_info.module_listing(TOOLS.disassemblers, cubin))
-    only = line_info.parse(line_info.module_listing(TOOLS.disassemblers, cubin, {"second"}))
+    whole = line_info.parse_line_listing(line_info.module_listing(TOOLS.disassemblers, cubin))
+    only = line_info.parse_line_listing(
+        line_info.module_listing(TOOLS.disassemblers, cubin, {"second"})
+    )
     assert set(whole) == {"first", "second"}
     assert only == {"second": whole["second"]}
 
@@ -282,7 +287,7 @@ def test_module_listing_of_named_kernels_holds_these_kernels_alone(tmp_path):
 def test_module_listing_lists_every_kernel_when_a_named_kernel_is_missing(tmp_path):
     cubin = two_kernel_cubin(tmp_path)
     listing = line_info.module_listing(TOOLS.disassemblers, cubin, {"second", "absent"})
-    assert set(line_info.parse(listing)) == {"first", "second"}
+    assert set(line_info.parse_line_listing(listing)) == {"first", "second"}
 
 
 @pytest.mark.skipif(TOOLS.nvrtc is None, reason="NVRTC is needed")
@@ -319,7 +324,7 @@ INLINED_LISTING = """.text.k:
 
 
 def test_an_inlined_instruction_keeps_its_own_line_inside_the_file_of_its_call():
-    assert line_info.parse(INLINED_LISTING) == {
+    assert line_info.parse_line_listing(INLINED_LISTING) == {
         "k": {0x0: ("/src/k.cu", 9), 0x10: ("/src/k.cu", 21), 0x20: ("/src/k.cu", 21)}
     }
 
@@ -336,7 +341,7 @@ BLOCK_MERGE_SORT = "/opt/cccl/cub/cub/block/block_merge_sort.cuh"
 
 
 def test_parse_keeps_the_call_line_in_the_kernel_file_for_each_inlined_cub_store():
-    (table,) = line_info.parse(MERGE_SORT_LISTING).values()
+    (table,) = line_info.parse_line_listing(MERGE_SORT_LISTING).values()
     assert table[0x0] == (MERGE_SORT_KERNEL, 149)
     assert {table[offset] for offset in (0x11A0, 0x11B0, 0x11D0, 0x11F0)} == {
         (MERGE_SORT_KERNEL, 194)

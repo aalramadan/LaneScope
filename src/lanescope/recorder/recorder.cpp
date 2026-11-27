@@ -22,7 +22,7 @@
 
 namespace {
 
-using lanescope::Buffer;
+using lanescope::LaunchHeader;
 using lanescope::Counters;
 using lanescope::Record;
 using lanescope::u32;
@@ -36,7 +36,7 @@ void Warn(const std::string& message) {
     std::fprintf(stderr, "lanescope recorder: %s\n", message.c_str());
 }
 
-bool Check(SanitizerResult result, const std::string& action) {
+bool SanitizerSucceeded(SanitizerResult result, const std::string& action) {
     if (result == SANITIZER_SUCCESS) {
         return true;
     }
@@ -115,7 +115,7 @@ struct Slot {
 };
 
 // One recorded launch whose records wait until it has finished.
-struct Launch {
+struct PendingLaunch {
     int index = 0;
     std::string kernel;
     int module_index = -1;
@@ -131,7 +131,7 @@ struct Launch {
     u64 threads = 0;
     // The asynchronous copy reads this header after the launch callback returns,
     // so the header lives on the heap until the flush.
-    std::unique_ptr<Buffer> header;
+    std::unique_ptr<LaunchHeader> header;
 };
 
 size_t DeviceMemory(CUdevice device) {
@@ -183,27 +183,27 @@ public:
             return;
         }
         if (patched_contexts_.insert(data.context).second) {
-            Check(sanitizerAddPatchesFromFile(settings_.patches.c_str(), data.context),
-                  "loading the patches " + settings_.patches + " (build them for this GPU)");
+            SanitizerSucceeded(sanitizerAddPatchesFromFile(settings_.patches.c_str(), data.context),
+                               "loading the patches " + settings_.patches + " (build them for this GPU)");
         }
         if (data.pCubin != nullptr && data.cubinSize > 0) {
             WriteFile(Path("module-" + std::to_string(index) + ".cubin"), data.pCubin, data.cubinSize);
         }
-        Check(sanitizerPatchInstructions(SANITIZER_INSTRUCTION_GLOBAL_MEMORY_ACCESS, data.module,
-                                         "LaneScopeGlobalAccess"),
-              "patching global accesses");
-        Check(sanitizerPatchInstructions(SANITIZER_INSTRUCTION_SHARED_MEMORY_ACCESS, data.module,
-                                         "LaneScopeSharedAccess"),
-              "patching shared accesses");
-        Check(sanitizerPatchInstructions(SANITIZER_INSTRUCTION_MEMCPY_ASYNC, data.module,
-                                         "LaneScopeMemcpyAsync"),
-              "patching cp.async copies");
-        Check(sanitizerPatchInstructions(SANITIZER_INSTRUCTION_MATRIX_MEMORY_ACCESS, data.module,
-                                         "LaneScopeMatrixAccess"),
-              "patching ldmatrix and stmatrix");
-        Check(sanitizerPatchInstructions(SANITIZER_INSTRUCTION_BLOCK_EXIT, data.module, "LaneScopeBlockExit"),
-              "patching block exits");
-        Check(sanitizerPatchModule(data.module), "patching the module");
+        SanitizerSucceeded(sanitizerPatchInstructions(SANITIZER_INSTRUCTION_GLOBAL_MEMORY_ACCESS, data.module,
+                                                      "LaneScopeGlobalAccess"),
+                           "patching global accesses");
+        SanitizerSucceeded(sanitizerPatchInstructions(SANITIZER_INSTRUCTION_SHARED_MEMORY_ACCESS, data.module,
+                                                      "LaneScopeSharedAccess"),
+                           "patching shared accesses");
+        SanitizerSucceeded(sanitizerPatchInstructions(SANITIZER_INSTRUCTION_MEMCPY_ASYNC, data.module,
+                                                      "LaneScopeMemcpyAsync"),
+                           "patching cp.async copies");
+        SanitizerSucceeded(sanitizerPatchInstructions(SANITIZER_INSTRUCTION_MATRIX_MEMORY_ACCESS, data.module,
+                                                      "LaneScopeMatrixAccess"),
+                           "patching ldmatrix and stmatrix");
+        SanitizerSucceeded(sanitizerPatchInstructions(SANITIZER_INSTRUCTION_BLOCK_EXIT, data.module, "LaneScopeBlockExit"),
+                           "patching block exits");
+        SanitizerSucceeded(sanitizerPatchModule(data.module), "patching the module");
     }
 
     void OnLaunchBegin(const Sanitizer_LaunchData& data) {
@@ -231,13 +231,13 @@ public:
             return;
         }
         auto* counters = static_cast<Counters*>(slot.host);
-        Launch launch;
+        PendingLaunch launch;
         launch.index = next_launch_++;
         launch.kernel = kernel;
         launch.module_index = modules_.count(data.module) ? modules_[data.module] : -1;
-        Check(sanitizerGetFunctionPcAndSize(data.module, data.functionName, &launch.function_pc,
-                                            &launch.function_size),
-              "finding the start PC of " + kernel);
+        SanitizerSucceeded(sanitizerGetFunctionPcAndSize(data.module, data.functionName, &launch.function_pc,
+                                                         &launch.function_size),
+                           "finding the start PC of " + kernel);
         launch.grid[0] = data.gridDim_x;
         launch.grid[1] = data.gridDim_y;
         launch.grid[2] = data.gridDim_z;
@@ -250,13 +250,13 @@ public:
         launch.device = data.device;
         launch.slot = slot;
         pending += bytes;
-        launch.header.reset(new Buffer{settings_.capacity, settings_.cta_first, settings_.cta_count, 0,
-                                       counters, reinterpret_cast<Record*>(counters + 1)});
-        Check(sanitizerMemcpyHostToDeviceAsync(slot.device_header, launch.header.get(), sizeof(Buffer),
-                                               data.hStream),
-              "copying the buffer header");
-        Check(sanitizerSetCallbackData(data.function, slot.device_header),
-              "passing the buffer to the patches");
+        launch.header.reset(new LaunchHeader{settings_.capacity, settings_.cta_first, settings_.cta_count, 0,
+                                             counters, reinterpret_cast<Record*>(counters + 1)});
+        SanitizerSucceeded(sanitizerMemcpyHostToDeviceAsync(slot.device_header, launch.header.get(), sizeof(LaunchHeader),
+                                                            data.hStream),
+                           "copying the buffer header");
+        SanitizerSucceeded(sanitizerSetCallbackData(data.function, slot.device_header),
+                           "passing the buffer to the patches");
         launch.threads = static_cast<u64>(data.gridDim_x) * data.gridDim_y * data.gridDim_z *
                          data.blockDim_x * data.blockDim_y * data.blockDim_z;
         pending_[{data.context, data.hStream}].push_back(std::move(launch));
@@ -296,7 +296,7 @@ public:
             return;
         }
         auto& orphans = orphans_[context];
-        for (Launch& launch : found->second) {
+        for (PendingLaunch& launch : found->second) {
             orphans.push_back(std::move(launch));
         }
         pending_.erase(found);
@@ -356,16 +356,16 @@ private:
 
     // The threads of a launch count their exits after their records, so a launch whose every
     // thread has exited holds its complete records.
-    static bool Finished(const Launch& launch) {
+    static bool Finished(const PendingLaunch& launch) {
         const auto* counters = static_cast<const Counters*>(launch.slot.host);
         return __atomic_load_n(&counters->exited, __ATOMIC_ACQUIRE) >= launch.threads;
     }
 
     // Saves the finished launches of one stream in order. A launch that another thread queued
     // after the last synchronization may still run, and it waits for a later check.
-    void SaveFinishedOf(std::deque<Launch>& launches) {
+    void SaveFinishedOf(std::deque<PendingLaunch>& launches) {
         while (!launches.empty() && Finished(launches.front())) {
-            Save(launches.front());
+            SaveLaunchFiles(launches.front());
             launches.pop_front();
         }
     }
@@ -384,7 +384,7 @@ private:
         auto& orphans = found->second;
         for (auto launch = orphans.begin(); launch != orphans.end();) {
             if (Finished(*launch)) {
-                Save(*launch);
+                SaveLaunchFiles(*launch);
                 launch = orphans.erase(launch);
             } else {
                 ++launch;
@@ -414,11 +414,11 @@ private:
         }
         Slot slot;
         slot.bytes = bytes;
-        if (!Check(sanitizerAllocHost(context, &slot.host, bytes), "allocating the record buffer")) {
+        if (!SanitizerSucceeded(sanitizerAllocHost(context, &slot.host, bytes), "allocating the record buffer")) {
             return Slot{};
         }
-        if (!Check(sanitizerAlloc(context, &slot.device_header, sizeof(Buffer)),
-                   "allocating the buffer header")) {
+        if (!SanitizerSucceeded(sanitizerAlloc(context, &slot.device_header, sizeof(LaunchHeader)),
+                                "allocating the buffer header")) {
             sanitizerFreeHost(context, slot.host);
             return Slot{};
         }
@@ -427,14 +427,14 @@ private:
     }
 
     static void FreeSlot(CUcontext context, const Slot& slot) {
-        Check(sanitizerFreeHost(context, slot.host), "freeing the record buffer");
-        Check(sanitizerFree(context, slot.device_header), "freeing the buffer header");
+        SanitizerSucceeded(sanitizerFreeHost(context, slot.host), "freeing the record buffer");
+        SanitizerSucceeded(sanitizerFree(context, slot.device_header), "freeing the buffer header");
     }
 
     // The launch has finished, so its counters and records in pinned host memory are
     // complete and need no copy.
-    void Save(Launch& launch) {
-        const Buffer& header = *launch.header;
+    void SaveLaunchFiles(PendingLaunch& launch) {
+        const LaunchHeader& header = *launch.header;
         auto* counters = static_cast<Counters*>(launch.slot.host);
         const u32 count = std::min(counters->count, header.capacity);
         const auto* records = reinterpret_cast<const Record*>(counters + 1);
@@ -475,8 +475,8 @@ private:
     std::mutex mutex_;
     std::set<CUcontext> patched_contexts_;
     std::map<CUmodule, int> modules_;
-    std::map<std::pair<CUcontext, Sanitizer_StreamHandle>, std::deque<Launch>> pending_;
-    std::map<CUcontext, std::deque<Launch>> orphans_;
+    std::map<std::pair<CUcontext, Sanitizer_StreamHandle>, std::deque<PendingLaunch>> pending_;
+    std::map<CUcontext, std::deque<PendingLaunch>> orphans_;
     std::map<CUcontext, std::vector<Slot>> free_slots_;
     size_t free_bytes_ = 0;
     std::map<CUdevice, size_t> pending_bytes_;
@@ -487,8 +487,8 @@ private:
 
 Recorder* active_recorder = nullptr;
 
-void Callback(void* userdata, Sanitizer_CallbackDomain domain, Sanitizer_CallbackId cbid,
-              const void* cbdata) {
+void OnSanitizerEvent(void* userdata, Sanitizer_CallbackDomain domain, Sanitizer_CallbackId cbid,
+                       const void* cbdata) {
     auto* recorder = static_cast<Recorder*>(userdata);
     if (domain == SANITIZER_CB_DOMAIN_RESOURCE && cbid == SANITIZER_CBID_RESOURCE_MODULE_LOADED) {
         recorder->OnModuleLoaded(*static_cast<const Sanitizer_ResourceModuleData*>(cbdata));
@@ -526,7 +526,7 @@ void WarnAboutPendingLaunches() {
     }
 }
 
-int Start() {
+int StartRecording() {
     Settings settings = Settings::FromEnvironment();
     if (settings.out_dir.empty() || settings.patches.empty()) {
         Warn("set LANESCOPE_OUT and LANESCOPE_PATCHES to record");
@@ -537,16 +537,16 @@ int Start() {
     active_recorder = recorder;
     std::atexit(WarnAboutPendingLaunches);
     Sanitizer_SubscriberHandle handle;
-    if (!Check(sanitizerSubscribe(&handle, Callback, recorder), "subscribing to callbacks")) {
+    if (!SanitizerSucceeded(sanitizerSubscribe(&handle, OnSanitizerEvent, recorder), "subscribing to callbacks")) {
         return 1;
     }
-    Check(sanitizerEnableDomain(1, handle, SANITIZER_CB_DOMAIN_RESOURCE), "enabling resource callbacks");
-    Check(sanitizerEnableDomain(1, handle, SANITIZER_CB_DOMAIN_LAUNCH), "enabling launch callbacks");
-    Check(sanitizerEnableDomain(1, handle, SANITIZER_CB_DOMAIN_SYNCHRONIZE), "enabling synchronize callbacks");
+    SanitizerSucceeded(sanitizerEnableDomain(1, handle, SANITIZER_CB_DOMAIN_RESOURCE), "enabling resource callbacks");
+    SanitizerSucceeded(sanitizerEnableDomain(1, handle, SANITIZER_CB_DOMAIN_LAUNCH), "enabling launch callbacks");
+    SanitizerSucceeded(sanitizerEnableDomain(1, handle, SANITIZER_CB_DOMAIN_SYNCHRONIZE), "enabling synchronize callbacks");
     return 0;
 }
 
 // LD_PRELOAD runs this initializer before main, as in the MemoryTracker sample of NVIDIA.
-[[maybe_unused]] const int started = Start();
+[[maybe_unused]] const int started = StartRecording();
 
 }  // namespace

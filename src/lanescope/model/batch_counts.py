@@ -32,7 +32,7 @@ class RowCounts:
 
 
 def row_counts(trace: Trace, rows: np.ndarray | None = None) -> RowCounts:
-    """Return what counters.measure gives for each of the rows, or for every row of the trace.
+    """Return what counters.count_row gives for each of the rows, or for every row of the trace.
 
     Shared atomics, shared stores, shared loads of up to 4 bytes, and global rows count in
     NumPy. The other rows go through the scalar model once per distinct pattern.
@@ -43,10 +43,16 @@ def row_counts(trace: Trace, rows: np.ndarray | None = None) -> RowCounts:
         return RowCounts(*found)
     space, kind, width = trace.space[picked], trace.kind[picked], trace.width[picked]
     addresses, active = trace.addr[picked], trace.active()[picked]
-    opcodes = _opcodes(trace, picked)
-    matrix = _opcode_flags(opcodes, lambda code: _base(code) in shared_memory._MATRIX_OPCODES)
-    atomic_code = _opcode_flags(opcodes, lambda code: _base(code) == shared_memory._ATOMIC_OPCODE)
-    copy = _opcode_flags(opcodes, lambda code: _base(code) == shared_memory._ASYNC_COPY_OPCODE)
+    opcodes = _row_opcodes(trace, picked)
+    matrix = _opcode_flags(
+        opcodes, lambda code: _opcode_base(code) in shared_memory._MATRIX_OPCODES
+    )
+    atomic_code = _opcode_flags(
+        opcodes, lambda code: _opcode_base(code) == shared_memory._ATOMIC_OPCODE
+    )
+    copy = _opcode_flags(
+        opcodes, lambda code: _opcode_base(code) == shared_memory._ASYNC_COPY_OPCODE
+    )
     shared = space == Space.SHARED
     atomic = shared & ~matrix & ((kind == Kind.ATOMIC) | atomic_code)
     distinct = (
@@ -98,8 +104,8 @@ def copy_read_excess(trace: Trace) -> np.ndarray:
         key = (
             trace.opcode(int(trace.pc[row])),
             int(trace.width[row]),
-            _moved(lanes),
-            _moved(sources) if _reads_all(lanes, sources) else sources,
+            _moved_to_origin(lanes),
+            _moved_to_origin(sources) if _every_lane_has_source(lanes, sources) else sources,
         )
         if key not in seen:
             reads = global_memory.copy_reads(trace, row)
@@ -184,9 +190,9 @@ def _scalar_counts(trace: Trace, rows: np.ndarray, opcodes: list[str]) -> np.nda
         width, kind = int(trace.width[row]), int(trace.kind[row])
         if trace.space[row] == Space.SHARED:
             sources = trace.copy_sources.get(row)
-            if sources is not None and _reads_all(lanes, sources):
-                sources = _moved(sources)
-            key = (opcode, width, kind, _moved(lanes), sources)
+            if sources is not None and _every_lane_has_source(lanes, sources):
+                sources = _moved_to_origin(sources)
+            key = (opcode, width, kind, _moved_to_origin(lanes), sources)
             if key not in seen:
                 access = shared_memory.analyze(
                     key[3],
@@ -199,7 +205,7 @@ def _scalar_counts(trace: Trace, rows: np.ndarray, opcodes: list[str]) -> np.nda
                 )
                 seen[key] = (access.wavefronts, access.ideal, access.excessive, access.conflicts)
         else:
-            key = (_moved(lanes), _moved(trace.copy_destinations[row]))
+            key = (_moved_to_origin(lanes), _moved_to_origin(trace.copy_destinations[row]))
             if key not in seen:
                 copied = global_memory.copy_sectors(*key)
                 seen[key] = (copied.sectors, copied.ideal, copied.excessive, 0)
@@ -216,7 +222,7 @@ def _lane_tuples(trace: Trace, rows: np.ndarray) -> list[tuple[int | None, ...]]
     ]
 
 
-def _moved(lanes: tuple[int | None, ...]) -> tuple[int | None, ...]:
+def _moved_to_origin(lanes: tuple[int | None, ...]) -> tuple[int | None, ...]:
     present = [address for address in lanes if address is not None]
     if not present:
         return lanes
@@ -224,7 +230,7 @@ def _moved(lanes: tuple[int | None, ...]) -> tuple[int | None, ...]:
     return tuple(None if address is None else address - base for address in lanes)
 
 
-def _reads_all(rows: tuple[int | None, ...], sources: tuple[int | None, ...]) -> bool:
+def _every_lane_has_source(rows: tuple[int | None, ...], sources: tuple[int | None, ...]) -> bool:
     # A lane without a global address reads at a fixed offset of its lane number or fills
     # zeros, neither of which moves with the other sources.
     return all(
@@ -232,7 +238,7 @@ def _reads_all(rows: tuple[int | None, ...], sources: tuple[int | None, ...]) ->
     )
 
 
-def _opcodes(trace: Trace, rows: np.ndarray) -> list[str]:
+def _row_opcodes(trace: Trace, rows: np.ndarray) -> list[str]:
     pcs, which = np.unique(trace.pc[rows], return_inverse=True)
     codes = [trace.opcode(pc) for pc in pcs.tolist()]
     return [codes[index] for index in which.reshape(-1).tolist()]
@@ -243,5 +249,5 @@ def _opcode_flags(opcodes: list[str], test: Callable[[str], bool]) -> np.ndarray
     return np.array([flags[code] for code in opcodes], dtype=bool)
 
 
-def _base(opcode: str) -> str:
+def _opcode_base(opcode: str) -> str:
     return opcode.split(".")[0]

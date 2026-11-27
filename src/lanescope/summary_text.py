@@ -16,7 +16,9 @@ ORDERS = ("extra", "time")
 DURATION_UNITS = ((1e9, "s"), (1e6, "ms"), (1e3, "us"))
 
 
-def render(data: dict, unit: str = "wavefronts", limit: int = 10, order: str = "extra") -> str:
+def render_summary_text(
+    data: dict, unit: str = "wavefronts", limit: int = 10, order: str = "extra"
+) -> str:
     """Return a summary as text: the totals, the worst kernels, the worst lines, and a next step.
 
     With kernel times, the table of kernels gives the time of each and its part of the

@@ -3,7 +3,7 @@ import { $ } from "./dom.js";
 import * as format from "./format.js";
 import { renderSwizzleBits, sectorUse } from "./grid.js";
 import { renderGrids } from "./lanes.js";
-import { cancelWhatif, fixCurrent, latest, selectionToken, state } from "./state.js";
+import { cancelWhatif, fixControlsMatchSelection, latest, selectionToken, state } from "./state.js";
 import { scheduleWhatif } from "./whatif.js";
 
 const WHATIF_DELAY = 80;
@@ -152,7 +152,7 @@ export function onControlsChanged() {
     renderDiagnosis();
     return;
   }
-  if (fixCurrent()) {
+  if (fixControlsMatchSelection()) {
     scheduleWhatif(WHATIF_DELAY);
   }
 }

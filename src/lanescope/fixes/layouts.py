@@ -2,7 +2,7 @@ import dataclasses
 
 import numpy as np
 
-from lanescope.model.counters import InstructionCounters, count
+from lanescope.model.counters import InstructionCounters, count_instructions
 from lanescope.trace import Space, Trace
 
 # Shared memory windows are far smaller than this limit, which keeps every
@@ -191,7 +191,7 @@ def lanes_inside(trace: Trace, buffer: Buffer) -> np.ndarray:
     return inside
 
 
-def apply(trace: Trace, buffer: Buffer, change: Change) -> Trace:
+def apply_layout_change(trace: Trace, buffer: Buffer, change: Change) -> Trace:
     """Return the trace with every shared access inside the buffer moved by the change."""
     change.check(buffer)
     inside = lanes_inside(trace, buffer)
@@ -222,9 +222,9 @@ def apply(trace: Trace, buffer: Buffer, change: Change) -> Trace:
     return trace.with_addresses(addresses)
 
 
-def compare(trace: Trace, buffer: Buffer, change: Change) -> list[Comparison]:
+def compare_layout_counters(trace: Trace, buffer: Buffer, change: Change) -> list[Comparison]:
     """Return the counters before and after the change of every instruction it affects."""
-    changed = apply(trace, buffer, change)
+    changed = apply_layout_change(trace, buffer, change)
     active = trace.active()
     shared = (trace.space == Space.SHARED)[:, None] & active
     affected = ((changed.addr != trace.addr) & active).any(axis=1) | (
@@ -236,8 +236,8 @@ def compare(trace: Trace, buffer: Buffer, change: Change) -> list[Comparison]:
     rows = rows_of_instructions(trace, affected)
     # Counting a subset numbers its rows from zero, so worst rows map back to the trace.
     index = np.flatnonzero(rows)
-    before = count(trace.select(rows))
-    after = count(changed.select(rows))
+    before = count_instructions(trace.select(rows))
+    after = count_instructions(changed.select(rows))
     return [
         Comparison(_in_trace(old, index), _in_trace(new, index))
         for old, new in zip(before, after, strict=True)

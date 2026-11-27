@@ -6,7 +6,7 @@ import { renderFixPanel } from "./fix-form.js";
 import { renderInstructionSelection } from "./instructions.js";
 import { renderLanes } from "./lanes.js";
 import { renderSourceSelection } from "./source.js";
-import { current, fixCurrent, latest, newSelection, state } from "./state.js";
+import { fixControlsMatchSelection, isCurrentSelection, latest, newSelection, state } from "./state.js";
 import { scheduleWhatif } from "./whatif.js";
 
 // Counts the access requests that mark the grids as busy, so an older request that ends
@@ -22,7 +22,7 @@ export async function selectInstruction(record, wantedRow = null) {
   const patterns = await latest.patterns.run((signal) =>
     getJSON("/api/patterns", { id: state.traceId, pc: record.pc, space: record.space }, signal),
   );
-  if (!current(token)) {
+  if (!isCurrentSelection(token)) {
     return;
   }
   state.patterns = patterns;
@@ -41,10 +41,10 @@ export async function selectInstruction(record, wantedRow = null) {
 // A pattern button keeps the selection that drew it, so a click on the buttons of an
 // instruction that the page is leaving does nothing.
 export async function selectRow(row, token) {
-  if (!current(token)) {
+  if (!isCurrentSelection(token)) {
     return;
   }
-  if ((await loadAccess(row, token)) && state.change.kind !== "none" && fixCurrent()) {
+  if ((await loadAccess(row, token)) && state.change.kind !== "none" && fixControlsMatchSelection()) {
     scheduleWhatif(0);
   }
 }
@@ -62,7 +62,7 @@ async function loadAccess(row, token) {
       $("grids").classList.remove("busy");
     }
   }
-  if (!current(token) || request !== accessRequests) {
+  if (!isCurrentSelection(token) || request !== accessRequests) {
     return false;
   }
   state.access = access;

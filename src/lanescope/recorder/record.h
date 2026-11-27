@@ -36,7 +36,7 @@ struct Counters {
 // Header of one launch in device memory, which every patched access reads. The counters
 // and the records live in pinned host memory, which the patches write through the same
 // addresses, so the host reads a finished launch without a copy.
-struct Buffer {
+struct LaunchHeader {
     u32 capacity;
     u32 cta_first;
     u32 cta_count;
@@ -44,6 +44,6 @@ struct Buffer {
     Counters* counters;
     Record* records;
 };
-static_assert(sizeof(Buffer) == 32, "the host copies a 32-byte header");
+static_assert(sizeof(LaunchHeader) == 32, "the host copies a 32-byte header");
 
 }  // namespace lanescope

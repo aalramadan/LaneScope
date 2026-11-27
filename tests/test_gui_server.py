@@ -278,7 +278,7 @@ class ClosedStream(io.BufferedIOBase):
 
 
 def test_a_request_that_the_page_cancelled_ends_without_an_error():
-    handler = gui.Handler.__new__(gui.Handler)
+    handler = gui.GuiRequestHandler.__new__(gui.GuiRequestHandler)
     handler.wfile = ClosedStream()
     handler.request_version = "HTTP/1.1"
     handler.requestline = "GET /api/traces HTTP/1.1"

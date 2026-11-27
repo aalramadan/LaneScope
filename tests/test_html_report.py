@@ -15,18 +15,18 @@ def svgs(page):
 
 
 def test_table_lists_every_instruction():
-    page = html_report.render(demos.transpose_trace())
+    page = html_report.render_trace_report(demos.transpose_trace())
     table = page.split("<table>")[1].split("</table>")[0]
     assert table.count("<tr><td>") == 4
 
 
 def test_only_instructions_above_their_ideal_get_a_grid():
-    page = html_report.render(demos.transpose_trace())
+    page = html_report.render_trace_report(demos.transpose_trace())
     assert re.findall(r'<section id="pc-([0-9a-f]+)-(\w+)"', page) == [("120", "shared")]
 
 
 def test_column_conflict_fills_bank_0_with_the_darkest_step():
-    page = html_report.render(demos.transpose_trace())
+    page = html_report.render_trace_report(demos.transpose_trace())
     (grid,) = svgs(page)
     assert grid.count('class="cell d4"') == 32
     assert grid.count('class="cell') == 32
@@ -38,7 +38,9 @@ def test_every_grid_is_well_formed_svg():
     accesses.append(
         Access(0x400, Space.GLOBAL, Kind.LOAD, 4, tuple(8 * lane for lane in range(WARP_SIZE)))
     )
-    for grid in svgs(html_report.render(Trace.from_accesses(accesses, trace.metadata))):
+    for grid in svgs(
+        html_report.render_trace_report(Trace.from_accesses(accesses, trace.metadata))
+    ):
         ElementTree.fromstring(grid)
 
 
@@ -47,7 +49,7 @@ def test_source_text_is_escaped():
         [Access(0x10, Space.SHARED, Kind.LOAD, 4, tuple(128 * lane for lane in range(WARP_SIZE)))],
         {"source": ["if (a < b && c > d) x = s[i];"], "lines": {"0x10": 1}},
     )
-    page = html_report.render(trace)
+    page = html_report.render_trace_report(trace)
     assert "a &lt; b &amp;&amp; c &gt; d" in page
     assert "a < b" not in page
 
@@ -56,7 +58,7 @@ def test_trace_without_excess_says_so():
     trace = Trace.from_accesses(
         [Access(0x10, Space.SHARED, Kind.LOAD, 4, tuple(4 * lane for lane in range(WARP_SIZE)))]
     )
-    assert "No instruction exceeds its ideal count." in html_report.render(trace)
+    assert "No instruction exceeds its ideal count." in html_report.render_trace_report(trace)
 
 
 def test_instructions_past_the_limit_are_named():
@@ -64,7 +66,7 @@ def test_instructions_past_the_limit_are_named():
         Access(pc, Space.SHARED, Kind.LOAD, 4, tuple(128 * lane for lane in range(WARP_SIZE)))
         for pc in (0x10, 0x20, 0x30)
     ]
-    page = html_report.render(Trace.from_accesses(accesses), limit=1)
+    page = html_report.render_trace_report(Trace.from_accesses(accesses), limit=1)
     assert len(re.findall(r'<section id="pc-', page)) == 1
     assert "2 more instructions exceed their ideal count." in page
 
@@ -75,7 +77,7 @@ def test_table_links_only_to_the_sections_it_draws(limit):
         Access(pc, Space.SHARED, Kind.LOAD, 4, tuple(128 * lane for lane in range(WARP_SIZE)))
         for pc in (0x10, 0x20, 0x30)
     ]
-    page = html_report.render(Trace.from_accesses(accesses), limit=limit)
+    page = html_report.render_trace_report(Trace.from_accesses(accesses), limit=limit)
     links = re.findall(r'href="#([^"]+)"', page)
     sections = re.findall(r'<section id="([^"]+)"', page)
     assert sorted(links) == sorted(sections)
@@ -86,7 +88,7 @@ def test_report_of_a_recording_at_the_default_capacity_takes_seconds():
     trace = demos.transpose_trace()
     large = trace.select(np.resize(np.arange(len(trace)), 1 << 18))
     start = time.perf_counter()
-    page = html_report.render(large)
+    page = html_report.render_trace_report(large)
     # Moving and counting every row once per candidate change takes over a minute here.
     assert time.perf_counter() - start < 30
     assert "pad each 128-byte row by 4 bytes" in page
@@ -106,11 +108,11 @@ def test_degree_outside_one_to_32_is_rejected():
 
 def test_negative_limit_is_rejected():
     with pytest.raises(ValueError, match="zero or more"):
-        html_report.render(demos.transpose_trace(), limit=-1)
+        html_report.render_trace_report(demos.transpose_trace(), limit=-1)
 
 
 def test_shared_sections_list_the_predicted_changes():
-    page = html_report.render(demos.transpose_trace())
+    page = html_report.render_trace_report(demos.transpose_trace())
     assert "XOR swizzle Swizzle&lt;5,2,5&gt; on byte offsets" in page
     assert "pad each 128-byte row by 4 bytes" in page
 
@@ -130,21 +132,21 @@ def test_suggestions_name_the_global_sectors_of_a_change_that_alters_them(monkey
         "found": 1,
         "changes": [padding],
     }
-    assert "Excess sectors" not in html_report.render(demos.matmul_tile_trace())
+    assert "Excess sectors" not in html_report.render_trace_report(demos.matmul_tile_trace())
     monkeypatch.setattr(html_report.trace_reports, "suggest", lambda *args, **kwargs: found)
-    page = html_report.render(demos.matmul_tile_trace())
+    page = html_report.render_trace_report(demos.matmul_tile_trace())
     assert "Excess sectors" in page
     assert "0 → 256" in page
 
 
 def test_a_conflict_that_follows_the_input_values_says_that_fixes_may_help_less():
-    page = html_report.render(demos.histogram_trace())
+    page = html_report.render_trace_report(demos.histogram_trace())
     assert "may help less on other inputs" in page
 
 
 def test_a_conflict_that_follows_the_input_values_without_a_fix_says_why(monkeypatch):
     monkeypatch.setattr(html_report.trace_reports.ranking, "suggest", lambda trace, buffer: [])
-    page = html_report.render(demos.histogram_trace())
+    page = html_report.render_trace_report(demos.histogram_trace())
     assert "No layout of the buffer removes them." in page
 
 
@@ -152,7 +154,9 @@ def test_the_report_names_the_origin_under_the_source_line_of_an_inlined_instruc
     inlined_transpose,
 ):
     metadata = inlined_transpose.metadata | {"origin_text": [{"3": "a < b && c"}]}
-    page = html_report.render(dataclasses.replace(inlined_transpose, metadata=metadata))
+    page = html_report.render_trace_report(
+        dataclasses.replace(inlined_transpose, metadata=metadata)
+    )
     origin = "inlined from tile_copy.cuh:3: a &lt; b &amp;&amp; c"
     table = page.split("<table>")[1].split("</table>")[0]
     assert f'<br><span class="sub">{origin}</span>' in table

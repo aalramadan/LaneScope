@@ -12,7 +12,7 @@ from collections.abc import Generator, Iterable, Mapping, Sequence
 
 from lanescope import kernel_names, kernel_times
 from lanescope.model import data_dependence
-from lanescope.model.counters import count
+from lanescope.model.counters import count_instructions
 from lanescope.trace import Trace
 
 # The recorder names the traces of one run trace-<n>.npz, and the launches of a run add
@@ -154,7 +154,7 @@ def _main_importable() -> bool:
 
 def trace_facts(trace: Trace) -> TraceFacts:
     """Return the facts of one trace that a summary adds up."""
-    counters = count(trace)
+    counters = count_instructions(trace)
     evidence = data_dependence.input_evidence(trace, counters)
     instructions = []
     for counter in counters:
@@ -227,17 +227,17 @@ def summarize(
             _add(kernel["totals"][item.unit], item)
             worst = kernel["worst"][item.unit]
             if item.excessive > 0 and (worst is None or item.excessive > worst["excessive"]):
-                kernel["worst"][item.unit] = _place(trace_id, item)
+                kernel["worst"][item.unit] = _page_opening(trace_id, item)
             if item.excessive == 0:
                 continue
             key = (run, facts.kernel, *_line_place(facts, item), item.instruction, item.space)
             entry = lines.setdefault(key, _line_entry(run, facts, item))
             _add_to_line(entry, trace_id, item)
     names = kernel_names.readable(kernel for _, kernel in kernels)
-    totals = {unit: _zero() for unit in UNITS}
+    totals = {unit: _empty_totals() for unit in UNITS}
     for kernel in kernels.values():
         full = names[kernel["kernel"]]
-        kernel |= {"name": kernel_names.short(full), "full_name": full}
+        kernel |= {"name": kernel_names.short_name(full), "full_name": full}
         kernel |= _instance_time(times.get(kernel["run"]), kernel["kernel"])
         for unit in UNITS:
             for name, value in kernel["totals"][unit].items():
@@ -321,7 +321,10 @@ def _group_templates(
         if len(instances) == 1:
             entry |= {"name": instances[0]["name"], "full_name": instances[0]["full_name"]}
         else:
-            entry |= {"name": kernel_names.short(entry["template"]), "full_name": entry["template"]}
+            entry |= {
+                "name": kernel_names.short_name(entry["template"]),
+                "full_name": entry["template"],
+            }
         entry |= _template_time(instances)
     return templates, owners
 
@@ -385,7 +388,7 @@ def _merge_lines(
         if entry is None:
             merged[key] = line | {"template": templates[owner]["template"], "instances": 1}
             continue
-        for name in _zero():
+        for name in _empty_totals():
             entry[name] += line[name]
         entry["instances"] += 1
         entry["traces"] |= line["traces"]
@@ -452,7 +455,7 @@ def _kernel_entry(run: str, kernel: str) -> dict:
         "run": run,
         "kernel": kernel,
         "launches": 0,
-        "totals": {unit: _zero() for unit in UNITS},
+        "totals": {unit: _empty_totals() for unit in UNITS},
         "worst": {unit: None for unit in UNITS},
     }
 
@@ -462,7 +465,7 @@ def _template_entry(run: str, template: str) -> dict:
         "run": run,
         "template": template,
         "launches": 0,
-        "totals": {unit: _zero() for unit in UNITS},
+        "totals": {unit: _empty_totals() for unit in UNITS},
         "worst": {unit: None for unit in UNITS},
         "instances": [],
     }
@@ -492,7 +495,7 @@ def _line_entry(run: str, facts: TraceFacts, item: Instruction) -> dict:
         "patterns": set(),
         "excess_counts": set(),
         "worst": {"excessive": -1},
-        **_zero(),
+        **_empty_totals(),
     }
 
 
@@ -504,7 +507,7 @@ def _add_to_line(entry: dict, trace_id: str, item: Instruction) -> None:
     entry["most"] = max(entry["most"], item.most)
     _add_evidence(entry, item.patterns, item.excess_counts)
     if item.excessive > entry["worst"]["excessive"]:
-        entry["worst"] = _place(trace_id, item)
+        entry["worst"] = _page_opening(trace_id, item)
         # The call lines that inline one origin can differ, and the line names the worst.
         entry["line"], entry["source"] = item.line, item.source
 
@@ -520,7 +523,7 @@ def _add_evidence(
     entry["excess_counts"].update(excess_counts)
 
 
-def _zero() -> dict[str, int]:
+def _empty_totals() -> dict[str, int]:
     return {"requests": 0, "achieved": 0, "ideal": 0, "excessive": 0}
 
 
@@ -529,6 +532,6 @@ def _add(total: dict, item: Instruction) -> None:
         total[name] += getattr(item, name)
 
 
-def _place(trace_id: str, item: Instruction) -> dict:
+def _page_opening(trace_id: str, item: Instruction) -> dict:
     """Return where the page opens an instruction: its trace, its PC, and its space."""
     return {"id": trace_id, "pc": f"{item.pc:#x}", "space": item.space, "excessive": item.excessive}

@@ -7,7 +7,7 @@ import numpy as np
 
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver
-from lanescope.cuda.toolchain import Toolchain, find
+from lanescope.cuda.toolchain import Toolchain, find_toolchain
 from lanescope.recorder.build import check_arch
 from lanescope.trace import WARP_SIZE, Kind, Space
 
@@ -81,7 +81,7 @@ FORUM_LDS128 = (
 )
 
 
-def cases() -> list[Case]:
+def fixed_calibration_cases() -> list[Case]:
     """Return every calibration case in launch order."""
     shared, glob = Space.SHARED, Space.GLOBAL
     load, store = Kind.LOAD, Kind.STORE
@@ -288,7 +288,7 @@ def _instruction_patterns(width: int) -> dict[str, tuple[int, ...]]:
 def launch_groups(random_count: int = 0, seed: int = 0) -> list[tuple[str, list[Case]]]:
     """Return the cases of a calibration run in launch order, as groups with a description each."""
     groups = [
-        ("calibration launches", cases()),
+        ("calibration launches", fixed_calibration_cases()),
         ("ldmatrix and cp.async launches", instruction_cases()),
         ("atomic launches", atomic_cases()),
     ]
@@ -304,7 +304,7 @@ def launch_groups(random_count: int = 0, seed: int = 0) -> list[tuple[str, list[
     return groups
 
 
-def launches(random_count: int = 0, seed: int = 0) -> list[Case]:
+def launch_order_cases(random_count: int = 0, seed: int = 0) -> list[Case]:
     """Return the cases of a calibration run, the fixed ones first and then the random ones."""
     return [case for _, group in launch_groups(random_count, seed) for case in group]
 
@@ -316,7 +316,7 @@ def random_cases(count: int, seed: int) -> list[Case]:
     rules that merge their lane groups are the hardest to get right.
     """
     rng = random.Random(seed)
-    shapes = sorted({(case.space, case.kind, case.width) for case in cases()})
+    shapes = sorted({(case.space, case.kind, case.width) for case in fixed_calibration_cases()})
     weights = [4 if space == Space.SHARED and width in (8, 16) else 1 for space, _, width in shapes]
     found = []
     for index in range(count):
@@ -402,7 +402,7 @@ def _random_units(rng: random.Random, limit: int) -> list[int]:
 
 def kernel_source() -> str:
     """Return the CUDA source of the kernels that the cases and the transposes run."""
-    shapes = sorted({(case.space, case.kind, case.width) for case in cases()})
+    shapes = sorted({(case.space, case.kind, case.width) for case in fixed_calibration_cases()})
     kernels = [_access_kernel(space, kind, width) for space, kind, width in shapes]
     kernels += [_ldmatrix_kernel(name) for name in LDMATRIX_KERNELS]
     kernels += [_cp_async_kernel(width) for width in CP_ASYNC_WIDTHS]
@@ -418,7 +418,7 @@ def compile_kernels(
     names that file, which lets a trace of the run carry the source text.
     """
     check_arch(arch)
-    tools = tools or find()
+    tools = tools or find_toolchain()
     tools.require("nvrtc")
     assert tools.nvrtc
     source = kernel_source()
@@ -486,7 +486,9 @@ class MatmulTime:
         return 2 * self.size**3 / (self.milliseconds * 1e-3) / 1e12
 
 
-def multiply(cubin_path: pathlib.Path, kernel: str, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+def multiply_on_gpu(
+    cubin_path: pathlib.Path, kernel: str, a: np.ndarray, b: np.ndarray
+) -> np.ndarray:
     """Return a times the transpose of b in floats from one matmul kernel on the local GPU."""
     size = _matmul_size(a.shape[0])
     if a.shape != (size, size) or b.shape != (size, size):
@@ -559,13 +561,13 @@ def _matmul_launch(driver: Driver, module, kernel: str, a: np.ndarray, b: np.nda
     return driver.function(module, kernel), arguments, pointers
 
 
-def run(cubin_path: pathlib.Path, random_count: int = 0, seed: int = 0) -> None:
+def run_calibration(cubin_path: pathlib.Path, random_count: int = 0, seed: int = 0) -> None:
     """Run every case, the three transposes, and the two matmuls, one launch each, in order."""
     driver = Driver()
     module = driver.load(cubin_path.read_bytes())
     buffer = driver.alloc(GLOBAL_BYTES)
     driver.upload(buffer, bytes(GLOBAL_BYTES))
-    for case in launches(random_count, seed):
+    for case in launch_order_cases(random_count, seed):
         # The offsets travel by value in the parameter space, which keeps the kernel free of
         # memory instructions other than the one of the case.
         # The kernel of copies that fill zeros takes its zero lanes where others take the sink.

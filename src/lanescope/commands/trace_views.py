@@ -35,7 +35,10 @@ def add_parsers(commands: argparse._SubParsersAction) -> None:
         help="rank the extra sectors of global memory in place of the passes of shared memory",
     )
     summing.add_argument(
-        "--limit", type=argument_types.size, default=10, help="most kernels and lines to list"
+        "--limit",
+        type=argument_types.positive_count,
+        default=10,
+        help="most kernels and lines to list",
     )
     summing.add_argument(
         "--sort",
@@ -55,7 +58,7 @@ def add_parsers(commands: argparse._SubParsersAction) -> None:
     lanes.add_argument("trace", type=pathlib.Path)
     lanes.add_argument(
         "--pc",
-        type=argument_types.number,
+        type=argument_types.prefixed_integer,
         required=True,
         help="PC of the instruction, such as 0x120",
     )
@@ -107,7 +110,7 @@ def _summary(args: argparse.Namespace) -> int:
         print(json.dumps(data, indent=2))
     else:
         unit = "sectors" if args.global_memory else "wavefronts"
-        print(summary_text.render(data, unit, args.limit, args.sort))
+        print(summary_text.render_summary_text(data, unit, args.limit, args.sort))
     for note in summary_text.notes(data):
         print(f"lanescope: {note}", file=sys.stderr)
     if len(paths) == summary.MAX_TRACES:

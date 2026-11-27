@@ -185,7 +185,7 @@ def test_the_text_of_a_summary_ranks_kernels_and_lines_and_names_the_next_comman
         ("run/trace-0.npz", "run", facts(demos.transpose_trace())),
         ("run/trace-1.npz", "run", facts(demos.histogram_trace())),
     ]
-    text = summary_text.render(summary.summarize(items))
+    text = summary_text.render_summary_text(summary.summarize(items))
     assert "run: 2 launches of 2 kernels" in text
     assert "Bank conflicts add" in text
     lines = text.splitlines()
@@ -201,7 +201,7 @@ def test_the_text_of_a_summary_ranks_kernels_and_lines_and_names_the_next_comman
 
 def test_the_text_of_global_memory_points_to_the_lanes_of_the_worst_line():
     items = [("c.npz", "c.npz", facts(demos.column_sums_trace()))]
-    text = summary_text.render(summary.summarize(items), "sectors")
+    text = summary_text.render_summary_text(summary.summarize(items), "sectors")
     assert "Scattered accesses add" in text
     assert "Worst line: lanescope lanes c.npz --pc 0xc0 shows its threads" in text
 
@@ -324,7 +324,7 @@ def test_without_templates_each_instance_stands_alone():
 
 
 def test_the_text_lists_a_template_once_with_the_count_of_its_instances():
-    text = summary_text.render(summary.summarize(two_instances()))
+    text = summary_text.render_summary_text(summary.summarize(two_instances()))
     lines = text.splitlines()
     assert lines[0] == "r: 3 launches of 2 kernels in 1 template"
     kernels = lines[lines.index("Kernels by extra passes") + 2 :]
@@ -333,7 +333,7 @@ def test_the_text_lists_a_template_once_with_the_count_of_its_instances():
 
 
 def test_the_text_of_the_instances_view_lists_each_instance_as_its_own_kernel():
-    text = summary_text.render(summary.summarize(two_instances(), by_template=False))
+    text = summary_text.render_summary_text(summary.summarize(two_instances(), by_template=False))
     lines = text.splitlines()
     assert lines[0] == "r: 3 launches of 2 kernels in 1 template"
     kernels = lines[lines.index("Kernels by extra passes") + 2 :][:2]
@@ -439,7 +439,7 @@ def test_an_inlined_line_of_one_template_adds_up_over_its_instances():
 
 
 def test_the_text_names_the_header_line_that_an_inlined_line_comes_from():
-    text = summary_text.render(
+    text = summary_text.render_summary_text(
         summary.summarize([("s.npz", "s.npz", column_loads({"0x10": 41, "0x20": 58}))])
     )
     lines = text.splitlines()
@@ -521,7 +521,7 @@ def test_the_text_of_a_timed_run_gives_the_time_of_each_kernel_and_its_part_of_t
         ("r/trace-1.npz", "r", facts(demos.histogram_trace())),
     ]
     times = {"r": timing(transpose=[1_500_000], histogram=[2_500_000], scale=[1_000_000])}
-    lines = summary_text.render(summary.summarize(items, times=times)).splitlines()
+    lines = summary_text.render_summary_text(summary.summarize(items, times=times)).splitlines()
     assert lines[1] == "Kernel time: 5.0 ms, the median of 1 round without the recorder."
     table = lines[lines.index("Kernels by extra passes") + 1 :]
     assert table[0].split() == "extra passes of kernel launches time of run kernel".split()
@@ -536,7 +536,9 @@ def test_the_text_orders_the_kernels_by_time_on_request():
         ("r/trace-2.npz", "r", facts(demos.column_sums_trace())),
     ]
     times = {"r": timing(transpose=[1_000], histogram=[3_000])}
-    lines = summary_text.render(summary.summarize(items, times=times), order="time").splitlines()
+    lines = summary_text.render_summary_text(
+        summary.summarize(items, times=times), order="time"
+    ).splitlines()
     table = lines[lines.index("Kernels by time") + 2 :][:3]
     assert [row.split()[-1] for row in table] == ["histogram", "transpose", "column_sums"]
     assert table[2].split()[-3:] == ["-", "-", "column_sums"]
@@ -544,7 +546,7 @@ def test_the_text_orders_the_kernels_by_time_on_request():
 
 def test_the_text_of_an_untimed_run_has_no_time_column():
     data = summary.summarize([("t.npz", "t.npz", facts(demos.transpose_trace()))])
-    text = summary_text.render(data)
+    text = summary_text.render_summary_text(data)
     assert "Kernel time" not in text
     assert "of run" not in text
 

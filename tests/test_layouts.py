@@ -13,7 +13,7 @@ TILE_BUFFER = layouts.Buffer(0, TILE_BYTES)
 def after_change(change):
     return {
         item.before.pc: item
-        for item in layouts.compare(demos.transpose_trace(), TILE_BUFFER, change)
+        for item in layouts.compare_layout_counters(demos.transpose_trace(), TILE_BUFFER, change)
     }
 
 
@@ -49,14 +49,16 @@ def test_comparison_covers_only_instructions_on_the_buffer():
 def test_comparison_includes_the_global_side_of_a_copy_into_the_buffer():
     # A 16-byte padding splits the lane pairs of the copy, and each lane then reads a sector.
     trace = demos.matmul_tile_trace()
-    result = layouts.compare(trace, layouts.Buffer(0, 8192), layouts.Padding(128, 16))
+    result = layouts.compare_layout_counters(
+        trace, layouts.Buffer(0, 8192), layouts.Padding(128, 16)
+    )
     reads = [item for item in result if item.before.space == Space.GLOBAL]
     assert [(item.before.achieved, item.after.achieved) for item in reads] == [(512, 768)]
 
 
 def test_worst_rows_of_a_comparison_point_into_the_full_trace():
     trace = demos.transpose_trace()
-    for item in layouts.compare(trace, TILE_BUFFER, layouts.XorSwizzle(5, 2, 5)):
+    for item in layouts.compare_layout_counters(trace, TILE_BUFFER, layouts.XorSwizzle(5, 2, 5)):
         assert int(trace.pc[item.before.worst_row]) == item.before.pc
         assert int(trace.pc[item.after.worst_row]) == item.after.pc
 
@@ -65,20 +67,20 @@ def test_global_accesses_stay_in_place():
     trace = Trace.from_accesses(
         [Access(0x20, Space.GLOBAL, Kind.LOAD, 4, tuple(4 * lane for lane in range(WARP_SIZE)))]
     )
-    moved = layouts.apply(trace, TILE_BUFFER, layouts.Padding(ROW_BYTES, 4))
+    moved = layouts.apply_layout_change(trace, TILE_BUFFER, layouts.Padding(ROW_BYTES, 4))
     assert np.array_equal(moved.addr, trace.addr)
 
 
 def test_padding_moves_each_row_by_its_pad():
     trace = shared_trace((0x10, 4, [ROW_BYTES * lane for lane in range(WARP_SIZE)]))
-    moved = layouts.apply(trace, TILE_BUFFER, layouts.Padding(ROW_BYTES, 4))
+    moved = layouts.apply_layout_change(trace, TILE_BUFFER, layouts.Padding(ROW_BYTES, 4))
     assert moved.lane_addresses(0)[:3] == (0, 132, 264)
 
 
 def test_padding_moves_later_buffers_up_by_the_rounded_extra_bytes():
     trace = shared_trace((0x10, 4, [TILE_BYTES + 4 * lane for lane in range(WARP_SIZE)]))
     change = layouts.Padding(ROW_BYTES, 4)
-    moved = layouts.apply(trace, TILE_BUFFER, change)
+    moved = layouts.apply_layout_change(trace, TILE_BUFFER, change)
     assert layouts.later_shift(TILE_BUFFER, change) == 128
     assert moved.lane_addresses(0)[0] == TILE_BYTES + 128
 
@@ -90,7 +92,9 @@ def test_comparison_includes_instructions_on_moved_later_buffers():
     )
     pcs = [
         item.before.pc
-        for item in layouts.compare(trace, TILE_BUFFER, layouts.Padding(ROW_BYTES, 4))
+        for item in layouts.compare_layout_counters(
+            trace, TILE_BUFFER, layouts.Padding(ROW_BYTES, 4)
+        )
     ]
     assert pcs == [0x10, 0x20]
 
@@ -115,25 +119,25 @@ def test_cute_swizzle_on_elements_equals_the_byte_swizzle_with_a_larger_base():
 def test_padding_that_misaligns_wide_accesses_names_the_change():
     trace = shared_trace((0x10, 8, [8 * lane for lane in range(WARP_SIZE)]))
     with pytest.raises(ValueError, match="pad each 128-byte row by 4 bytes misaligns the 8-byte"):
-        layouts.apply(trace, layouts.Buffer(0, 1024), layouts.Padding(128, 4))
+        layouts.apply_layout_change(trace, layouts.Buffer(0, 1024), layouts.Padding(128, 4))
 
 
 def test_padding_that_splits_wide_accesses_is_rejected():
     trace = shared_trace((0x10, 16, [16 * lane for lane in range(WARP_SIZE)]))
     with pytest.raises(ValueError, match="splits the 16-byte accesses of pc 0x10"):
-        layouts.apply(trace, layouts.Buffer(0, 960), layouts.Padding(40, 16))
+        layouts.apply_layout_change(trace, layouts.Buffer(0, 960), layouts.Padding(40, 16))
 
 
 def test_swizzle_below_the_access_width_is_rejected():
     trace = shared_trace((0x10, 16, [16 * lane for lane in range(WARP_SIZE)]))
     with pytest.raises(ValueError, match="splits the 16-byte accesses"):
-        layouts.apply(trace, layouts.Buffer(0, 4096), layouts.XorSwizzle(3, 2, 3))
+        layouts.apply_layout_change(trace, layouts.Buffer(0, 4096), layouts.XorSwizzle(3, 2, 3))
 
 
 def test_access_across_the_buffer_edge_is_rejected():
     trace = shared_trace((0x10, 16, [16 * lane for lane in range(WARP_SIZE)]))
     with pytest.raises(ValueError, match="cross the edge of the buffer"):
-        layouts.apply(trace, layouts.Buffer(8, 256), layouts.Padding(8, 8))
+        layouts.apply_layout_change(trace, layouts.Buffer(8, 256), layouts.Padding(8, 8))
 
 
 @pytest.mark.parametrize(

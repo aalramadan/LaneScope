@@ -9,7 +9,7 @@ from lanescope.fixes.layouts import (
     Change,
     Padding,
     XorSwizzle,
-    apply,
+    apply_layout_change,
     lanes_inside,
 )
 from lanescope.model import batch_counts
@@ -47,7 +47,7 @@ def divisors(number: int) -> list[int]:
     return small + large
 
 
-def candidates(buffer: Buffer, widest: int) -> list[Change]:
+def layout_candidates(buffer: Buffer, widest: int) -> list[Change]:
     """Return the paddings and swizzles that keep accesses of `widest` bytes whole and aligned."""
     unit = max(widest, 4)
     found: list[Change] = [
@@ -78,9 +78,9 @@ def suggest(trace: Trace, buffer: Buffer) -> list[Suggestion]:
     wavefronts_before, excessive_before, sectors_before = _totals(accesses, repeats)
     widest = int(accesses.width.max())
     found = []
-    for change in candidates(buffer, widest):
+    for change in layout_candidates(buffer, widest):
         try:
-            changed = apply(accesses, buffer, change)
+            changed = apply_layout_change(accesses, buffer, change)
         except ValueError:
             continue
         wavefronts_after, excessive_after, sectors_after = _totals(changed, repeats)
@@ -97,7 +97,7 @@ def suggest(trace: Trace, buffer: Buffer) -> list[Suggestion]:
             )
         )
     better = [s for s in found if s.excessive_after < s.excessive_before]
-    return sorted(better, key=_rank)
+    return sorted(better, key=_suggestion_sort_key)
 
 
 def _totals(accesses: Trace, repeats: np.ndarray) -> tuple[int, int, int]:
@@ -112,7 +112,7 @@ def _totals(accesses: Trace, repeats: np.ndarray) -> tuple[int, int, int]:
     )
 
 
-def _rank(suggestion: Suggestion) -> tuple[int, int, int, int, int]:
+def _suggestion_sort_key(suggestion: Suggestion) -> tuple[int, int, int, int, int]:
     change = suggestion.change
     bits = change.bits if isinstance(change, XorSwizzle) else 0
     shift = change.shift if isinstance(change, XorSwizzle) else 0

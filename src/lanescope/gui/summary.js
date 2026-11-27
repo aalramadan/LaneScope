@@ -1,5 +1,5 @@
 import * as format from "./format.js";
-import { $, cell, detail, meter, stat } from "./dom.js";
+import { $, cellSubline, meter, stat, tableCell } from "./dom.js";
 
 // The rows that the table of lines shows, worst first. The summary keeps more.
 export const SHOWN_LINES = 50;
@@ -21,7 +21,7 @@ export function renderProgress(answer) {
   $("summary-content").hidden = true;
   $("summary-progress").hidden = false;
   $("summary-progress-text").textContent =
-    `Adding up the accesses of each launch, ${format.count(answer.done)} of ${launches(answer.total)} done.`;
+    `Adding up the accesses of each launch, ${format.count(answer.done)} of ${launchCountText(answer.total)} done.`;
   const bar = $("summary-progress-bar");
   bar.max = Math.max(answer.total, 1);
   bar.value = answer.done;
@@ -39,7 +39,7 @@ export function renderSummary(data, unit, open) {
   const templates = new Set(data.kernels.map((kernel) => `${kernel.run}\n${kernel.template}`)).size;
   const grouped = templates < instances ? ` in ${format.plural(templates, "template")}` : "";
   $("summary-subtitle").textContent =
-    `${where}: ${launches(data.traces)} of ${format.plural(instances, "kernel")}${grouped}`;
+    `${where}: ${launchCountText(data.traces)} of ${format.plural(instances, "kernel")}${grouped}`;
   const total = data.totals[unit];
   $("summary-stats").replaceChildren(
     stat(`${memory}, whole run`, `${format.count(total.achieved)} / ${format.count(total.ideal)}`,
@@ -63,13 +63,13 @@ function renderNotes(data) {
   const notes = [];
   if (data.without_lines) {
     notes.push(
-      `No source lines in ${format.count(data.without_lines)} of ${launches(data.traces)}. ` +
+      `No source lines in ${format.count(data.without_lines)} of ${launchCountText(data.traces)}. ` +
         "Build the program with -lineinfo, such as nvcc -lineinfo, to see the line of each instruction.",
     );
   }
   if (data.dropped.traces) {
     notes.push(
-      `The record buffer filled up in ${format.count(data.dropped.traces)} of ${launches(data.traces)} and left out ` +
+      `The record buffer filled up in ${format.count(data.dropped.traces)} of ${launchCountText(data.traces)} and left out ` +
         `${format.count(data.dropped.records)} accesses, therefore their counts are low. Record again with a larger ` +
         "--capacity or with fewer CTAs, such as --ctas 0:8.",
     );
@@ -100,10 +100,10 @@ function renderLines(data, unit, open) {
       const row = openingRow(line.worst, open);
       row.append(
         extraCell(line, peak),
-        cell(format.percent(line.excessive, line.kernel_achieved), "num"),
+        tableCell(format.percent(line.excessive, line.kernel_achieved), "num"),
         lineCell(line),
         kernelCell(line, data.runs.length > 1, line.instances),
-        cell(format.count(line.launches), "num"),
+        tableCell(format.count(line.launches), "num"),
       );
       return row;
     }),
@@ -154,19 +154,19 @@ function byExcess(entries, unit) {
 function kernelRow(entry, unit, peak, open, name, runTimes) {
   const counts = entry.totals[unit];
   const row = openingRow(entry.worst[unit], open);
-  const extra = cell(format.count(counts.excessive), "num");
+  const extra = tableCell(format.count(counts.excessive), "num");
   extra.append(meter(counts.excessive, peak));
   row.append(
     extra,
-    cell(format.percent(counts.excessive, counts.achieved), "num"),
+    tableCell(format.percent(counts.excessive, counts.achieved), "num"),
     name,
-    cell(format.count(entry.launches), "num"),
+    tableCell(format.count(entry.launches), "num"),
   );
   if (runTimes) {
     const timed = entry.time_ns !== null;
     row.append(
-      cell(timed ? format.duration(entry.time_ns) : "–", "num"),
-      cell(timed ? format.percent(entry.time_ns, runTimes.get(entry.run) ?? 0) : "–", "num"),
+      tableCell(timed ? format.duration(entry.time_ns) : "–", "num"),
+      tableCell(timed ? format.percent(entry.time_ns, runTimes.get(entry.run) ?? 0) : "–", "num"),
     );
   }
   return row;
@@ -219,10 +219,10 @@ function openingRow(place, open) {
 }
 
 function extraCell(line, peak) {
-  const element = cell(format.count(line.excessive), "num");
+  const element = tableCell(format.count(line.excessive), "num");
   element.append(meter(line.excessive, peak));
   if (line.ideal > 0) {
-    element.append(detail(`${format.multiple(line.achieved / line.ideal)} the ideal`));
+    element.append(cellSubline(`${format.multiple(line.achieved / line.ideal)} the ideal`));
   }
   return element;
 }
@@ -253,14 +253,14 @@ function lineCell(line) {
   element.append(what);
   const text = line.origin ? line.origin.text : line.source;
   if (text) {
-    const code = detail(text, "where mono");
+    const code = cellSubline(text, "where mono");
     code.title = text;
     element.append(code);
   } else if (line.line === null) {
-    element.append(detail("no source line"));
+    element.append(cellSubline("no source line"));
   }
   if (line.origin) {
-    const inlined = detail(`inlined at ${call}`);
+    const inlined = cellSubline(`inlined at ${call}`);
     inlined.title = line.source ? `${call}: ${line.source}` : call;
     element.append(inlined);
   }
@@ -279,14 +279,14 @@ function kernelCell(entry, withRun, instances = 1) {
   name.title = entry.full_name || entry.name || "";
   element.append(name);
   if (instances > 1) {
-    element.append(detail(format.plural(instances, "instance")));
+    element.append(cellSubline(format.plural(instances, "instance")));
   }
   if (withRun) {
-    element.append(detail(entry.run));
+    element.append(cellSubline(entry.run));
   }
   return element;
 }
 
-function launches(value) {
+function launchCountText(value) {
   return `${format.count(value)} ${value === 1 ? "launch" : "launches"}`;
 }

@@ -7,16 +7,16 @@ let browserApi = null;
 
 export async function getJSON(path, params = {}, signal = undefined) {
   if (inBrowser()) {
-    return answer("GET", path, params, signal);
+    return answerInBrowser("GET", path, params, signal);
   }
   const query = new URLSearchParams(params).toString();
   const response = await fetch(query ? `${path}?${query}` : path, { signal });
-  return read(response);
+  return readJsonAnswer(response);
 }
 
 export async function postJSON(path, body, signal = undefined) {
   if (inBrowser()) {
-    return answer("POST", path, body, signal);
+    return answerInBrowser("POST", path, body, signal);
   }
   const response = await fetch(path, {
     method: "POST",
@@ -24,7 +24,7 @@ export async function postJSON(path, body, signal = undefined) {
     body: JSON.stringify(body),
     signal,
   });
-  return read(response);
+  return readJsonAnswer(response);
 }
 
 function inBrowser() {
@@ -43,7 +43,7 @@ async function startBrowserApi() {
   return api;
 }
 
-async function answer(method, path, payload, signal) {
+async function answerInBrowser(method, path, payload, signal) {
   browserApi ??= startBrowserApi();
   const api = await browserApi;
   if (signal?.aborted) {
@@ -56,7 +56,7 @@ async function answer(method, path, payload, signal) {
   return data;
 }
 
-async function read(response) {
+async function readJsonAnswer(response) {
   let data;
   try {
     data = await response.json();

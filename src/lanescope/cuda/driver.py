@@ -32,62 +32,74 @@ class Driver:
                 f"cannot load the CUDA driver {library} ({error}). Run on a machine with an "
                 "NVIDIA GPU, such as WSL2 with the Windows driver installed."
             ) from error
-        self._call("cuInit", 0)
+        self._call_driver_function("cuInit", 0)
         self._device = ctypes.c_int()
-        self._call("cuDeviceGet", ctypes.byref(self._device), device)
+        self._call_driver_function("cuDeviceGet", ctypes.byref(self._device), device)
         self._context = ctypes.c_void_p()
-        self._call("cuDevicePrimaryCtxRetain", ctypes.byref(self._context), self._device)
-        self._call("cuCtxSetCurrent", self._context)
+        self._call_driver_function(
+            "cuDevicePrimaryCtxRetain", ctypes.byref(self._context), self._device
+        )
+        self._call_driver_function("cuCtxSetCurrent", self._context)
 
     def name(self) -> str:
         """Return the product name of the GPU."""
         buffer = ctypes.create_string_buffer(256)
-        self._call("cuDeviceGetName", buffer, len(buffer), self._device)
+        self._call_driver_function("cuDeviceGetName", buffer, len(buffer), self._device)
         return buffer.value.decode()
 
     def arch(self) -> str:
         """Return the architecture name of the GPU, such as sm_89."""
         major, minor = ctypes.c_int(), ctypes.c_int()
-        self._call("cuDeviceGetAttribute", ctypes.byref(major), _ATTRIBUTE_MAJOR, self._device)
-        self._call("cuDeviceGetAttribute", ctypes.byref(minor), _ATTRIBUTE_MINOR, self._device)
+        self._call_driver_function(
+            "cuDeviceGetAttribute", ctypes.byref(major), _ATTRIBUTE_MAJOR, self._device
+        )
+        self._call_driver_function(
+            "cuDeviceGetAttribute", ctypes.byref(minor), _ATTRIBUTE_MINOR, self._device
+        )
         return f"sm_{major.value}{minor.value}"
 
     def version(self) -> int:
         """Return the CUDA version the driver supports, such as 12090."""
         version = ctypes.c_int()
-        self._call("cuDriverGetVersion", ctypes.byref(version))
+        self._call_driver_function("cuDriverGetVersion", ctypes.byref(version))
         return version.value
 
     def load(self, image: bytes) -> ctypes.c_void_p:
         """Load a cubin and return its module."""
         module = ctypes.c_void_p()
-        self._call("cuModuleLoadData", ctypes.byref(module), ctypes.c_char_p(image))
+        self._call_driver_function("cuModuleLoadData", ctypes.byref(module), ctypes.c_char_p(image))
         return module
 
     def function(self, module: ctypes.c_void_p, name: str) -> ctypes.c_void_p:
         """Return a kernel of a loaded module."""
         function = ctypes.c_void_p()
-        self._call("cuModuleGetFunction", ctypes.byref(function), module, name.encode())
+        self._call_driver_function(
+            "cuModuleGetFunction", ctypes.byref(function), module, name.encode()
+        )
         return function
 
     def alloc(self, size: int) -> int:
         """Allocate device memory and return its address."""
         pointer = ctypes.c_uint64()
-        self._call("cuMemAlloc_v2", ctypes.byref(pointer), ctypes.c_size_t(size))
+        self._call_driver_function("cuMemAlloc_v2", ctypes.byref(pointer), ctypes.c_size_t(size))
         return pointer.value
 
     def free(self, pointer: int) -> None:
         """Free device memory."""
-        self._call("cuMemFree_v2", ctypes.c_uint64(pointer))
+        self._call_driver_function("cuMemFree_v2", ctypes.c_uint64(pointer))
 
     def upload(self, pointer: int, data: bytes) -> None:
         """Copy bytes to device memory."""
-        self._call("cuMemcpyHtoD_v2", ctypes.c_uint64(pointer), data, ctypes.c_size_t(len(data)))
+        self._call_driver_function(
+            "cuMemcpyHtoD_v2", ctypes.c_uint64(pointer), data, ctypes.c_size_t(len(data))
+        )
 
     def download(self, pointer: int, size: int) -> bytes:
         """Copy bytes from device memory."""
         data = ctypes.create_string_buffer(size)
-        self._call("cuMemcpyDtoH_v2", data, ctypes.c_uint64(pointer), ctypes.c_size_t(size))
+        self._call_driver_function(
+            "cuMemcpyDtoH_v2", data, ctypes.c_uint64(pointer), ctypes.c_size_t(size)
+        )
         return data.raw
 
     def launch(
@@ -98,8 +110,10 @@ class Driver:
         arguments: Sequence[ctypes._SimpleCData | ctypes.Array],
     ) -> None:
         """Launch a kernel with its arguments and wait for it to finish."""
-        self._call("cuLaunchKernel", function, *grid, *block, 0, None, _pointers(arguments), None)
-        self._call("cuCtxSynchronize")
+        self._call_driver_function(
+            "cuLaunchKernel", function, *grid, *block, 0, None, _pointers(arguments), None
+        )
+        self._call_driver_function("cuCtxSynchronize")
 
     def time_launches(
         self,
@@ -112,26 +126,28 @@ class Driver:
         """Launch a kernel `repeats` times back to back and return the milliseconds per launch."""
         pointers = _pointers(arguments)
         start, stop = ctypes.c_void_p(), ctypes.c_void_p()
-        self._call("cuEventCreate", ctypes.byref(start), 0)
-        self._call("cuEventCreate", ctypes.byref(stop), 0)
+        self._call_driver_function("cuEventCreate", ctypes.byref(start), 0)
+        self._call_driver_function("cuEventCreate", ctypes.byref(stop), 0)
         try:
-            self._call("cuEventRecord", start, None)
+            self._call_driver_function("cuEventRecord", start, None)
             for _ in range(repeats):
-                self._call("cuLaunchKernel", function, *grid, *block, 0, None, pointers, None)
-            self._call("cuEventRecord", stop, None)
-            self._call("cuEventSynchronize", stop)
+                self._call_driver_function(
+                    "cuLaunchKernel", function, *grid, *block, 0, None, pointers, None
+                )
+            self._call_driver_function("cuEventRecord", stop, None)
+            self._call_driver_function("cuEventSynchronize", stop)
             elapsed = ctypes.c_float()
-            self._call("cuEventElapsedTime", ctypes.byref(elapsed), start, stop)
+            self._call_driver_function("cuEventElapsedTime", ctypes.byref(elapsed), start, stop)
         finally:
-            self._call("cuEventDestroy_v2", start)
-            self._call("cuEventDestroy_v2", stop)
+            self._call_driver_function("cuEventDestroy_v2", start)
+            self._call_driver_function("cuEventDestroy_v2", stop)
         return elapsed.value / repeats
 
     def close(self) -> None:
         """Release the primary context."""
-        self._call("cuDevicePrimaryCtxRelease_v2", self._device)
+        self._call_driver_function("cuDevicePrimaryCtxRelease_v2", self._device)
 
-    def _call(self, name: str, *arguments) -> None:
+    def _call_driver_function(self, name: str, *arguments) -> None:
         status = getattr(self._lib, name)(*arguments)
         if status != 0:
             text = ctypes.c_char_p()

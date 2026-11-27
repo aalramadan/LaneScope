@@ -35,7 +35,7 @@ def add_parsers(commands: argparse._SubParsersAction) -> None:
 def _add_rounds(parser: argparse.ArgumentParser, default: int = 5) -> None:
     parser.add_argument(
         "--rounds",
-        type=argument_types.size,
+        type=argument_types.positive_count,
         metavar="N",
         default=default,
         help="runs of each folder, taken in turns over the folders",
@@ -53,9 +53,9 @@ def _time(args: argparse.Namespace) -> int:
     if command:
         if len(folders) != 1:
             raise ValueError("a program after -- takes exactly one folder, which stores it")
-        kernel_times.write_run(folders[0], command)
+        kernel_times.write_stored_command(folders[0], command)
     for folder in folders:
-        kernel_times.read_run(folder)
+        kernel_times.read_stored_command(folder)
     timer = build_kernel_timer(folders[0] / "build", cache=cache_folder())
 
     def report(round_index: int, folder: pathlib.Path, seconds: float) -> None:
@@ -67,12 +67,12 @@ def _time(args: argparse.Namespace) -> int:
     results = kernel_times.time_folders(folders, timer, parsed.rounds, report)
     for folder, result in zip(folders, results, strict=True):
         print()
-        _print_table(folder, result)
+        _print_kernel_times(folder, result)
         print(f"wrote {folder / kernel_times.TIMES_FILE}")
     return 0
 
 
-def _print_table(folder: pathlib.Path, result: dict) -> None:
+def _print_kernel_times(folder: pathlib.Path, result: dict) -> None:
     kernels = kernel_times.ranked(result)
     names = kernel_names.readable(kernel.name for kernel in kernels)
     total = sum(kernel.median_ns for kernel in kernels)
@@ -88,12 +88,13 @@ def _print_table(folder: pathlib.Path, result: dict) -> None:
             f"{percent(round(kernel.median_ns), round(total)):>7}  "
             f"{kernel.launches:>8,}  "
             f"{duration_range(kernel.fastest_round_ns, kernel.slowest_round_ns):>18}  "
-            f"{printable(kernel_names.short(names[kernel.name]))}"
+            f"{printable(kernel_names.short_name(names[kernel.name]))}"
         )
         if not kernel.even_launches:
             launches = ", ".join(str(n) for n in result["kernels"][kernel.name]["launches"])
             print(
-                f"lanescope: the launches of {printable(kernel_names.short(names[kernel.name]))} "
+                "lanescope: the launches of "
+                f"{printable(kernel_names.short_name(names[kernel.name]))} "
                 f"in {printable(folder)} "
                 f"differ between rounds ({launches}). Its median compares rounds of unequal work.",
                 file=sys.stderr,

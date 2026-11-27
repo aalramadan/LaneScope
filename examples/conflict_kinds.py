@@ -6,7 +6,7 @@ import numpy as np
 
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver
-from lanescope.cuda.toolchain import find
+from lanescope.cuda.toolchain import find_toolchain
 
 SOURCE = pathlib.Path(__file__).resolve().with_suffix(".cu")
 KERNELS = ("histogram", "transpose", "tree_sum", "scale")
@@ -21,7 +21,7 @@ def main() -> None:
     parser.add_argument("--blocks", type=int, default=8, help="CTAs of the histogram and the sums")
     args = parser.parse_args()
     driver = Driver()
-    library = find().nvrtc
+    library = find_toolchain().nvrtc
     if library is None:
         raise SystemExit("NVRTC was not found. Run pip install 'lanescope[gpu]' to add it.")
     # The line tables let the recording name the source line of each access.

@@ -13,7 +13,7 @@ from lanescope.nsight import calibration
 from lanescope.trace import Kind, Space
 
 FORUM_WAVEFRONTS = [2, 2, 4, 4, 4, 4, 8, 4, 8]
-TOOLS = toolchain.find()
+TOOLS = toolchain.find_toolchain()
 MEMORY_OPCODES = {"LD", "ST", "LDG", "STG", "LDS", "STS", "LDL", "STL", "ATOM", "ATOMG", "ATOMS"}
 MEMORY_OPCODES |= {"RED", "LDGSTS", "LDSM"}
 OPCODE_OF = {
@@ -56,21 +56,23 @@ def _sass_opcodes(cubin: pathlib.Path) -> dict[str, list[str]]:
 
 
 def test_case_names_are_unique():
-    names = [case.name for case in calibration.launches(300, 5)]
+    names = [case.name for case in calibration.launch_order_cases(300, 5)]
     assert len(names) == len(set(names))
 
 
 def test_kernel_source_defines_exactly_the_kernels_that_run():
     kernel = r"__global__ void (?:__launch_bounds__\(\d+\)\s+)?(\w+)\("
     defined = set(re.findall(kernel, calibration.kernel_source()))
-    launched = {case.kernel for case in calibration.launches()}
+    launched = {case.kernel for case in calibration.launch_order_cases()}
     fixed = set(calibration.TRANSPOSE_KERNELS) | set(calibration.MATMUL_KERNELS)
     assert defined == launched | fixed
 
 
 def test_forum_cases_keep_the_wavefronts_measured_on_h100():
     forum = [
-        case for case in calibration.cases() if "forum" in case.name and case.kind.name == "LOAD"
+        case
+        for case in calibration.fixed_calibration_cases()
+        if "forum" in case.name and case.kind.name == "LOAD"
     ]
     found = [
         shared_memory.analyze(case.addresses(), case.width, arch="sm_90").wavefronts
@@ -80,13 +82,17 @@ def test_forum_cases_keep_the_wavefronts_measured_on_h100():
 
 
 def test_masked_lanes_have_no_address():
-    case = next(case for case in calibration.cases() if case.name == "shared-load-4-half-warp")
+    case = next(
+        case
+        for case in calibration.fixed_calibration_cases()
+        if case.name == "shared-load-4-half-warp"
+    )
     assert case.addresses()[15] == 128 * 15
     assert case.addresses()[16] is None
 
 
 def test_shared_cases_fit_the_shared_buffer():
-    for case in calibration.launches():
+    for case in calibration.launch_order_cases():
         if case.space == Space.SHARED:
             assert max(case.offsets) + case.width <= calibration.SHARED_BYTES
 
@@ -95,7 +101,9 @@ def test_shared_cases_fit_the_shared_buffer():
 def test_every_kernel_compiles_for_sm_89():
     cubin = calibration.compile_kernels("sm_89", TOOLS)
     names = {name.decode() for name in re.findall(rb"\.text\.([A-Za-z0-9_]+)", cubin)}
-    expected = {case.kernel for case in calibration.launches()} | set(calibration.TRANSPOSE_KERNELS)
+    expected = {case.kernel for case in calibration.launch_order_cases()} | set(
+        calibration.TRANSPOSE_KERNELS
+    )
     assert expected | set(calibration.MATMUL_KERNELS) <= names
 
 
@@ -112,7 +120,7 @@ def test_each_case_kernel_keeps_one_weak_memory_instruction_of_its_shape(tmp_pat
     cubin = tmp_path / "bench.cubin"
     cubin.write_bytes(calibration.compile_kernels("sm_89", TOOLS))
     functions = _sass_opcodes(cubin)
-    for case in calibration.cases():
+    for case in calibration.fixed_calibration_cases():
         memory = [op for op in functions[case.kernel] if op.split(".")[0] in MEMORY_OPCODES]
         assert [op.split(".")[0] for op in memory] == [OPCODE_OF[case.space, case.kind]], case.name
         modifiers = set(memory[0].split(".")[1:])
@@ -156,7 +164,7 @@ def test_random_cases_repeat_for_one_seed_and_change_with_another():
 
 
 def test_random_cases_fit_the_calibration_kernels():
-    kernels = {case.kernel for case in calibration.cases()}
+    kernels = {case.kernel for case in calibration.fixed_calibration_cases()}
     for case in calibration.random_cases(300, 5):
         limit = calibration.SHARED_BYTES if case.space == Space.SHARED else calibration.GLOBAL_BYTES
         assert case.kernel in kernels
@@ -179,17 +187,21 @@ def test_instruction_cases_run_every_lane_with_aligned_offsets_in_their_own_kern
 
 
 def test_launches_put_the_random_cases_after_the_fixed_ones():
-    fixed = calibration.cases() + calibration.instruction_cases() + calibration.atomic_cases()
+    fixed = (
+        calibration.fixed_calibration_cases()
+        + calibration.instruction_cases()
+        + calibration.atomic_cases()
+    )
     random = (
         calibration.random_cases(3, 4)
         + calibration.random_instruction_cases(3, 4)
         + calibration.random_atomic_cases(3, 4)
     )
-    assert calibration.launches(3, 4) == fixed + random
+    assert calibration.launch_order_cases(3, 4) == fixed + random
     groups = calibration.launch_groups(3, 4)
     assert [case for _, group in groups for case in group] == fixed + random
     assert [len(group) for _, group in groups] == [
-        len(calibration.cases()),
+        len(calibration.fixed_calibration_cases()),
         len(calibration.instruction_cases()),
         len(calibration.atomic_cases()),
         3,
@@ -264,7 +276,7 @@ def test_each_matmul_computes_the_product_of_its_inputs_on_the_local_gpu(tmp_pat
     a, b = (rng.uniform(-1, 1, (128, 128)).astype(np.float16) for _ in range(2))
     expected = a.astype(np.float32) @ b.astype(np.float32).T
     for kernel in calibration.MATMUL_KERNELS:
-        assert np.allclose(calibration.multiply(cubin, kernel, a, b), expected, atol=1e-3)
+        assert np.allclose(calibration.multiply_on_gpu(cubin, kernel, a, b), expected, atol=1e-3)
 
 
 @pytest.mark.skipif(TOOLS.nvrtc is None or not _has_gpu(), reason="NVRTC and a GPU are needed")

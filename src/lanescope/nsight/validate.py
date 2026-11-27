@@ -9,10 +9,10 @@ import sys
 
 from lanescope.cuda import nvrtc
 from lanescope.cuda.driver import Driver, version_text
-from lanescope.cuda.toolchain import Toolchain, cache_folder, find
-from lanescope.fixes.layouts import Padding, XorSwizzle, apply, infer_buffer
-from lanescope.model.counters import count
-from lanescope.nsight import calibration, compare
+from lanescope.cuda.toolchain import Toolchain, cache_folder, find_toolchain
+from lanescope.fixes.layouts import Padding, XorSwizzle, apply_layout_change, infer_buffer
+from lanescope.model.counters import count_instructions
+from lanescope.nsight import calibration, counter_comparison
 from lanescope.recorder import capture
 from lanescope.recorder.build import build_recorder
 from lanescope.trace import Kind, Space, Trace
@@ -65,18 +65,18 @@ class Launch:
     index: int
     name: str
     trace: Trace | None
-    counters: compare.KernelCounters | None
+    counters: counter_comparison.KernelCounters | None
 
 
 def launch_names(random_count: int = 0, seed: int = 0) -> list[str]:
     """Return the case or kernel name of each launch of the calibration run, in order."""
-    cases = calibration.launches(random_count, seed)
+    cases = calibration.launch_order_cases(random_count, seed)
     return [case.name for case in cases] + _fixed_kernels()
 
 
 def launch_kernels(random_count: int = 0, seed: int = 0) -> list[str]:
     """Return the kernel of each launch of the calibration run, in order."""
-    cases = calibration.launches(random_count, seed)
+    cases = calibration.launch_order_cases(random_count, seed)
     return [case.kernel for case in cases] + _fixed_kernels()
 
 
@@ -86,18 +86,18 @@ def _fixed_kernels() -> list[str]:
 
 def pair_launches(
     traces: list[Trace],
-    kernels: list[compare.KernelCounters] | None,
+    kernels: list[counter_comparison.KernelCounters] | None,
     random_count: int = 0,
     seed: int = 0,
 ) -> tuple[list[Launch], list[str]]:
     """Pair each launch with the trace and the counters of its own kernel, and list each gap."""
     names, expected = launch_names(random_count, seed), launch_kernels(random_count, seed)
-    return _pair(traces, kernels, names, expected)
+    return _match_launch(traces, kernels, names, expected)
 
 
-def _pair(
+def _match_launch(
     traces: list[Trace],
-    kernels: list[compare.KernelCounters] | None,
+    kernels: list[counter_comparison.KernelCounters] | None,
     names: list[str],
     expected: list[str],
 ) -> tuple[list[Launch], list[str]]:
@@ -129,7 +129,7 @@ def _pair(
     return launches, problems
 
 
-def validate(
+def validate_against_nsight(
     out_dir: pathlib.Path,
     arch: str | None = None,
     tools: Toolchain | None = None,
@@ -143,7 +143,7 @@ def validate(
     the fixed cases. These test the model on patterns that played no part in
     fitting it.
     """
-    tools = tools or find()
+    tools = tools or find_toolchain()
     driver = Driver()
     arch = arch or driver.arch()
     supported = driver.version()
@@ -159,7 +159,7 @@ def validate(
         command += ["--random", str(random_count), "--seed", str(seed)]
     names = launch_names(random_count, seed)
     record_dir = out_dir / "record"
-    if capture.record(command, build, record_dir, ctas=(0, 1 << 30)) != 0:
+    if capture.record_command(command, build, record_dir, ctas=(0, 1 << 30)) != 0:
         raise ValidationError(f"the recorded run failed. Its launch files are in {record_dir}.")
     paths = capture.import_recording(record_dir, tools.disassemblers)
     if not paths:
@@ -177,17 +177,19 @@ def validate(
             "Nsight Compute was not found, so the comparison was skipped. Run "
             "`lanescope get-ncu` or install Nsight Compute, then run the check again.",
         ]
-        return _write(out_dir, lines, [], [])
+        return _write_validation_files(out_dir, lines, [], [])
     report = out_dir / "ncu" / "bench.ncu-rep"
-    _profile(tools, command, report)
-    kernels = compare.read_report(report)
-    compare.dump(kernels, out_dir / "ncu-metrics.json")
+    _profile_with_ncu(tools, command, report)
+    kernels = counter_comparison.read_report(report)
+    counter_comparison.dump_source_counters(kernels, out_dir / "ncu-metrics.json")
     launches, problems = pair_launches(traces, kernels, random_count, seed)
     rows = [
         row
         for launch in launches
         if launch.trace is not None and launch.counters is not None
-        for row in compare.compare(launch.index, launch.trace, launch.counters)
+        for row in counter_comparison.compare_launch_counters(
+            launch.index, launch.trace, launch.counters
+        )
     ]
     predictions = predict_layouts(launches)
     lines += ["", *problems]
@@ -200,7 +202,7 @@ def validate(
         *_prediction_lines(predictions),
     ]
     lines += ["", *_mismatch_lines(rows, names)]
-    return _write(out_dir, lines, rows, predictions)
+    return _write_validation_files(out_dir, lines, rows, predictions)
 
 
 def validate_program(
@@ -215,7 +217,7 @@ def validate_program(
     Both tools see every CTA of each launch of the kernels whose names hold `kernel`,
     so a small run of the program keeps the check fast. Returns the path of the summary.
     """
-    tools = tools or find()
+    tools = tools or find_toolchain()
     if tools.ncu is None:
         raise ValidationError(
             "Nsight Compute was not found. Run `lanescope get-ncu` or install Nsight Compute."
@@ -229,7 +231,7 @@ def validate_program(
     out_dir.mkdir(parents=True, exist_ok=True)
     build = build_recorder(out_dir / "build", arch, tools, cache=cache_folder())
     record_dir = out_dir / "record"
-    if capture.record(command, build, record_dir, ctas=(0, 1 << 30), kernel=kernel) != 0:
+    if capture.record_command(command, build, record_dir, ctas=(0, 1 << 30), kernel=kernel) != 0:
         raise ValidationError(f"the recorded run failed. Its launch files are in {record_dir}.")
     paths = capture.import_recording(record_dir, tools.disassemblers)
     if not paths:
@@ -239,15 +241,17 @@ def validate_program(
     traces = [Trace.load(path) for path in paths]
     names = [str(trace.metadata.get("kernel", "")) for trace in traces]
     report = out_dir / "ncu" / "program.ncu-rep"
-    _profile(tools, command, report, kernel)
-    kernels = compare.read_report(report)
-    compare.dump(kernels, out_dir / "ncu-metrics.json")
-    launches, problems = _pair(traces, kernels, names, names)
+    _profile_with_ncu(tools, command, report, kernel)
+    kernels = counter_comparison.read_report(report)
+    counter_comparison.dump_source_counters(kernels, out_dir / "ncu-metrics.json")
+    launches, problems = _match_launch(traces, kernels, names, names)
     rows = [
         row
         for launch in launches
         if launch.trace is not None and launch.counters is not None
-        for row in compare.compare(launch.index, launch.trace, launch.counters)
+        for row in counter_comparison.compare_launch_counters(
+            launch.index, launch.trace, launch.counters
+        )
     ]
     # Nsight Compute gives the short name of a C++ kernel, which reads better than the
     # mangled one.
@@ -261,7 +265,7 @@ def validate_program(
         lines += [capture.NO_DISASSEMBLER, ""]
     lines += [*problems, "", *_metric_lines(kernels), ""]
     lines += [*_summary_lines(rows, []), "", *_mismatch_lines(rows, labels)]
-    return _write(out_dir, lines, rows, [])
+    return _write_validation_files(out_dir, lines, rows, [])
 
 
 def summary_path(trace_path: pathlib.Path) -> pathlib.Path | None:
@@ -334,11 +338,13 @@ def predict_layouts(launches: list[Launch]) -> list[Prediction]:
         trace = by_name[plain].trace if plain in by_name else None
         if trace is None:
             continue
-        changed = apply(trace, infer_buffer(trace), change)
+        changed = apply_layout_change(trace, infer_buffer(trace), change)
         counters = by_name[kernel].counters if kernel in by_name else None
         for kind, opcode in zip((Kind.STORE, Kind.LOAD), opcodes, strict=True):
             predicted = sum(
-                c.achieved for c in count(changed) if c.space == Space.SHARED and c.kind == kind
+                c.achieved
+                for c in count_instructions(changed)
+                if c.space == Space.SHARED and c.kind == kind
             )
             measured = None
             if counters is not None:
@@ -346,14 +352,17 @@ def predict_layouts(launches: list[Launch]) -> list[Prediction]:
                 hits = [
                     value
                     for offset, value in values.items()
-                    if compare.opcode(counters.sass.get(offset, "")).split(".")[0] == opcode
+                    if counter_comparison.opcode(counters.sass.get(offset, "")).split(".")[0]
+                    == opcode
                 ]
                 measured = sum(hits) if hits else None
             predictions.append(Prediction(kernel, change.describe(), kind, predicted, measured))
     return predictions
 
 
-def _profile(tools: Toolchain, command: list[str], report: pathlib.Path, kernel: str = "") -> None:
+def _profile_with_ncu(
+    tools: Toolchain, command: list[str], report: pathlib.Path, kernel: str = ""
+) -> None:
     report.parent.mkdir(parents=True, exist_ok=True)
     assert tools.ncu is not None
     # The recorder keeps a launch when any part of its mangled name holds the text, and
@@ -400,11 +409,11 @@ def _trace_lines(traces: list[Trace], names: list[str]) -> list[str]:
     return lines
 
 
-def _metric_lines(kernels: list[compare.KernelCounters]) -> list[str]:
+def _metric_lines(kernels: list[counter_comparison.KernelCounters]) -> list[str]:
     if not kernels:
         return ["Nsight Compute reported no kernels."]
     lines = ["| Quantity | Nsight Compute metric |", "|---|---|"]
-    for quantity in compare.QUANTITIES:
+    for quantity in counter_comparison.QUANTITIES:
         # A kernel without global accesses reports no global metric at all.
         names = (kernel.quantity(quantity)[0] for kernel in kernels)
         lines.append(f"| {quantity} | {next(filter(None, names), None) or 'not found'} |")
@@ -412,7 +421,8 @@ def _metric_lines(kernels: list[compare.KernelCounters]) -> list[str]:
 
 
 def _summary_lines(
-    rows: list[compare.Row], groups: list[tuple[str, list[calibration.Case]]]
+    rows: list[counter_comparison.CounterComparison],
+    groups: list[tuple[str, list[calibration.Case]]],
 ) -> list[str]:
     matched = sum(row.matches for row in rows)
     lines = [f"LaneScope matches Nsight Compute in {matched} of {len(rows)} instruction counts."]
@@ -433,7 +443,7 @@ def _summary_lines(
         start += len(cases)
     lines.append("")
     lines += ["| Opcode and quantity | Matched | Total |", "|---|---|---|"]
-    for key, entry in compare.summarize(rows).items():
+    for key, entry in counter_comparison.summarize(rows).items():
         lines.append(f"| {key} | {entry['matched']} | {entry['total']} |")
     return lines
 
@@ -451,7 +461,9 @@ def _prediction_lines(predictions: list[Prediction]) -> list[str]:
     return lines
 
 
-def _mismatch_lines(rows: list[compare.Row], names: list[str]) -> list[str]:
+def _mismatch_lines(
+    rows: list[counter_comparison.CounterComparison], names: list[str]
+) -> list[str]:
     lines = [
         "| Launch | Offset | SASS | Quantity | LaneScope | Nsight Compute |",
         "|---|---|---|---|---|---|",
@@ -467,8 +479,11 @@ def _mismatch_lines(rows: list[compare.Row], names: list[str]) -> list[str]:
     return lines
 
 
-def _write(
-    out_dir: pathlib.Path, lines: list[str], rows: list[compare.Row], predictions: list[Prediction]
+def _write_validation_files(
+    out_dir: pathlib.Path,
+    lines: list[str],
+    rows: list[counter_comparison.CounterComparison],
+    predictions: list[Prediction],
 ) -> pathlib.Path:
     payload = {
         "rows": [dataclasses.asdict(row) | {"matches": row.matches} for row in rows],

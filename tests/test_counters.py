@@ -4,7 +4,7 @@ import numpy as np
 
 from lanescope import demos
 from lanescope.model import counters
-from lanescope.model.counters import count, instruction_key, measure, worst_first
+from lanescope.model.counters import count_instructions, count_row, instruction_key, worst_first
 from lanescope.trace import WARP_SIZE, Access, Kind, Space, Trace
 
 
@@ -13,7 +13,7 @@ def by_pc(counters):
 
 
 def test_column_reads_of_the_transpose_sum_31_excess_wavefronts_per_request():
-    counters = by_pc(count(demos.transpose_trace()))
+    counters = by_pc(count_instructions(demos.transpose_trace()))
     column_reads = counters[demos.PC_LOAD_TILE]
     assert column_reads.requests == 128
     assert (column_reads.achieved, column_reads.ideal) == (4096, 128)
@@ -22,12 +22,12 @@ def test_column_reads_of_the_transpose_sum_31_excess_wavefronts_per_request():
 
 
 def test_row_writes_of_the_transpose_have_no_excess():
-    row_writes = by_pc(count(demos.transpose_trace()))[demos.PC_STORE_TILE]
+    row_writes = by_pc(count_instructions(demos.transpose_trace()))[demos.PC_STORE_TILE]
     assert (row_writes.achieved, row_writes.excessive) == (128, 0)
 
 
 def test_coalesced_global_accesses_count_four_sectors_per_request():
-    loads = by_pc(count(demos.transpose_trace()))[demos.PC_LOAD_INPUT]
+    loads = by_pc(count_instructions(demos.transpose_trace()))[demos.PC_LOAD_INPUT]
     assert (loads.unit, loads.achieved, loads.ideal, loads.excessive) == ("sectors", 512, 512, 0)
 
 
@@ -37,7 +37,7 @@ def test_worst_row_is_the_access_with_the_largest_excess():
         Access(0x10, Space.SHARED, Kind.LOAD, 4, tuple(128 * lane for lane in range(WARP_SIZE))),
         Access(0x10, Space.SHARED, Kind.LOAD, 4, tuple(8 * lane for lane in range(WARP_SIZE))),
     ]
-    (counter,) = count(Trace.from_accesses(accesses))
+    (counter,) = count_instructions(Trace.from_accesses(accesses))
     assert counter.worst_row == 1
     assert counter.achieved == 1 + 32 + 2
 
@@ -48,7 +48,7 @@ def test_one_pc_in_two_spaces_gives_two_counters():
         Access(0x40, Space.SHARED, Kind.STORE, 4, addresses),
         Access(0x40, Space.GLOBAL, Kind.STORE, 4, addresses),
     ]
-    counters = count(Trace.from_accesses(accesses))
+    counters = count_instructions(Trace.from_accesses(accesses))
     assert [(counter.pc, counter.space) for counter in counters] == [
         (0x40, Space.SHARED),
         (0x40, Space.GLOBAL),
@@ -56,7 +56,7 @@ def test_one_pc_in_two_spaces_gives_two_counters():
 
 
 def test_empty_trace_has_no_counters():
-    assert count(Trace.from_accesses([])) == []
+    assert count_instructions(Trace.from_accesses([])) == []
 
 
 def test_instruction_excess_adds_the_excess_of_each_access():
@@ -67,7 +67,7 @@ def test_instruction_excess_adds_the_excess_of_each_access():
         Access(0x10, Space.SHARED, Kind.LOAD, 16, paired),
         Access(0x10, Space.SHARED, Kind.LOAD, 16, tuple(conflicting)),
     ]
-    (counter,) = count(Trace.from_accesses(accesses))
+    (counter,) = count_instructions(Trace.from_accesses(accesses))
     assert (counter.achieved, counter.ideal, counter.excessive) == (8, 6, 2)
     assert counter.worst_row == 1
 
@@ -77,12 +77,12 @@ def test_global_broadcast_does_not_hide_the_excess_of_a_column_access():
         Access(0x20, Space.GLOBAL, Kind.LOAD, 4, (4096,) * WARP_SIZE),
         Access(0x20, Space.GLOBAL, Kind.LOAD, 4, tuple(4096 * lane for lane in range(WARP_SIZE))),
     ]
-    (counter,) = count(Trace.from_accesses(accesses))
+    (counter,) = count_instructions(Trace.from_accesses(accesses))
     assert counter.excessive == 28
 
 
 def test_worst_first_orders_by_excess_then_pc():
-    counters = worst_first(count(demos.transpose_trace()))
+    counters = worst_first(count_instructions(demos.transpose_trace()))
     assert [counter.pc for counter in counters] == [
         demos.PC_LOAD_TILE,
         demos.PC_LOAD_INPUT,
@@ -94,7 +94,7 @@ def test_worst_first_orders_by_excess_then_pc():
 def reference_count(trace):
     totals = {}
     for row in range(len(trace)):
-        achieved, ideal, excessive, conflicts = measure(trace, row)
+        achieved, ideal, excessive, conflicts = count_row(trace, row)
         total = totals.setdefault(instruction_key(trace, row), [0, 0, 0, 0, 0, row, excessive])
         total[0] += 1
         total[1] += achieved
@@ -141,7 +141,7 @@ def test_counting_distinct_rows_once_gives_the_counts_of_a_row_by_row_sum():
                 c.conflicts,
                 c.worst_row,
             )
-            for c in count(trace)
+            for c in count_instructions(trace)
         }
         assert found == reference_count(trace)
 
@@ -157,7 +157,9 @@ def test_count_keeps_two_copies_apart_when_only_their_global_addresses_differ():
         Access(pc, Space.SHARED, Kind.STORE, 16, rows, warp=1),
     ]
     trace = Trace.from_accesses(accesses, {"opcodes": {"0x40": "LDGSTS.E.BYPASS.128"}})
-    found = {counter.space: (counter.achieved, counter.ideal) for counter in count(trace)}
+    found = {
+        counter.space: (counter.achieved, counter.ideal) for counter in count_instructions(trace)
+    }
     assert found[Space.SHARED] == (4 + 32, 8)
     assert found[Space.GLOBAL] == (16 + 32, 32)
 
@@ -175,7 +177,7 @@ def test_count_gives_the_counters_of_a_row_by_row_sum_on_every_gallery_trace():
     for name, trace in demos.gallery_traces().items():
         expected = {}
         for row in range(len(trace)):
-            achieved, ideal, excessive, conflicts = measure(trace, row)
+            achieved, ideal, excessive, conflicts = count_row(trace, row)
             total = expected.setdefault(instruction_key(trace, row), [0, 0, 0, 0, 0, row, set()])
             for column, value in enumerate((1, achieved, ideal, excessive, conflicts)):
                 total[column] += value
@@ -194,7 +196,7 @@ def test_count_gives_the_counters_of_a_row_by_row_sum_on_every_gallery_trace():
                 c.most,
                 c.levels,
             )
-            for c in count(trace)
+            for c in count_instructions(trace)
         }
         assert found == {
             key: (*total[:6], min(total[6]), max(total[6]), len(total[6]))

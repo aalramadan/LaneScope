@@ -55,7 +55,7 @@ class Toolchain:
             raise ToolchainError(" ".join(problems))
 
 
-def find(environ: Mapping[str, str] | None = None) -> Toolchain:
+def find_toolchain(environ: Mapping[str, str] | None = None) -> Toolchain:
     """Return the tools of the first complete toolkit, or of the NVIDIA wheels.
 
     LANESCOPE_USE_WHEELS=1 takes the wheels even where a complete toolkit exists,

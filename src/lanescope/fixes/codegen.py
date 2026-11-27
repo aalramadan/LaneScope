@@ -4,7 +4,7 @@ from lanescope.fixes.layouts import Buffer, Change, Padding, XorSwizzle
 ELEMENT_TYPES = {1: "unsigned char", 2: "__half", 4: "float", 8: "double", 16: "float4"}
 
 
-def forms(buffer: Buffer, change: Change, element_bytes: int) -> list[dict]:
+def layout_change_code(buffer: Buffer, change: Change, element_bytes: int) -> list[dict]:
     """Return the labeled C++ forms of a change for a buffer of elements of a given size."""
     if element_bytes not in ELEMENT_TYPES:
         raise ValueError(f"elements must have one of {tuple(ELEMENT_TYPES)} bytes")
